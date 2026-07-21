@@ -28,6 +28,7 @@ dependencies = [
     "mne >= 1.12.1",
     "mnextend >= 0.2.2",
     "numpy >= 2.4.4",
+    "pyqtgraph >= 0.13.7",
     "pyside6 >= 6.11.0",
     "scipy >= 1.17.1",
 ]

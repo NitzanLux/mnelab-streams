@@ -4,13 +4,49 @@
 
 import math
 from pathlib import Path
+from unittest.mock import patch
 
+import mne
 import numpy as np
 import pytest
 from edfio import Edf, EdfSignal
 from mne import Annotations
 
 from mnelab.model import InvalidAnnotationsError, Model
+
+
+def test_source_streams_follow_channel_edits(tmp_path):
+    """Stored stream membership remains valid after renaming and picking channels."""
+    raw = mne.io.RawArray(
+        np.zeros((3, 20)),
+        mne.create_info(["A", "B", "C"], 100, ["eeg", "eeg", "misc"]),
+    )
+    path = tmp_path / "streams.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(
+        raw,
+        path,
+        source_streams=[
+            {"id": 1, "name": "EEG", "channel_names": ["A", "B"]},
+            {"id": 2, "name": "Aux", "channel_names": ["C"]},
+        ],
+    )
+
+    model.rename_channels(["A1", "B", "C"])
+    model.pick_channels(["A1", "C"])
+
+    assert model.current["source_streams"][0]["channel_names"] == ["A1"]
+    assert model.current["source_streams"][1]["channel_names"] == ["C"]
+
+
+def test_memory_size_does_not_copy_data(model_with_data):
+    """Memory reporting reads the preloaded array without calling `get_data()`."""
+    raw = model_with_data.current["data"]
+
+    with patch.object(raw, "get_data", side_effect=AssertionError("data copied")):
+        assert model_with_data.nbytes == raw._data.nbytes
+        assert "Size in Memory" in model_with_data.get_info()
 
 
 @pytest.fixture(scope="module")

@@ -929,6 +929,7 @@ dependencies = [
     { name = "mne" },
     { name = "mnextend" },
     { name = "numpy" },
+    { name = "pyqtgraph" },
     { name = "pyside6" },
     { name = "scipy" },
 ]
@@ -965,6 +966,7 @@ requires-dist = [
     { name = "mne-qt-browser", marker = "extra == 'full'", specifier = ">=0.7.4" },
     { name = "mnextend", specifier = ">=0.2.2" },
     { name = "numpy", specifier = ">=2.4.4" },
+    { name = "pyqtgraph", specifier = ">=0.13.7" },
     { name = "pyside6", specifier = ">=6.11.0" },
     { name = "python-picard", marker = "extra == 'full'", specifier = ">=0.8.1" },
     { name = "scikit-learn", marker = "extra == 'full'", specifier = ">=1.8.0" },

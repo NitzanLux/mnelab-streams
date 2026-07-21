@@ -41,6 +41,12 @@ class AddReferenceError(Exception):
     pass
 
 
+def _data_nbytes(data):
+    """Return in-memory data size without copying preloaded arrays."""
+    array = getattr(data, "_data", None)
+    return array.nbytes if array is not None else data.get_data().nbytes
+
+
 def data_changed(_func=None, *, invalidate_cache=True):
     """Call view.data_changed() after f(), optionally invalidating cache."""
 
@@ -137,9 +143,7 @@ class Model:
     def nbytes(self):
         """Return size (in bytes) of all data sets."""
         return sum(
-            item["data"].get_data().nbytes
-            for item in self.data
-            if item["data"] is not None
+            _data_nbytes(item["data"]) for item in self.data if item["data"] is not None
         )
 
     @property
@@ -176,6 +180,32 @@ class Model:
                     queue.append(ds["id"])
         return descendants
 
+    def set_dataset_bads(self, dataset_id, bads, data=None):
+        """Set bad channels on a dataset and invalidate its disk cache.
+
+        ``data`` keeps an open viewer's Raw object attached when memory-saving mode
+        evicted the dataset while the viewer was still open.
+
+        Returns
+        -------
+        int
+            The dataset's current list index, or ``-1`` if it was removed.
+        """
+        index = self.find_index_by_id(dataset_id)
+        if index < 0:
+            return -1
+
+        dataset = self.data[index]
+        if dataset["data"] is None:
+            if data is None:
+                raise RuntimeError("Cannot update bad channels on an evicted dataset.")
+            dataset["data"] = data
+        dataset["data"].info["bads"] = list(bads)
+        if data is not None and data is not dataset["data"]:
+            data.info["bads"] = list(bads)
+        dataset["_cache_path"] = None
+        return index
+
     @data_changed(invalidate_cache=False)
     def remove_data_cascade(self, dataset_id):
         """Remove a dataset and all its descendants."""
@@ -198,7 +228,7 @@ class Model:
             self.index = len(self.data) - 1
 
     @data_changed(invalidate_cache=False)
-    def load_data(self, data, fname, name=None):
+    def load_data(self, data, fname, name=None, source_streams=None):
         """Load a Raw or Epochs object as a new dataset.
 
         Parameters
@@ -209,6 +239,8 @@ class Model:
             The file path.
         name : str, optional
             Custom name for the dataset. If None, uses the filename.
+        source_streams : list of dict | None
+            Ordered source-stream metadata used by the stream viewer.
         """
         fname = str(Path(fname).resolve().as_posix())
         fsize = getsize(fname) / 1024**2  # convert to MB
@@ -243,6 +275,7 @@ class Model:
                 montage=montage,
                 events=events,
                 event_mapping=event_mapping,
+                source_streams=deepcopy(source_streams),
                 _cache_path=None,
             )
         )
@@ -642,7 +675,7 @@ class Model:
             "File Type": ftype.removesuffix(".GZ") if ftype else "–",
             "Data Type": dtype,
             "Size on Disk": size_disk,
-            "Size in Memory": f"{data.get_data().nbytes / 1024**2:.2f}\u2009MB",
+            "Size in Memory": f"{_data_nbytes(data) / 1024**2:.2f}\u2009MB",
             "Channels": f"{nchan} (" + chans + ")",
             "Samples": samples,
             "Sampling Frequency": f"{fs:.6g}\u2009Hz",
@@ -657,8 +690,27 @@ class Model:
     @data_changed
     def pick_channels(self, picks):
         self.current["data"] = self.current["data"].pick(picks)
+        source_streams = self.current["source_streams"]
+        if source_streams:
+            live_channels = set(self.current["data"].ch_names)
+            for stream in source_streams:
+                stream["channel_names"] = [
+                    name for name in stream["channel_names"] if name in live_channels
+                ]
+            self.current["source_streams"] = [
+                stream for stream in source_streams if stream["channel_names"]
+            ]
         self.current["name"] += " (channels picked)"
         self.history.append(f"data.pick({picks})")
+
+    def _rename_source_stream_channels(self, mapping):
+        """Keep source-stream channel membership aligned after a rename."""
+        if not self.current["source_streams"]:
+            return
+        for stream in self.current["source_streams"]:
+            stream["channel_names"] = [
+                mapping.get(name, name) for name in stream["channel_names"]
+            ]
 
     @data_changed
     def set_channel_properties(self, bads=None, names=None, types=None):
@@ -667,6 +719,7 @@ class Model:
             self.history.append(f"data.info['bads'] = {bads}")
         if names:
             mne.rename_channels(self.current["data"].info, names)
+            self._rename_source_stream_channels(names)
             self.history.append(f"mne.rename_channels(data.info, {names})")
         if types:
             self.current["data"].set_channel_types(types)
@@ -679,6 +732,7 @@ class Model:
         if not mapping:
             return
         mne.rename_channels(self.current["data"].info, mapping)
+        self._rename_source_stream_channels(mapping)
         self.history.append(f"mne.rename_channels(data.info, {mapping})")
 
     @data_changed
@@ -887,6 +941,28 @@ class Model:
         self.current["reference"] = ref
         if add:
             mne.add_reference_channels(self.current["data"], add, copy=False)
+            if self.current["source_streams"]:
+                derived = next(
+                    (
+                        stream
+                        for stream in self.current["source_streams"]
+                        if stream.get("id") == "derived"
+                    ),
+                    None,
+                )
+                if derived is None:
+                    self.current["source_streams"].append(
+                        {
+                            "id": "derived",
+                            "name": "Derived",
+                            "type": "Derived",
+                            "channel_names": list(add),
+                            "channel_format": None,
+                            "nominal_srate": self.current["data"].info["sfreq"],
+                        }
+                    )
+                else:
+                    derived["channel_names"].extend(add)
             self.history.append(f"mne.add_reference_channels(data, {add}, copy=False)")
         if ref is None:
             return

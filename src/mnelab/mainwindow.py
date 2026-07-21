@@ -5,6 +5,7 @@
 import json
 import logging
 import multiprocessing as mp
+import re
 import sys
 import traceback
 from functools import partial
@@ -81,6 +82,37 @@ SIDEBAR_MIN_WIDTH = 150
 INFOWIDGET_MIN_WIDTH = 200
 
 
+def _xdf_stream_descriptors(rows, stream_ids, skipped_stream_ids, channel_names):
+    """Build ordered source-stream descriptors for a flattened XDF Raw object."""
+    rows_by_id = {row[0]: row for row in rows}
+    descriptors = []
+    channel_offset = 0
+
+    for stream_id in stream_ids:
+        if stream_id in skipped_stream_ids:
+            continue
+        row = rows_by_id[stream_id]
+        channel_count = row[3]
+        stream_channels = channel_names[channel_offset : channel_offset + channel_count]
+        descriptors.append(
+            {
+                "id": stream_id,
+                "name": row[1] or f"Stream {stream_id}",
+                "type": row[2] or "Data",
+                "channel_names": list(stream_channels),
+                "channel_format": row[4],
+                "nominal_srate": row[5],
+            }
+        )
+        channel_offset += channel_count
+
+    if channel_offset != len(channel_names):
+        raise RuntimeError(
+            "XDF stream metadata does not match the number of loaded channels."
+        )
+    return descriptors
+
+
 class _MNELogHandler(logging.Handler):
     """Logging handler that silently captures MNE messages into a list."""
 
@@ -106,6 +138,8 @@ class MainWindow(QMainWindow):
         """
         super().__init__()
         self.model = model  # data model
+        self._stream_viewers = []
+        self._stream_viewer_bads_before = {}
         self.setWindowTitle("MNELAB")
         self.setMinimumSize(600, 500)
         sys.excepthook = self._excepthook
@@ -587,7 +621,31 @@ class MainWindow(QMainWindow):
             if index >= 0:
                 self.model.data[index]["name"] = item.text(0)
 
-    def data_changed(self):
+    def _sync_stream_viewers(self, refresh_current=True):
+        """Close stale viewers and refresh the current dataset's live viewers."""
+        for viewer in list(self._stream_viewers):
+            if getattr(viewer, "_closing_stale_data", False):
+                continue
+            index = self.model.find_index_by_id(viewer.dataset_id)
+            stale = index < 0
+            if index >= 0:
+                data = self.model.data[index]["data"]
+                stale = data is not None and not viewer.topology_matches(data)
+            if stale:
+                viewer._closing_stale_data = True
+                viewer.close()
+            elif (
+                refresh_current
+                and self.model.current is not None
+                and viewer.dataset_id == self.model.current["id"]
+            ):
+                data = self.model.data[index]["data"]
+                viewer.sync_bad_channels(data.info["bads"], redraw=False)
+                viewer.sync_events(self.model.data[index]["events"])
+                viewer.refresh()
+
+    def data_changed(self, focus_sidebar=True, refresh_stream_viewers=True):
+        self._sync_stream_viewers(refresh_stream_viewers)
         # update sidebar
         if len(self.model.data) > 0:
             self.sidebar_container.show()
@@ -612,7 +670,8 @@ class MainWindow(QMainWindow):
                 self.sidebar.setCurrentItem(id_to_item[current_id])
             self.sidebar.blockSignals(False)
             self.sidebar.style_items()
-            self.sidebar.setFocus()
+            if focus_sidebar:
+                self.sidebar.setFocus()
         else:
             self.sidebar_container.hide()
 
@@ -723,6 +782,47 @@ class MainWindow(QMainWindow):
         if len(self.model) > 0:
             self._add_recent(self.model.current["fname"])
 
+    def _load_xdf(
+        self,
+        fname,
+        stream_ids,
+        marker_ids,
+        prefix_markers,
+        fs_new,
+        gap_threshold,
+    ):
+        """Load XDF data, omitting selected streams that contain no samples."""
+        stream_ids = list(stream_ids)
+        skipped_stream_ids = []
+
+        while True:
+            try:
+                self.model.load(
+                    fname,
+                    stream_ids=stream_ids.copy(),
+                    marker_ids=marker_ids,
+                    prefix_markers=prefix_markers,
+                    fs_new=fs_new,
+                    gap_threshold=gap_threshold,
+                )
+            except ValueError as error:
+                match = re.fullmatch(r"Stream (\d+) contains no samples\.", str(error))
+                if match is None:
+                    raise
+
+                empty_stream_id = int(match.group(1))
+                if empty_stream_id not in stream_ids or len(stream_ids) == 1:
+                    raise
+
+                stream_ids.remove(empty_stream_id)
+                skipped_stream_ids.append(empty_stream_id)
+
+                # resampling was mandatory only because multiple streams were selected
+                if len(stream_ids) == 1 and gap_threshold == 0:
+                    fs_new = None
+            else:
+                return skipped_stream_ids
+
     def open_data(self, fname=None):
         """Open raw file."""
         if fname is None:
@@ -760,20 +860,34 @@ class MainWindow(QMainWindow):
                 ]
                 dialog = XDFStreamsDialog(self, rows, fname=fname)
                 if dialog.exec():
+                    selected_stream_ids = dialog.selected_streams
                     fs_new = None
                     gap_threshold = 0.0
                     if dialog.resample.isChecked():
                         fs_new = float(dialog.fs_new.value())
                         if dialog.gap_threshold_checkbox.isChecked():
                             gap_threshold = float(dialog.gap_threshold.value())
-                    self.model.load(
+                    skipped_stream_ids = self._load_xdf(
                         fname,
-                        stream_ids=dialog.selected_streams,
+                        stream_ids=selected_stream_ids,
                         marker_ids=dialog.selected_markers,
                         prefix_markers=dialog.prefix_markers,
                         fs_new=fs_new,
                         gap_threshold=gap_threshold,
                     )
+                    self.model.current["source_streams"] = _xdf_stream_descriptors(
+                        rows,
+                        selected_stream_ids,
+                        skipped_stream_ids,
+                        self.model.current["data"].ch_names,
+                    )
+                    if skipped_stream_ids:
+                        stream_text = ", ".join(map(str, skipped_stream_ids))
+                        QMessageBox.warning(
+                            self,
+                            "Empty XDF Stream",
+                            f"Skipped empty XDF stream IDs: {stream_text}.",
+                        )
             elif ext.lower() == ".mat":
                 dialog = MatDialog(self, Path(fname).name, parse_mat(fname))
                 if dialog.exec():
@@ -1151,21 +1265,95 @@ class MainWindow(QMainWindow):
 
     def plot_data(self):
         """Plot data."""
-        # self.bads is needed to update history if bad channels are selected in the
-        # interactive plot window (see also self.eventFilter)
-        self.bads = self.model.current["data"].info["bads"]
-        nchan = min(
-            self.model.current["data"].info["nchan"], read_settings("max_channels")
-        )
+        data = self.model.current["data"]
         events = self.model.current["events"]
         annotation_colors = read_settings("annotation_colors") or None
-        if annotation_colors is not None and hasattr(
-            self.model.current["data"], "annotations"
-        ):
-            descriptions = set(self.model.current["data"].annotations.description)
+        if annotation_colors is not None and hasattr(data, "annotations"):
+            descriptions = set(data.annotations.description)
             annotation_colors = {
-                k: v for k, v in annotation_colors.items() if k in descriptions
+                key: value
+                for key, value in annotation_colors.items()
+                if key in descriptions
             } or None
+
+        if self.model.current["dtype"] == "raw":
+            from mnelab.widgets.stream_viewer import StreamViewerWindow
+
+            dataset_id = self.model.current["id"]
+            self._stream_viewer_bads_before.setdefault(
+                dataset_id, list(data.info["bads"])
+            )
+            viewer = StreamViewerWindow(
+                data,
+                streams=self.model.current["source_streams"],
+                events=events,
+                annotation_colors=annotation_colors,
+                duration=read_settings("duration"),
+                max_channels=read_settings("max_channels"),
+                dataset_id=dataset_id,
+                title=self.model.current["name"],
+                parent=self,
+            )
+            self._stream_viewers.append(viewer)
+
+            def viewer_bads_changed():
+                index = self.model.set_dataset_bads(
+                    dataset_id, data.info["bads"], data=data
+                )
+                if index >= 0:
+                    canonical_bads = self.model.data[index]["data"].info["bads"]
+                    for open_viewer in self._stream_viewers:
+                        if (
+                            open_viewer is not viewer
+                            and open_viewer.dataset_id == dataset_id
+                        ):
+                            open_viewer.sync_bad_channels(canonical_bads)
+                if index == self.model.index:
+                    self.data_changed(focus_sidebar=False, refresh_stream_viewers=False)
+
+            def viewer_destroyed(*_args):
+                if viewer in self._stream_viewers:
+                    self._stream_viewers.remove(viewer)
+                remaining = any(
+                    open_viewer.dataset_id == dataset_id
+                    for open_viewer in self._stream_viewers
+                )
+                if not remaining:
+                    bads_before = self._stream_viewer_bads_before.pop(
+                        dataset_id, list(data.info["bads"])
+                    )
+                    index = self.model.find_index_by_id(dataset_id)
+                    if index >= 0:
+                        dataset_data = self.model.data[index]["data"]
+                        bads = (
+                            dataset_data.info["bads"]
+                            if dataset_data is not None
+                            else data.info["bads"]
+                        )
+                        if bads_before != bads:
+                            target = (
+                                "data"
+                                if index == self.model.index
+                                else f"datasets[{index}]"
+                            )
+                            self.model.history.append(
+                                f'{target}.info["bads"] = {bads!r}'
+                            )
+                if (
+                    self.model.current is not None
+                    and self.model.current["id"] == dataset_id
+                ):
+                    self.data_changed()
+
+            viewer.bad_channels_changed.connect(viewer_bads_changed)
+            viewer.destroyed.connect(viewer_destroyed)
+            viewer.show()
+            return
+
+        # self.bads is needed to update history if bad channels are selected in the
+        # interactive plot window (see also self.eventFilter)
+        self.bads = data.info["bads"]
+        nchan = min(data.info["nchan"], read_settings("max_channels"))
 
         kwargs = {
             "n_channels": nchan,
@@ -1175,23 +1363,16 @@ class MainWindow(QMainWindow):
             "show": False,
         }
 
-        if self.model.current["dtype"] == "epochs":
-            n_epochs = read_settings("epochs")
-            kwargs["n_epochs"] = n_epochs
-            hist_parts = [f"n_epochs={n_epochs}", f"n_channels={nchan}"]
-        else:
-            duration = read_settings("duration")
-            kwargs.update(duration=duration, clipping=None)
-            hist_parts = [f"n_channels={nchan}", f"duration={duration}"]
+        n_epochs = read_settings("epochs")
+        kwargs["n_epochs"] = n_epochs
+        hist_parts = [f"n_epochs={n_epochs}", f"n_channels={nchan}"]
         if events is not None and len(events):
             hist_parts.append("events=events")
 
         scalings = read_settings("scalings")
         if scalings == "auto":
             hist_parts.append('scalings="auto"')
-        fig = self.model.current["data"].plot(
-            scalings="auto" if scalings == "auto" else None, **kwargs
-        )
+        fig = data.plot(scalings="auto" if scalings == "auto" else None, **kwargs)
         self.model.history.append(f"data.plot({', '.join(hist_parts)})")
         if mne.viz.get_browser_backend() == "matplotlib":
             win = fig.canvas.manager.window
