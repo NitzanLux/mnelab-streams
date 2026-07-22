@@ -10,11 +10,13 @@ import numpy as np
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QMessageBox
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
 from mnelab.widgets.stream_viewer import (
     CHANNEL_LABEL_WIDTH,
+    FIT_HALF_LANE_FRACTION,
     StreamViewerWindow,
     activation_matrix,
     peak_envelope,
@@ -157,14 +159,9 @@ def test_default_panels_follow_source_stream_order(viewer):
     ] == [["EEG A", "EEG B"], ["Audio L"]]
 
 
-def test_grid_defaults_to_two_columns_and_reflows_in_place(viewer):
+def test_grid_defaults_to_one_column_and_reflows_in_place(viewer):
     """Column changes rearrange existing stream panels in source order."""
     panels = tuple(viewer.panels)
-
-    assert viewer.columns == 2
-    assert [_grid_position(viewer, panel) for panel in panels] == [(0, 0), (0, 1)]
-
-    viewer.column_spin.setValue(1)
 
     assert viewer.columns == 1
     assert all(current is original for current, original in zip(viewer.panels, panels))
@@ -173,6 +170,14 @@ def test_grid_defaults_to_two_columns_and_reflows_in_place(viewer):
     viewer.column_spin.setValue(2)
 
     assert [_grid_position(viewer, panel) for panel in panels] == [(0, 0), (0, 1)]
+
+    viewer.reset_layout()
+
+    assert viewer.columns == 1
+    assert [_grid_position(viewer, panel) for panel in viewer.panels] == [
+        (0, 0),
+        (1, 0),
+    ]
 
 
 def test_channel_axes_use_same_width_for_aligned_time_axes(viewer):
@@ -277,7 +282,7 @@ def test_floating_panel_keeps_identity_refreshes_and_redocks(qtbot, viewer, raw)
     assert eeg.parent() is viewer.panel_container
     assert [_grid_position(viewer, panel) for panel in viewer.panels] == [
         (0, 0),
-        (0, 1),
+        (1, 0),
     ]
     assert eeg.drag_handle.isEnabled()
 
@@ -336,22 +341,184 @@ def test_visible_annotations_and_events_are_drawn_on_each_panel(viewer):
         assert sum(isinstance(item, pg.LinearRegionItem) for item in items) == 1
 
 
-def test_annotation_stream_is_below_data_and_uses_vertical_text(viewer):
-    """A dedicated bottom lane shows synchronized, vertical annotation labels."""
+def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
+    """The synchronized bottom lane clips regions and wraps horizontal labels."""
     layout = viewer.centralWidget().layout()
 
     assert layout.indexOf(viewer.annotation_stream) > layout.indexOf(viewer.scroll)
     assert len(viewer.annotation_stream.labels) == 1
     label = viewer.annotation_stream.labels[0]
     assert label.textItem.toPlainText() == "Visible"
-    assert label.angle == 90
+    assert label.angle == 0
+    assert 0 < label.textItem.textWidth() <= viewer.annotation_stream.plot.width()
     assert label.pos().x() == pytest.approx(1.25)
+    assert viewer.annotation_stream._regions[0].getRegion() == pytest.approx(
+        (1.25, 1.45)
+    )
 
     viewer.set_start_time(7.5)
 
     label = viewer.annotation_stream.labels[0]
     assert label.textItem.toPlainText() == "Outside"
     assert label.pos().x() == pytest.approx(8.0)
+
+
+def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
+    """The collapsible dock browses the whole recording and filters plot overlays."""
+    annotations_before = raw.annotations.copy()
+    sidebar = viewer.annotation_sidebar
+
+    assert sidebar.list.count() == 2
+    assert sidebar.count_label.text() == "Showing 2 of 2"
+
+    sidebar.filter_edit.setText("out")
+
+    assert sidebar.list.count() == 1
+    assert "Outside" in sidebar.list.item(0).text()
+    assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert not viewer.annotation_stream.labels[0].isVisible()
+
+    sidebar.list.itemClicked.emit(sidebar.list.item(0))
+
+    assert viewer.start_time == pytest.approx(7.0)
+    assert viewer.annotation_stream.labels[0].textItem.toPlainText() == "Outside"
+    assert viewer.annotation_stream.labels[0].isVisible()
+
+    viewer.annotations_button.setChecked(False)
+    assert viewer.annotation_dock.isHidden()
+    viewer.annotations_button.setChecked(True)
+    assert not viewer.annotation_dock.isHidden()
+    np.testing.assert_array_equal(raw.annotations.onset, annotations_before.onset)
+    np.testing.assert_array_equal(
+        raw.annotations.description, annotations_before.description
+    )
+
+
+def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
+    """Regex search filters list and plots without failing on invalid syntax."""
+    sidebar = viewer.annotation_sidebar
+    sidebar.regex_checkbox.setChecked(True)
+    sidebar.filter_edit.setText(r"^vis(ible)?$")
+
+    assert sidebar.list.count() == 1
+    assert "Visible" in sidebar.list.item(0).text()
+    assert all(panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert sidebar.filter_edit.toolTip() == ("Case-insensitive annotation text filter")
+
+    sidebar.filter_edit.setText("[")
+
+    assert sidebar.list.count() == 0
+    assert sidebar.count_label.text().startswith("Invalid regex:")
+    assert "Invalid regular expression" in sidebar.filter_edit.toolTip()
+    assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+
+    sidebar.regex_checkbox.setChecked(False)
+
+    assert sidebar.count_label.text() == "Showing 0 of 2"
+
+
+def test_annotation_dock_defaults_to_ten_percent_of_viewer(qtbot, viewer):
+    """The first dock layout is narrow while later user sizing remains free."""
+    viewer.resize(1200, 800)
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    qtbot.waitUntil(lambda: viewer._annotation_dock_sized)
+
+    ratio = viewer.annotation_dock.width() / viewer.width()
+    assert ratio == pytest.approx(0.1, abs=0.025)
+
+
+def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
+    """One channel can change gain, offset, and color without affecting peers."""
+    panel = viewer.panels[0]
+    _, first_before = panel._curves[0].getData()
+    _, second_before = panel._curves[1].getData()
+    first_offset = panel._lane_step
+    first_peak = np.nanmax(np.abs(first_before - first_offset))
+
+    panel.set_channel_gain("EEG A", 2.0)
+    panel.set_channel_offset("EEG A", 0.1)
+    panel.set_channel_color("EEG A", "#00ff00")
+
+    _, first_after = panel._curves[0].getData()
+    _, second_after = panel._curves[1].getData()
+    shifted_offset = first_offset + 0.1 * panel._lane_step
+    assert np.nanmax(np.abs(first_after - shifted_offset)) == pytest.approx(
+        first_peak * 2
+    )
+    np.testing.assert_array_equal(second_after, second_before)
+    assert panel._curves[0].opts["pen"].color().name() == "#00ff00"
+    assert panel.channel_settings["EEG A"] == {
+        "gain": 2.0,
+        "offset": 0.1,
+        "remove_dc": False,
+        "color": "#00ff00",
+        "visible": True,
+    }
+
+    panel.zero_channel_offset("EEG A")
+
+    assert panel.channel_settings["EEG A"] == {
+        "gain": 2.0,
+        "offset": 0.0,
+        "remove_dc": True,
+        "color": "#00ff00",
+        "visible": True,
+    }
+
+    panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
+
+    assert panel._curves[0].opts["pen"].color().name() == "#d62728"
+
+
+def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
+    """Zero Offset keeps a DC-biased trace centered as amplitude changes."""
+    sfreq = 100.0
+    times = np.arange(100) / sfreq
+    values = 5.0 + np.sin(2 * np.pi * 5 * times)
+    raw = mne.io.RawArray(
+        values[np.newaxis],
+        mne.create_info(["DC channel"], sfreq, ["misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=1.0)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+    original = raw.get_data().copy()
+
+    _, before = panel._curves[0].getData()
+    assert abs(np.mean(before)) > 0.5
+
+    panel.zero_offset_button.click()
+
+    _, centered = panel._curves[0].getData()
+    assert np.mean(centered) == pytest.approx(0.0, abs=1e-12)
+    assert panel.channel_settings["DC channel"]["remove_dc"]
+
+    panel.amplitude.setValue(3.0)
+
+    _, amplified = panel._curves[0].getData()
+    assert np.mean(amplified) == pytest.approx(0.0, abs=1e-12)
+    assert np.ptp(amplified) == pytest.approx(np.ptp(centered) * 3.0)
+    np.testing.assert_array_equal(raw.get_data(), original)
+
+
+def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
+    """Hiding a trace keeps its list row while excluding it from Raw reads."""
+    panel = viewer.panels[0]
+
+    with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
+        panel.set_channel_visible("EEG A", False)
+
+    assert panel.page_channel_names == ["EEG A", "EEG B"]
+    assert panel.visible_channel_names == ["EEG B"]
+    assert panel.channel_list.item(0).font().italic()
+    assert get_data.call_args.kwargs["picks"] == ["EEG B", "Audio L"]
+
+    panel.set_channel_visible("EEG A", True)
+
+    assert panel.visible_channel_names == ["EEG A", "EEG B"]
+    assert not panel.channel_list.item(0).font().italic()
 
 
 def test_swap_selected_exchanges_panel_locations(viewer):
@@ -366,6 +533,77 @@ def test_swap_selected_exchanges_panel_locations(viewer):
     assert viewer.display_groups == ((22,), (11,))
     assert [panel.title for panel in viewer.panels] == ["Audio", "BrainAmp"]
     assert not viewer.swap_button.isEnabled()
+
+
+def test_display_montage_save_load_round_trip_is_clean(viewer, tmp_path):
+    """A loaded display montage restores its state and becomes the baseline."""
+    viewer.column_spin.setValue(1)
+    viewer.set_duration(3.0)
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+    viewer.panels[0].gain.setValue(2.5)
+    expected = viewer.display_montage_state()
+    path = tmp_path / "joined-layout.json"
+
+    assert viewer.save_display_montage(path)
+    assert not viewer.display_montage_changed
+
+    viewer.reset_layout()
+    viewer.set_duration(1.0)
+    assert viewer.display_montage_changed
+
+    assert viewer.load_display_montage(path)
+    assert viewer.display_montage_state() == expected
+    assert viewer.display_groups == ((11, 22),)
+    assert viewer.columns == 1
+    assert viewer.duration == pytest.approx(3.0)
+    assert viewer.panels[0].gain.value() == pytest.approx(2.5)
+    assert not viewer.display_montage_changed
+
+
+def test_loaded_unchanged_montage_does_not_prompt_on_close(
+    qtbot, raw, streams, tmp_path
+):
+    """Closing an unchanged loaded montage does not show the save question."""
+    viewer = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    path = tmp_path / "clean-layout.json"
+    assert viewer.save_display_montage(path)
+    viewer.reset_layout()
+    assert viewer.load_display_montage(path)
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+
+    with patch("mnelab.widgets.stream_viewer.QMessageBox.warning") as warning:
+        viewer.close()
+
+    qtbot.waitUntil(lambda: not viewer.isVisible())
+    warning.assert_not_called()
+    assert viewer._closing
+
+
+def test_changed_montage_close_offers_save(qtbot, viewer):
+    """Closing a changed display offers Save and honors a cancelled save."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    viewer.column_spin.setValue(2)
+    assert viewer.display_montage_changed
+
+    with (
+        patch(
+            "mnelab.widgets.stream_viewer.QMessageBox.warning",
+            return_value=QMessageBox.StandardButton.Save,
+        ) as warning,
+        patch.object(viewer, "save_display_montage", return_value=False) as save,
+    ):
+        assert not viewer.close()
+
+    warning.assert_called_once()
+    save.assert_called_once_with()
+    assert viewer.isVisible()
+    assert not viewer._closing
+    viewer._display_montage_baseline = viewer.display_montage_state()
+    viewer.hide()
 
 
 def test_missing_source_metadata_falls_back_to_channel_types(qtbot, raw):
@@ -773,7 +1011,8 @@ def test_fit_to_pane_uses_loudest_channel_and_preserves_amplitude(qtbot):
 
     assert panel.amplitude.value() == pytest.approx(2.5)
     assert panel.settings["gain"] == pytest.approx(2.5)
-    target_half_lane = 0.45 * panel._lane_step
+    target_half_lane = FIT_HALF_LANE_FRACTION * panel._lane_step
+    assert 2 * target_half_lane == pytest.approx(0.99 * panel._lane_step)
     offsets = (
         channel_count - 1 - np.arange(channel_count, dtype=float)
     ) * panel._lane_step
@@ -786,8 +1025,8 @@ def test_fit_to_pane_uses_loudest_channel_and_preserves_amplitude(qtbot):
     assert all(peak <= target_half_lane * (1 + 1e-12) for peak in plotted_peaks)
 
 
-def test_source_scale_stays_fixed_until_explicit_autoscale(qtbot):
-    """Navigating preserves amplitude differences until Autoscale is requested."""
+def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
+    """Navigation preserves scale until Fit uses the currently cached samples."""
     sfreq = 100.0
     times = np.arange(1000) / sfreq
     values = np.sin(2 * np.pi * 4 * times) * 1e-6
@@ -808,10 +1047,16 @@ def test_source_scale_stays_fixed_until_explicit_autoscale(qtbot):
     assert window._display_scales[source_id] == initial_scale
     _, plotted = panel._curves[0].getData()
     assert np.nanmax(np.abs(plotted)) > 20
+    expected_scale = (
+        np.nanmax(np.abs(panel._values[0]))
+        * panel.amplitude.value()
+        / (FIT_HALF_LANE_FRACTION * panel._lane_step)
+    )
 
     panel.autoscale()
 
-    assert window._display_scales[source_id] > initial_scale * 50
+    assert window._display_scales[source_id] == pytest.approx(expected_scale)
+    assert expected_scale > initial_scale * 50
     _, plotted = panel._curves[0].getData()
     assert np.nanmax(np.abs(plotted)) < 2
 

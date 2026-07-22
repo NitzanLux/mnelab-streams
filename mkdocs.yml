@@ -6,6 +6,7 @@ copyright: © MNELAB Developers
 nav:
   - Home: index.md
   - Quick Start: quickstart/index.md
+  - Software Specification: software-specification.md
   - Documentation:
     - documentation/index.md
     - Settings: documentation/settings.md

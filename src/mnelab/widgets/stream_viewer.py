@@ -2,8 +2,10 @@
 #
 # License: BSD (3-clause)
 
+import json
 from collections import OrderedDict
 from copy import deepcopy
+from pathlib import Path
 
 import numpy as np
 import pyqtgraph as pg
@@ -22,15 +24,21 @@ from PySide6.QtGui import QColor, QCursor, QDrag, QKeyEvent
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QColorDialog,
     QComboBox,
+    QDockWidget,
     QDoubleSpinBox,
+    QFileDialog,
     QFrame,
     QGridLayout,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
+    QMessageBox,
     QPushButton,
     QScrollArea,
     QSlider,
@@ -38,6 +46,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mnelab.widgets.viewer_controls import AnnotationSidebar
 
 UNIT_FACTORS = {
     "V": 1.0,
@@ -90,6 +100,9 @@ AMPLITUDE_STEP = 1.25
 MIN_AMPLITUDE = 0.001
 MAX_AMPLITUDE = 1000.0
 CHANNEL_LABEL_WIDTH = 145
+# Fill 99% of the center-to-center lane spacing while retaining a visible gap.
+FIT_HALF_LANE_FRACTION = 0.495
+DEFAULT_TRACE_COLOR = "#4c78a8"
 
 
 def peak_envelope(times, values, max_points):
@@ -416,6 +429,8 @@ class StreamPanel(QFrame):
         events,
         annotation_colors,
         display_scales,
+        channel_settings,
+        annotation_visible=None,
         unit="Auto",
         gain=1.0,
         channels_per_page=20,
@@ -429,6 +444,8 @@ class StreamPanel(QFrame):
         self.set_events(events)
         self.annotation_colors = annotation_colors or {}
         self.display_scales = display_scales
+        self.channel_settings = channel_settings
+        self.annotation_visible = annotation_visible or (lambda _description: True)
         self.channel_names = [
             name for source in sources for name in source["channel_names"]
         ]
@@ -529,11 +546,17 @@ class StreamPanel(QFrame):
         header.addWidget(self.amplitude_up_button)
         self.autoscale_button = QPushButton("Fit to Pane")
         self.autoscale_button.setToolTip(
-            "Fit every source to its channel lanes without resetting amplitude"
+            "Fit traces nearly edge-to-edge in their lanes without overlap"
         )
         self.autoscale_button.clicked.connect(self.fit_to_pane)
         self.fit_to_pane_button = self.autoscale_button
         header.addWidget(self.autoscale_button)
+        self.zero_offset_button = QPushButton("Zero Offset")
+        self.zero_offset_button.setToolTip(
+            "Remove each visible channel's DC offset before amplitude scaling"
+        )
+        self.zero_offset_button.clicked.connect(self.zero_visible_offsets)
+        header.addWidget(self.zero_offset_button)
         header.addWidget(QLabel("Scale:"))
         self.scale_label = QLabel()
         self.scale_label.setMinimumWidth(110)
@@ -545,9 +568,15 @@ class StreamPanel(QFrame):
         body.setContentsMargins(0, 0, 0, 0)
         self.channel_list = QListWidget()
         self.channel_list.setFixedWidth(CHANNEL_LABEL_WIDTH)
-        self.channel_list.setToolTip("Click a channel to toggle its bad-channel status")
+        self.channel_list.setToolTip(
+            "Click to toggle bad status; right-click for channel display properties"
+        )
         self.channel_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.channel_list.itemClicked.connect(self._toggle_bad_channel)
+        self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.channel_list.customContextMenuRequested.connect(
+            self._show_channel_context_menu
+        )
         body.addWidget(self.channel_list)
 
         self.plot = pg.PlotWidget()
@@ -592,6 +621,17 @@ class StreamPanel(QFrame):
 
     @property
     def visible_channel_names(self):
+        start = self._page * self.channels_per_page
+        stop = start + self.channels_per_page
+        return [
+            name
+            for name in self.channel_names[start:stop]
+            if self.channel_settings[name]["visible"]
+        ]
+
+    @property
+    def page_channel_names(self):
+        """Return the stable page, including channels hidden from the plot."""
         start = self._page * self.channels_per_page
         stop = start + self.channels_per_page
         return self.channel_names[start:stop]
@@ -653,11 +693,229 @@ class StreamPanel(QFrame):
         )
 
     def fit_to_pane(self):
-        """Fit source amplitudes inside their lanes, preserving amplitude."""
-        for source in self.sources:
+        """Fit source amplitudes using only the cached current time window."""
+        if not self._values.size:
+            return
+        visible_names = self.visible_channel_names
+        amplitude = self.amplitude.value()
+        for source_index, source in enumerate(self.sources):
+            indices = [
+                index
+                for index, name in enumerate(visible_names)
+                if self._source_by_channel[name] == source_index
+            ]
+            if indices:
+                self.display_scales[source["id"]] = self._window_source_scale(
+                    indices, visible_names, amplitude
+                )
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def set_channel_gain(self, name, gain):
+        """Set one channel's multiplicative display gain."""
+        gain = float(np.clip(gain, MIN_AMPLITUDE, MAX_AMPLITUDE))
+        if self.channel_settings[name]["gain"] == gain:
+            return
+        self.channel_settings[name]["gain"] = gain
+        self._update_channel_list()
+        self._settings_updated()
+
+    def set_channel_offset(self, name, offset):
+        """Set one channel's vertical offset in lane units."""
+        offset = float(np.clip(offset, -1.0, 1.0))
+        if self.channel_settings[name]["offset"] == offset:
+            return
+        self.channel_settings[name]["offset"] = offset
+        self._settings_updated()
+
+    def zero_channel_offset(self, name):
+        """Center one channel by removing its visible-window DC component."""
+        settings = self.channel_settings[name]
+        if settings["remove_dc"] and settings["offset"] == 0.0:
+            return
+        settings["remove_dc"] = True
+        settings["offset"] = 0.0
+        source = self.sources[self._source_by_channel[name]]
+        self.display_scales.pop(source["id"], None)
+        self._settings_updated()
+
+    def restore_channel_dc(self, name):
+        """Show one channel with its original DC component."""
+        settings = self.channel_settings[name]
+        if not settings["remove_dc"]:
+            return
+        settings["remove_dc"] = False
+        source = self.sources[self._source_by_channel[name]]
+        self.display_scales.pop(source["id"], None)
+        self._settings_updated()
+
+    def zero_visible_offsets(self):
+        """Remove DC offsets from every channel on the current page."""
+        changed = False
+        for name in self.visible_channel_names:
+            settings = self.channel_settings[name]
+            changed |= not settings["remove_dc"] or settings["offset"] != 0.0
+            settings["remove_dc"] = True
+            settings["offset"] = 0.0
+            source = self.sources[self._source_by_channel[name]]
             self.display_scales.pop(source["id"], None)
-        if self._values.size:
-            self.redraw(self._visible_start, self._visible_duration)
+        if changed:
+            self._settings_updated()
+
+    def set_channel_color(self, name, color):
+        """Set or clear one channel's trace color."""
+        color = QColor(color).name() if color else None
+        if self.channel_settings[name]["color"] == color:
+            return
+        self.channel_settings[name]["color"] = color
+        self._update_channel_list()
+        self._settings_updated()
+
+    def set_channel_visible(self, name, visible):
+        """Show or hide one channel without removing its restorable list row."""
+        visible = bool(visible)
+        if self.channel_settings[name]["visible"] == visible:
+            return
+        self.channel_settings[name]["visible"] = visible
+        self._values = np.empty((len(self.visible_channel_names), 0))
+        self._axis_channels = None
+        self._resize_curves()
+        self._update_channel_list()
+        self.page_changed.emit()
+        self._settings_updated()
+
+    def reset_channel_display(self, name):
+        """Restore one channel's display-only properties."""
+        self.channel_settings[name] = {
+            "gain": 1.0,
+            "offset": 0.0,
+            "remove_dc": False,
+            "color": None,
+            "visible": True,
+        }
+        self._values = np.empty((len(self.visible_channel_names), 0))
+        self._axis_channels = None
+        self._resize_curves()
+        self._update_channel_list()
+        self.page_changed.emit()
+        self._settings_updated()
+
+    def fit_channel_to_pane(self, name):
+        """Fit a single visible channel without changing its panel peers."""
+        if name not in self.visible_channel_names or not self._values.size:
+            return
+        row = self.visible_channel_names.index(name)
+        peak = _finite_peak(self._display_values(name, self._values[row]))
+        source = self.sources[self._source_by_channel[name]]
+        source_scale = self.display_scales.get(source["id"])
+        if source_scale is None:
+            return
+        target = FIT_HALF_LANE_FRACTION * self._lane_step
+        gain = source_scale * target / (peak * self.amplitude.value())
+        self.set_channel_gain(name, gain)
+
+    def _show_channel_context_menu(self, position):
+        item = self.channel_list.itemAt(position)
+        if item is None:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+        settings = self.channel_settings[name]
+        menu = QMenu(self.channel_list)
+        visible = menu.addAction("Show Trace")
+        visible.setCheckable(True)
+        visible.setChecked(settings["visible"])
+        visible.toggled.connect(
+            lambda checked, name=name: self.set_channel_visible(name, checked)
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Increase Amplitude",
+            lambda _checked=False, name=name: self.set_channel_gain(
+                name, self.channel_settings[name]["gain"] * AMPLITUDE_STEP
+            ),
+        )
+        menu.addAction(
+            "Decrease Amplitude",
+            lambda _checked=False, name=name: self.set_channel_gain(
+                name, self.channel_settings[name]["gain"] / AMPLITUDE_STEP
+            ),
+        )
+        menu.addAction(
+            "Fit Channel to Pane",
+            lambda _checked=False, name=name: self.fit_channel_to_pane(name),
+        )
+        menu.addAction(
+            "Set Amplitude…",
+            lambda _checked=False, name=name: self._choose_channel_gain(name),
+        )
+        menu.addAction(
+            "Set Vertical Offset…",
+            lambda _checked=False, name=name: self._choose_channel_offset(name),
+        )
+        zero_offset = menu.addAction("Zero Offset (Remove DC)")
+        zero_offset.setCheckable(True)
+        zero_offset.setChecked(settings["remove_dc"])
+        zero_offset.setEnabled(settings["visible"])
+        zero_offset.toggled.connect(
+            lambda checked, name=name: (
+                self.zero_channel_offset(name)
+                if checked
+                else self.restore_channel_dc(name)
+            )
+        )
+        menu.addSeparator()
+        menu.addAction(
+            "Set Trace Color…",
+            lambda _checked=False, name=name: self._choose_channel_color(name),
+        )
+        if settings["color"]:
+            menu.addAction(
+                "Use Automatic Color",
+                lambda _checked=False, name=name: self.set_channel_color(name, None),
+            )
+        menu.addSeparator()
+        bad = menu.addAction("Mark as Bad")
+        bad.setCheckable(True)
+        bad.setChecked(name in self.raw.info["bads"])
+        bad.triggered.connect(
+            lambda _checked=False, item=item: self._toggle_bad_channel(item)
+        )
+        menu.addAction(
+            "Reset Channel Display",
+            lambda _checked=False, name=name: self.reset_channel_display(name),
+        )
+        menu.exec(self.channel_list.viewport().mapToGlobal(position))
+
+    def _choose_channel_gain(self, name):
+        value, accepted = QInputDialog.getDouble(
+            self,
+            f"{name} Amplitude",
+            "Amplitude multiplier:",
+            self.channel_settings[name]["gain"],
+            MIN_AMPLITUDE,
+            MAX_AMPLITUDE,
+            3,
+        )
+        if accepted:
+            self.set_channel_gain(name, value)
+
+    def _choose_channel_offset(self, name):
+        value, accepted = QInputDialog.getDouble(
+            self,
+            f"{name} Vertical Offset",
+            "Offset in channel lanes:",
+            self.channel_settings[name]["offset"],
+            -1.0,
+            1.0,
+            3,
+        )
+        if accepted:
+            self.set_channel_offset(name, value)
+
+    def _choose_channel_color(self, name):
+        current = self.channel_settings[name]["color"] or DEFAULT_TRACE_COLOR
+        color = QColorDialog.getColor(QColor(current), self, f"{name} Trace Color")
+        if color.isValid():
+            self.set_channel_color(name, color.name())
 
     def change_amplitude(self, factor):
         """Multiply displayed amplitude using the EMG viewer's 1.25× model."""
@@ -755,14 +1013,23 @@ class StreamPanel(QFrame):
     def _update_channel_list(self):
         self.channel_list.clear()
         bads = set(self.raw.info["bads"])
-        for name in self.visible_channel_names:
+        for name in self.page_channel_names:
             item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, name)
+            settings = self.channel_settings[name]
             if name in bads:
                 item.setForeground(QColor("red"))
                 font = item.font()
                 font.setStrikeOut(True)
                 item.setFont(font)
+            elif not settings["visible"]:
+                item.setForeground(QColor("gray"))
+                font = item.font()
+                font.setItalic(True)
+                item.setFont(font)
+                item.setToolTip("Trace hidden; right-click to show it")
+            elif settings["color"]:
+                item.setForeground(QColor(settings["color"]))
             self.channel_list.addItem(item)
 
     def _toggle_bad_channel(self, item):
@@ -786,8 +1053,10 @@ class StreamPanel(QFrame):
         )
 
     def _mouse_moved(self, scene_pos):
-        if not self.plot.sceneBoundingRect().contains(scene_pos) or not len(
-            self._times
+        if (
+            not self.plot.sceneBoundingRect().contains(scene_pos)
+            or not len(self._times)
+            or not self.visible_channel_names
         ):
             return
         point = self.plot.getPlotItem().vb.mapSceneToView(scene_pos)
@@ -805,6 +1074,26 @@ class StreamPanel(QFrame):
             f"t={self._times[sample]:.4f} s   {visible_names[channel]}="
             f"{value * factor:.6g} {unit_label}"
         )
+
+    def _display_values(self, name, values):
+        """Return display-only values with optional visible-window DC removal."""
+        if not self.channel_settings[name]["remove_dc"]:
+            return values
+        finite = values[np.isfinite(values)]
+        dc_offset = float(np.mean(finite)) if finite.size else 0.0
+        return values - dc_offset
+
+    def _window_source_scale(self, indices, visible_names, amplitude):
+        """Return a fitted source scale from the current cached window only."""
+        target_half_lane = FIT_HALF_LANE_FRACTION * self._lane_step
+        peak = max(
+            _finite_peak(
+                self._display_values(visible_names[index], self._values[index])
+            )
+            * self.channel_settings[visible_names[index]]["gain"]
+            for index in indices
+        )
+        return peak * amplitude / target_half_lane
 
     def refresh(self, start_time, duration, times, values):
         """Draw a shared visible-window slice supplied by the parent viewer."""
@@ -827,6 +1116,8 @@ class StreamPanel(QFrame):
         if not self._values.size:
             for curve in self._curves:
                 curve.hide()
+            self._draw_overlays(start_time, start_time + duration)
+            self.plot.setXRange(start_time, start_time + duration, padding=0)
             return
 
         amplitude = self.amplitude.value()
@@ -843,11 +1134,10 @@ class StreamPanel(QFrame):
             source_id = source["id"]
             source_peak = self.display_scales.get(source_id)
             if source_peak is None:
-                target_half_lane = 0.45 * self._lane_step
-                source_peak = (
-                    max(_finite_peak(self._values[index]) for index in indices)
-                    * amplitude
-                    / target_half_lane
+                source_peak = self._window_source_scale(
+                    indices,
+                    visible_names,
+                    amplitude,
                 )
                 self.display_scales[source_id] = source_peak
             source_scales[source_index] = source_peak
@@ -886,14 +1176,22 @@ class StreamPanel(QFrame):
                 curve.hide()
                 continue
             name = visible_names[index]
-            values = self._values[index]
-            normalized = values / channel_scales[index] * amplitude + offsets[index]
+            values = self._display_values(name, self._values[index])
+            settings = self.channel_settings[name]
+            normalized = (
+                values / channel_scales[index] * amplitude * settings["gain"]
+                + offsets[index]
+                + settings["offset"] * self._lane_step
+            )
             x, y = peak_envelope(self._times, normalized, max_points)
             color = (
                 "#d62728"
                 if name in bads
-                else pg.intColor(
-                    self._channel_indices[name], max(1, len(self.channel_names))
+                else (
+                    settings["color"]
+                    or pg.intColor(
+                        self._channel_indices[name], max(1, len(self.channel_names))
+                    )
                 )
             )
             curve.setData(x, y)
@@ -953,10 +1251,16 @@ class StreamPanel(QFrame):
             ):
                 start = float(onset - self.raw.first_time)
                 stop = start + max(float(duration), 1 / sfreq)
-                if stop < visible_start or start > visible_stop:
+                if (
+                    stop < visible_start
+                    or start > visible_stop
+                    or not self.annotation_visible(description)
+                ):
                     continue
                 color = self.annotation_colors.get(description, "#4c78a8")
-                visible_annotations.append((start, stop, color))
+                visible_annotations.append(
+                    (max(start, visible_start), min(stop, visible_stop), color)
+                )
         while len(self._annotation_regions) < len(visible_annotations):
             region = pg.LinearRegionItem(values=(0, 0), movable=False)
             region.setZValue(-10)
@@ -978,14 +1282,27 @@ class StreamPanel(QFrame):
 
 
 class AnnotationStream(QFrame):
-    """Dedicated timeline lane that renders annotation descriptions vertically."""
+    """Dedicated timeline lane with bounded, wrapped annotation labels."""
 
-    def __init__(self, raw, annotation_colors=None, parent=None):
+    def __init__(
+        self,
+        raw,
+        annotation_colors=None,
+        annotation_visible=None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.raw = raw
         self.annotation_colors = annotation_colors or {}
+        self.annotation_visible = annotation_visible or (lambda _description: True)
         self._regions = []
         self._labels = []
+        self._last_window = None
+        self._wrapped_plot_width = None
+        self._resize_timer = QTimer(self)
+        self._resize_timer.setSingleShot(True)
+        self._resize_timer.setInterval(20)
+        self._resize_timer.timeout.connect(self._refresh_after_resize)
         self.setFrameShape(QFrame.Shape.StyledPanel)
 
         layout = QHBoxLayout(self)
@@ -1019,6 +1336,9 @@ class AnnotationStream(QFrame):
     def refresh(self, visible_start, duration):
         """Draw annotations that overlap the shared visible time window."""
         visible_stop = visible_start + duration
+        self._last_window = (visible_start, duration)
+        self.plot.setXRange(visible_start, visible_stop, padding=0)
+        self.plot.setYRange(0, 1, padding=0)
         sfreq = float(self.raw.info["sfreq"])
         visible_annotations = []
         if hasattr(self.raw, "annotations"):
@@ -1029,21 +1349,34 @@ class AnnotationStream(QFrame):
             ):
                 start = float(onset - self.raw.first_time)
                 stop = start + max(float(annotation_duration), 1 / sfreq)
-                if stop < visible_start or start > visible_stop:
+                if (
+                    stop < visible_start
+                    or start > visible_stop
+                    or not self.annotation_visible(description)
+                ):
                     continue
                 color = self.annotation_colors.get(description, "#4c78a8")
-                visible_annotations.append((start, stop, str(description), color))
+                visible_annotations.append(
+                    (
+                        max(start, visible_start),
+                        min(stop, visible_stop),
+                        str(description),
+                        color,
+                    )
+                )
 
         while len(self._regions) < len(visible_annotations):
             region = pg.LinearRegionItem(values=(0, 0), movable=False)
             region.setZValue(-10)
             self.plot.addItem(region)
             self._regions.append(region)
-            label = pg.TextItem(anchor=(0, 0), angle=90, ensureInBounds=True)
+            label = pg.TextItem(anchor=(0, 0.5), angle=0, ensureInBounds=True)
             label.setZValue(20)
             self.plot.addItem(label)
             self._labels.append(label)
 
+        plot_width = max(1.0, self.plot.getViewBox().sceneBoundingRect().width())
+        self._wrapped_plot_width = plot_width
         for index, (region, label) in enumerate(zip(self._regions, self._labels)):
             if index >= len(visible_annotations):
                 region.hide()
@@ -1056,13 +1389,30 @@ class AnnotationStream(QFrame):
             for line in region.lines:
                 line.setPen(pg.mkPen(color))
             label.setText(description, color=color)
-            label.setPos(max(start, visible_start), 0.05)
+            remaining_fraction = max(0.0, (visible_stop - start) / duration)
+            region_fraction = max(0.0, (stop - start) / duration)
+            text_width = min(
+                remaining_fraction * plot_width,
+                max(40.0, region_fraction * plot_width),
+            )
+            label.setTextWidth(max(1.0, text_width - 6.0))
+            label.setPos(start, 0.5)
             label.setToolTip(description)
             region.show()
             label.show()
 
-        self.plot.setXRange(visible_start, visible_stop, padding=0)
-        self.plot.setYRange(0, 1, padding=0)
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        plot_width = self.plot.getViewBox().sceneBoundingRect().width()
+        if self._last_window is not None and (
+            self._wrapped_plot_width is None
+            or abs(plot_width - self._wrapped_plot_width) > 1
+        ):
+            self._resize_timer.start()
+
+    def _refresh_after_resize(self):
+        if self._last_window is not None:
+            self.refresh(*self._last_window)
 
 
 class ActivationMapWindow(QMainWindow):
@@ -1282,10 +1632,20 @@ class StreamViewerWindow(QMainWindow):
             for stream in self.source_streams
         }
         self._display_scales = {}
+        self._channel_settings = {
+            name: {
+                "gain": 1.0,
+                "offset": 0.0,
+                "remove_dc": False,
+                "color": None,
+                "visible": True,
+            }
+            for name in raw.ch_names
+        }
         self.panels = []
         self._detached_windows = {}
         self._closing = False
-        self._columns = min(2, max(1, len(self._groups)))
+        self._columns = 1
         self.activation_map_window = None
         self._activation_cache = None
         self._activation_task = None
@@ -1306,6 +1666,23 @@ class StreamViewerWindow(QMainWindow):
         self._viewport_timer.timeout.connect(self.refresh)
         self.setWindowTitle(title or "Stream Viewer")
         self.resize(1200, 800)
+
+        self.annotation_sidebar = AnnotationSidebar(raw, parent=self)
+        self.annotation_sidebar.filter_changed.connect(self._annotation_filter_changed)
+        self.annotation_sidebar.annotation_selected.connect(self._center_on_annotation)
+        self.annotation_dock = QDockWidget("Annotations", self)
+        self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
+        self.annotation_dock.setAllowedAreas(
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
+        )
+        self.annotation_dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        self.annotation_dock.setWidget(self.annotation_sidebar)
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
+        self._annotation_dock_sized = False
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -1331,6 +1708,16 @@ class StreamViewerWindow(QMainWindow):
             "Show relative activity across every source stream"
         )
         self.activation_map_button.clicked.connect(self.show_activation_map)
+        self.annotations_button = QPushButton("Annotations")
+        self.annotations_button.setCheckable(True)
+        self.annotations_button.setChecked(True)
+        self.annotations_button.setToolTip(
+            "Show or collapse the whole-recording annotation browser"
+        )
+        self.annotations_button.toggled.connect(self.annotation_dock.setVisible)
+        self.annotation_dock.visibilityChanged.connect(
+            self.annotations_button.setChecked
+        )
         self.column_spin = QSpinBox()
         self.column_spin.setRange(1, max(1, len(self._groups)))
         self.column_spin.setValue(self._columns)
@@ -1343,6 +1730,7 @@ class StreamViewerWindow(QMainWindow):
         controls.addWidget(QLabel("Columns:"))
         controls.addWidget(self.column_spin)
         controls.addWidget(self.activation_map_button)
+        controls.addWidget(self.annotations_button)
         controls.addStretch()
         layout.addLayout(controls)
 
@@ -1364,10 +1752,11 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_stream = AnnotationStream(
             raw,
             self.annotation_colors,
+            annotation_visible=self.annotation_sidebar.plot_accepts,
             parent=central,
         )
         self.annotation_stream.setToolTip(
-            "Annotation descriptions; labels are rotated 90 degrees"
+            "Annotation descriptions wrap inside the visible plot width"
         )
         layout.addWidget(self.annotation_stream)
 
@@ -1402,10 +1791,309 @@ class StreamViewerWindow(QMainWindow):
         self._rebuild_panels()
         self._sync_navigation()
         self.refresh()
+        self._display_montage_path = None
+        self._display_montage_baseline = self.display_montage_state()
+        self._create_display_montage_menu()
 
     @property
     def display_groups(self):
         return tuple(tuple(stream["id"] for stream in group) for group in self._groups)
+
+    def _create_display_montage_menu(self):
+        """Add viewer-local actions for reusable display arrangements."""
+        menu = self.menuBar().addMenu("&Montage")
+        self.load_montage_action = menu.addAction(
+            "&Load Display Montage...", self.load_display_montage
+        )
+        self.save_montage_action = menu.addAction(
+            "&Save Display Montage", self.save_display_montage
+        )
+        self.save_montage_as_action = menu.addAction(
+            "Save Display Montage &As...",
+            lambda: self.save_display_montage(save_as=True),
+        )
+
+    def display_montage_state(self):
+        """Return the JSON-compatible state of the current display arrangement."""
+        source_indices = {
+            id(stream): index for index, stream in enumerate(self.source_streams)
+        }
+        panels = []
+        for group, panel in zip(self._groups, self.panels, strict=True):
+            panels.append(
+                {
+                    "sources": [source_indices[id(stream)] for stream in group],
+                    "settings": deepcopy(panel.settings),
+                    "floating": self.is_panel_floating(panel),
+                }
+            )
+
+        display_scales = []
+        for stream in self.source_streams:
+            scale = self._display_scales.get(stream["id"])
+            display_scales.append(None if scale is None else float(scale))
+
+        return {
+            "format": "mnelab-display-montage",
+            "version": 1,
+            "sources": [
+                {
+                    "name": stream["name"],
+                    "type": stream["type"],
+                    "channel_names": list(stream["channel_names"]),
+                }
+                for stream in self.source_streams
+            ],
+            "panels": panels,
+            "columns": self._columns,
+            "duration": float(self._duration),
+            "display_scales": display_scales,
+            "channel_settings": deepcopy(getattr(self, "_channel_settings", {})),
+        }
+
+    @property
+    def display_montage_changed(self):
+        """Return whether the display differs from its last load/save baseline."""
+        baseline = getattr(self, "_display_montage_baseline", None)
+        return baseline is not None and self.display_montage_state() != baseline
+
+    def _validated_display_montage(self, state):
+        """Validate ``state`` and return its groups mapped to current streams."""
+        if not isinstance(state, dict):
+            raise ValueError("The montage file must contain a JSON object.")
+        if state.get("format") != "mnelab-display-montage":
+            raise ValueError("This is not an MNELAB display montage file.")
+        if state.get("version") != 1:
+            raise ValueError("This display montage version is not supported.")
+
+        current_sources = [
+            {
+                "name": stream["name"],
+                "type": stream["type"],
+                "channel_names": list(stream["channel_names"]),
+            }
+            for stream in self.source_streams
+        ]
+        if state.get("sources") != current_sources:
+            raise ValueError(
+                "The montage sources and channels do not match this recording."
+            )
+
+        panel_states = state.get("panels")
+        if not isinstance(panel_states, list) or not panel_states:
+            raise ValueError("The display montage does not define any panels.")
+        source_count = len(self.source_streams)
+        flattened = []
+        groups = []
+        settings = []
+        floating = set()
+        for panel_index, panel_state in enumerate(panel_states):
+            if not isinstance(panel_state, dict):
+                raise ValueError("Every display panel must be a JSON object.")
+            indices = panel_state.get("sources")
+            if not isinstance(indices, list) or not indices:
+                raise ValueError("Every display panel must contain a source.")
+            if any(type(index) is not int for index in indices):
+                raise ValueError("Display montage source indices must be integers.")
+            if any(index < 0 or index >= source_count for index in indices):
+                raise ValueError("A display montage source index is out of range.")
+            flattened.extend(indices)
+            groups.append([self.source_streams[index] for index in indices])
+
+            panel_settings = panel_state.get("settings", {})
+            if not isinstance(panel_settings, dict):
+                raise ValueError("Display panel settings must be a JSON object.")
+            unit = panel_settings.get("unit", "Auto")
+            gain = panel_settings.get("gain", 1.0)
+            if not isinstance(unit, str) or isinstance(gain, bool):
+                raise ValueError("A display panel unit or gain is invalid.")
+            try:
+                gain = float(gain)
+            except (TypeError, ValueError) as error:
+                raise ValueError("A display panel gain is invalid.") from error
+            if not np.isfinite(gain) or gain <= 0:
+                raise ValueError("A display panel gain is invalid.")
+            panel_settings = deepcopy(panel_settings)
+            panel_settings["unit"] = unit
+            panel_settings["gain"] = gain
+            settings.append(deepcopy(panel_settings))
+            if panel_state.get("floating", False):
+                floating.add(tuple(stream["id"] for stream in groups[-1]))
+
+        if sorted(flattened) != list(range(source_count)):
+            raise ValueError(
+                "Every recording source must occur exactly once in the montage."
+            )
+
+        columns = state.get("columns", 1)
+        if type(columns) is not int or columns < 1:
+            raise ValueError("The display montage column count is invalid.")
+        duration = state.get("duration", self._duration)
+        if isinstance(duration, bool):
+            raise ValueError("The display montage duration is invalid.")
+        try:
+            duration = float(duration)
+        except (TypeError, ValueError) as error:
+            raise ValueError("The display montage duration is invalid.") from error
+        if not np.isfinite(duration) or duration <= 0:
+            raise ValueError("The display montage duration is invalid.")
+
+        display_scales = state.get("display_scales", [None] * source_count)
+        if not isinstance(display_scales, list) or len(display_scales) != source_count:
+            raise ValueError("The display montage scale list is invalid.")
+        validated_scales = []
+        for scale in display_scales:
+            if scale is None:
+                validated_scales.append(None)
+                continue
+            if isinstance(scale, bool):
+                raise ValueError("A display montage scale is invalid.")
+            try:
+                scale = float(scale)
+            except (TypeError, ValueError) as error:
+                raise ValueError("A display montage scale is invalid.") from error
+            if not np.isfinite(scale) or scale <= 0:
+                raise ValueError("A display montage scale is invalid.")
+            validated_scales.append(scale)
+
+        channel_settings = state.get("channel_settings", {})
+        if not isinstance(channel_settings, dict):
+            raise ValueError("The display montage channel settings are invalid.")
+        unknown_channels = set(channel_settings) - set(self.raw.ch_names)
+        if unknown_channels:
+            raise ValueError(
+                "The display montage contains settings for unknown channels."
+            )
+        validated_channel_settings = {}
+        for name in self.raw.ch_names:
+            channel_state = channel_settings.get(name, {})
+            if not isinstance(channel_state, dict):
+                raise ValueError(f"Display settings for channel {name!r} are invalid.")
+            gain = channel_state.get("gain", 1.0)
+            offset = channel_state.get("offset", 0.0)
+            remove_dc = channel_state.get("remove_dc", False)
+            color = channel_state.get("color")
+            visible = channel_state.get("visible", True)
+            if isinstance(gain, bool) or isinstance(offset, bool):
+                raise ValueError(f"Display settings for channel {name!r} are invalid.")
+            try:
+                gain = float(gain)
+                offset = float(offset)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"Display settings for channel {name!r} are invalid."
+                ) from error
+            if (
+                not np.isfinite(gain)
+                or gain <= 0
+                or not np.isfinite(offset)
+                or not -1 <= offset <= 1
+                or type(remove_dc) is not bool
+                or type(visible) is not bool
+                or (color is not None and not QColor(str(color)).isValid())
+            ):
+                raise ValueError(f"Display settings for channel {name!r} are invalid.")
+            validated_channel_settings[name] = {
+                "gain": gain,
+                "offset": offset,
+                "remove_dc": remove_dc,
+                "color": QColor(str(color)).name() if color is not None else None,
+                "visible": visible,
+            }
+        return {
+            "groups": groups,
+            "settings": settings,
+            "floating": floating,
+            "columns": columns,
+            "duration": duration,
+            "display_scales": validated_scales,
+            "channel_settings": validated_channel_settings,
+        }
+
+    def apply_display_montage(self, state):
+        """Apply a validated display montage without marking it as saved."""
+        montage = self._validated_display_montage(state)
+        self._groups = montage["groups"]
+        self._settings = {
+            tuple(stream["id"] for stream in group): panel_settings
+            for group, panel_settings in zip(
+                montage["groups"], montage["settings"], strict=True
+            )
+        }
+        self._columns = montage["columns"]
+        self._duration = float(
+            np.clip(
+                montage["duration"],
+                1 / self.raw.info["sfreq"],
+                self.total_duration,
+            )
+        )
+        self._start_time = min(self._start_time, self.max_start)
+        self._display_scales = {
+            stream["id"]: scale
+            for stream, scale in zip(
+                self.source_streams, montage["display_scales"], strict=True
+            )
+            if scale is not None
+        }
+        if hasattr(self, "_channel_settings"):
+            self._channel_settings = montage["channel_settings"]
+        self._rebuild_panels(
+            extra_float_keys=montage["floating"], preserve_floating=False
+        )
+        self._sync_navigation()
+        self.refresh()
+
+    def save_display_montage(self, path=None, *, save_as=False):
+        """Save the current display montage and establish a clean baseline."""
+        if path is None and not save_as:
+            path = getattr(self, "_display_montage_path", None)
+        if path is None:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Save Display Montage",
+                "",
+                "MNELAB display montage (*.json)",
+            )
+        if not path:
+            return False
+        path = Path(path)
+        if not path.suffix:
+            path = path.with_suffix(".json")
+        state = self.display_montage_state()
+        try:
+            path.write_text(
+                json.dumps(state, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            QMessageBox.critical(self, "Could not save montage", str(error))
+            return False
+        self._display_montage_path = path
+        self._display_montage_baseline = state
+        return True
+
+    def load_display_montage(self, path=None):
+        """Load and apply a display montage, making it the clean baseline."""
+        if path is None:
+            path, _ = QFileDialog.getOpenFileName(
+                self,
+                "Load Display Montage",
+                "",
+                "MNELAB display montage (*.json)",
+            )
+        if not path:
+            return False
+        path = Path(path)
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            self.apply_display_montage(state)
+        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+            QMessageBox.critical(self, "Could not load montage", str(error))
+            return False
+        self._display_montage_path = path
+        self._display_montage_baseline = self.display_montage_state()
+        return True
 
     def topology_matches(self, raw):
         """Return whether this viewer can safely keep displaying ``raw``."""
@@ -1422,6 +2110,16 @@ class StreamViewerWindow(QMainWindow):
         self.events = events
         for panel in self.panels:
             panel.set_events(events)
+
+    def _annotation_filter_changed(self):
+        """Redraw cached overlays after changing the annotation filter."""
+        self.annotation_stream.refresh(self._start_time, self._duration)
+        for panel in self.panels:
+            panel.redraw(self._start_time, self._duration)
+
+    def _center_on_annotation(self, onset):
+        """Center a selected whole-recording annotation in the shared view."""
+        self.set_start_time(float(onset) - self._duration / 2)
 
     @property
     def start_time(self):
@@ -1517,6 +2215,8 @@ class StreamViewerWindow(QMainWindow):
                 self.events,
                 self.annotation_colors,
                 self._display_scales,
+                self._channel_settings,
+                annotation_visible=self.annotation_sidebar.plot_accepts,
                 unit=settings["unit"],
                 gain=settings["gain"],
                 channels_per_page=self.max_channels,
@@ -1665,7 +2365,7 @@ class StreamViewerWindow(QMainWindow):
 
     def reset_layout(self):
         self._groups = [[stream] for stream in self.source_streams]
-        self._columns = min(2, max(1, len(self._groups)))
+        self._columns = 1
         self._rebuild_panels(preserve_floating=False)
         self.refresh()
 
@@ -1849,10 +2549,12 @@ class StreamViewerWindow(QMainWindow):
                 name for panel in panels for name in panel.visible_channel_names
             )
         )
-        if not visible_names:
-            return
-        values = self.raw.get_data(picks=visible_names, start=start, stop=stop)
         times = np.arange(start, stop) / sfreq
+        values = (
+            self.raw.get_data(picks=visible_names, start=start, stop=stop)
+            if visible_names
+            else np.empty((0, len(times)))
+        )
         row_by_name = {name: index for index, name in enumerate(visible_names)}
         for panel in panels:
             rows = [row_by_name[name] for name in panel.visible_channel_names]
@@ -1908,6 +2610,29 @@ class StreamViewerWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Close floating stream windows without redocking them during teardown."""
+        if (
+            not getattr(self, "_closing_stale_data", False)
+            and self.isVisible()
+            and self.display_montage_changed
+        ):
+            choice = QMessageBox.warning(
+                self,
+                "Save Display Montage?",
+                "The display montage has changed. Do you want to save it?",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if choice == QMessageBox.StandardButton.Cancel:
+                event.ignore()
+                return
+            if (
+                choice == QMessageBox.StandardButton.Save
+                and not self.save_display_montage()
+            ):
+                event.ignore()
+                return
         self._closing = True
         self._navigation_timer.stop()
         self._viewport_timer.stop()
@@ -1916,7 +2641,21 @@ class StreamViewerWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not self._annotation_dock_sized:
+            QTimer.singleShot(0, self._set_default_annotation_dock_width)
         QTimer.singleShot(0, self.refresh)
+
+    def _set_default_annotation_dock_width(self):
+        """Give the annotation dock 10% of the initial viewer width once."""
+        if self._annotation_dock_sized:
+            return
+        target_width = max(1, round(self.width() * 0.1))
+        self.resizeDocks(
+            [self.annotation_dock],
+            [target_width],
+            Qt.Orientation.Horizontal,
+        )
+        self._annotation_dock_sized = True
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
