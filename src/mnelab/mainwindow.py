@@ -89,22 +89,33 @@ def _xdf_stream_descriptors(rows, stream_ids, skipped_stream_ids, channel_names)
     channel_offset = 0
 
     for stream_id in stream_ids:
-        if stream_id in skipped_stream_ids:
-            continue
         row = rows_by_id[stream_id]
         channel_count = row[3]
-        stream_channels = channel_names[channel_offset : channel_offset + channel_count]
-        descriptors.append(
-            {
-                "id": stream_id,
-                "name": row[1] or f"Stream {stream_id}",
-                "type": row[2] or "Data",
-                "channel_names": list(stream_channels),
-                "channel_format": row[4],
-                "nominal_srate": row[5],
-            }
-        )
-        channel_offset += channel_count
+        removed = stream_id in skipped_stream_ids or channel_count == 0
+        if removed:
+            stream_channels = []
+        else:
+            stream_channels = channel_names[
+                channel_offset : channel_offset + channel_count
+            ]
+            channel_offset += channel_count
+        descriptor = {
+            "id": stream_id,
+            "name": row[1] or f"Stream {stream_id}",
+            "type": row[2] or "Data",
+            "channel_names": list(stream_channels),
+            "channel_format": row[4],
+            "nominal_srate": row[5],
+            "declared_channel_count": channel_count,
+            "removed": removed,
+        }
+        if removed:
+            descriptor["removal_reason"] = (
+                "contains no samples"
+                if stream_id in skipped_stream_ids
+                else "contains zero channels"
+            )
+        descriptors.append(descriptor)
 
     if channel_offset != len(channel_names):
         raise RuntimeError(

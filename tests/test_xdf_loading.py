@@ -114,10 +114,15 @@ def test_xdf_stream_descriptors_preserve_loaded_stream_boundaries():
         channel_names=["Fz", "Cz", "x", "y", "pupil"],
     )
 
-    assert [stream["id"] for stream in descriptors] == [30, 32]
+    assert [stream["id"] for stream in descriptors] == [30, 31, 32]
     assert descriptors[0]["channel_names"] == ["Fz", "Cz"]
-    assert descriptors[1]["channel_names"] == ["x", "y", "pupil"]
-    assert descriptors[1]["nominal_srate"] == 120.0
+    assert descriptors[0]["removed"] is False
+    assert descriptors[1]["channel_names"] == []
+    assert descriptors[1]["removed"] is True
+    assert descriptors[1]["removal_reason"] == "contains no samples"
+    assert descriptors[1]["declared_channel_count"] == 4
+    assert descriptors[2]["channel_names"] == ["x", "y", "pupil"]
+    assert descriptors[2]["nominal_srate"] == 120.0
 
 
 def test_xdf_stream_descriptors_reject_channel_mismatch():
@@ -126,3 +131,26 @@ def test_xdf_stream_descriptors_reject_channel_mismatch():
 
     with pytest.raises(RuntimeError, match="does not match"):
         _xdf_stream_descriptors(rows, [30], [], ["Fz"])
+
+
+def test_zero_channel_stream_id_is_marked_removed_in_metadata():
+    """A zero-channel source keeps its ID and an explicit removal reason."""
+    rows = [
+        [0, "Removed", "Aux", 0, "float32", 1000.0],
+        [30, "EEG", "EEG", 1, "float32", 256.0],
+    ]
+
+    descriptors = _xdf_stream_descriptors(rows, [0, 30], [], ["Fz"])
+
+    assert descriptors[0] == {
+        "id": 0,
+        "name": "Removed",
+        "type": "Aux",
+        "channel_names": [],
+        "channel_format": "float32",
+        "nominal_srate": 1000.0,
+        "declared_channel_count": 0,
+        "removed": True,
+        "removal_reason": "contains zero channels",
+    }
+    assert descriptors[1]["channel_names"] == ["Fz"]

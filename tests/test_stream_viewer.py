@@ -334,11 +334,16 @@ def test_join_split_round_trip_does_not_mutate_raw(viewer, raw, streams):
 
 
 def test_visible_annotations_and_events_are_drawn_on_each_panel(viewer):
-    """Visible event and annotation overlays appear in every stream panel."""
+    """Trace overlays identify annotation meaning as well as its interval."""
     for panel in viewer.panels:
         items = panel.plot.getPlotItem().items
         assert sum(isinstance(item, pg.InfiniteLine) for item in items) == 1
         assert sum(isinstance(item, pg.LinearRegionItem) for item in items) == 1
+        assert len(panel._annotation_labels) == 1
+        label = panel._annotation_labels[0]
+        assert label.textItem.toPlainText() == "Visible · 200 ms"
+        assert label.isVisible()
+        assert "Onset: 1.25 s" in label.toolTip()
 
 
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
@@ -376,6 +381,7 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     assert sidebar.list.count() == 1
     assert "Outside" in sidebar.list.item(0).text()
     assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert all(not panel._annotation_labels[0].isVisible() for panel in viewer.panels)
     assert not viewer.annotation_stream.labels[0].isVisible()
 
     sidebar.list.itemClicked.emit(sidebar.list.item(0))
@@ -403,6 +409,7 @@ def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
     assert sidebar.list.count() == 1
     assert "Visible" in sidebar.list.item(0).text()
     assert all(panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert all(panel._annotation_labels[0].isVisible() for panel in viewer.panels)
     assert sidebar.filter_edit.toolTip() == ("Case-insensitive annotation text filter")
 
     sidebar.filter_edit.setText("[")
@@ -411,6 +418,7 @@ def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
     assert sidebar.count_label.text().startswith("Invalid regex:")
     assert "Invalid regular expression" in sidebar.filter_edit.toolTip()
     assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert all(not panel._annotation_labels[0].isVisible() for panel in viewer.panels)
 
     sidebar.regex_checkbox.setChecked(False)
 
@@ -572,6 +580,21 @@ def test_swap_selected_exchanges_panel_locations(viewer):
     assert not viewer.swap_button.isEnabled()
 
 
+def test_drag_handle_swaps_existing_panel_windows(viewer):
+    """Dropping one attached panel handle on another swaps their order in place."""
+    eeg, audio = viewer.panels
+
+    eeg.drag_handle.swap_requested.emit(audio)
+
+    assert viewer.display_groups == ((22,), (11,))
+    assert viewer.panels == [audio, eeg]
+    assert [_grid_position(viewer, panel) for panel in viewer.panels] == [
+        (0, 0),
+        (1, 0),
+    ]
+    assert "swap positions" in eeg.drag_handle.toolTip()
+
+
 def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
     """A loaded display montage restores its state and becomes the baseline."""
     viewer.column_spin.setValue(1)
@@ -583,6 +606,7 @@ def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
     viewer.panels[0].set_channel_gain("EEG A", 1.5)
     viewer.panels[0].set_channel_offset("EEG A", 0.2)
     viewer.panels[0].set_channel_color("EEG A", "#00ff00")
+    viewer.panels[0].fit_channel_to_pane("EEG A")
     viewer.show()
     qtbot.waitUntil(viewer.isVisible)
     viewer.panels[0].float_button.click()
@@ -611,6 +635,7 @@ def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
         "color": "#00ff00",
         "visible": True,
     }
+    assert viewer._channel_fits["EEG A"] == expected["channel_fits"]["EEG A"]
     assert not viewer.display_montage_changed
 
 
@@ -1031,12 +1056,13 @@ def test_peak_envelope_preserves_short_transients():
     assert reduced_values.max() == 12.0
 
 
-def test_fit_to_pane_uses_loudest_channel_and_preserves_amplitude(qtbot):
-    """Fit respects every channel lane without resetting panel amplitude."""
+def test_fit_to_pane_scales_every_lane_independently(qtbot):
+    """Fit keeps low-amplitude lanes visible instead of using the loudest trace."""
     channel_count = 220
     channel_names = [f"Aux {index}" for index in range(channel_count)]
-    values = np.ones((channel_count, 100))
-    values[-1] *= 100.0
+    waveform = np.linspace(-1.0, 1.0, 100)
+    channel_amplitudes = np.geomspace(1.0, 100.0, channel_count)
+    values = channel_amplitudes[:, np.newaxis] * waveform
     raw = mne.io.RawArray(
         values,
         mne.create_info(channel_names, 100.0, ["misc"] * channel_count),
@@ -1073,8 +1099,8 @@ def test_fit_to_pane_uses_loudest_channel_and_preserves_amplitude(qtbot):
         _times, plotted = curve.getData()
         plotted_peaks.append(float(np.nanmax(np.abs(plotted - offset))))
 
-    assert max(plotted_peaks) == pytest.approx(target_half_lane)
-    assert all(peak <= target_half_lane * (1 + 1e-12) for peak in plotted_peaks)
+    assert plotted_peaks == pytest.approx([target_half_lane] * channel_count)
+    assert len(window._channel_fits) == channel_count
 
 
 def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
@@ -1099,18 +1125,25 @@ def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
     assert window._display_scales[source_id] == initial_scale
     _, plotted = panel._curves[0].getData()
     assert np.nanmax(np.abs(plotted)) > 20
+    finite = panel._values[0][np.isfinite(panel._values[0])]
+    expected_center = (np.min(finite) + np.max(finite)) / 2
     expected_scale = (
-        np.nanmax(np.abs(panel._values[0]))
+        (np.max(finite) - np.min(finite))
+        / 2
         * panel.amplitude.value()
         / (FIT_HALF_LANE_FRACTION * panel._lane_step)
     )
 
     panel.autoscale()
 
-    assert window._display_scales[source_id] == pytest.approx(expected_scale)
-    assert expected_scale > initial_scale * 50
+    assert window._display_scales[source_id] == initial_scale
+    assert window._channel_fits["EEG"] == pytest.approx(
+        {"center": expected_center, "scale": expected_scale}
+    )
     _, plotted = panel._curves[0].getData()
-    assert np.nanmax(np.abs(plotted)) < 2
+    assert np.nanmax(np.abs(plotted)) == pytest.approx(
+        FIT_HALF_LANE_FRACTION * panel._lane_step
+    )
 
 
 def test_meg_panel_uses_magnetic_units(qtbot):

@@ -694,12 +694,21 @@ class Model:
         if source_streams:
             live_channels = set(self.current["data"].ch_names)
             for stream in source_streams:
+                previous_channels = list(stream["channel_names"])
                 stream["channel_names"] = [
-                    name for name in stream["channel_names"] if name in live_channels
+                    name for name in previous_channels if name in live_channels
                 ]
-            self.current["source_streams"] = [
-                stream for stream in source_streams if stream["channel_names"]
-            ]
+                removed_channels = [
+                    name for name in previous_channels if name not in live_channels
+                ]
+                if removed_channels:
+                    known_removed = list(stream.get("removed_channel_names", []))
+                    stream["removed_channel_names"] = list(
+                        dict.fromkeys(known_removed + removed_channels)
+                    )
+                if not stream["channel_names"]:
+                    stream["removed"] = True
+                    stream.setdefault("removal_reason", "all channels were removed")
         self.current["name"] += " (channels picked)"
         self.history.append(f"data.pick({picks})")
 

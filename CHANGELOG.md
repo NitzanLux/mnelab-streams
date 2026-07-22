@@ -3,6 +3,7 @@
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
 
 ### 🌀 Changed
+- Improve the stream viewer with independent lane fitting, labeled trace annotations, drag-to-swap panels, and retained metadata for removed sources (by [NitzanLux](https://github.com/NitzanLux))
 - Use MNEXTEND's `resolve_streams()` and `read_bvrf_header()` instead of depending on PyXDF and PyBVRF directly ([#679](https://github.com/cbrnr/mnelab/pull/679) by [Clemens Brunner](https://github.com/cbrnr))
 
 ### 🗑️ Removed

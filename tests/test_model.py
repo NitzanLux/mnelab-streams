@@ -40,6 +40,35 @@ def test_source_streams_follow_channel_edits(tmp_path):
     assert model.current["source_streams"][1]["channel_names"] == ["C"]
 
 
+def test_source_with_zero_remaining_channels_is_retained_as_removed(tmp_path):
+    """Picking all of a source's channels retains its identity in metadata."""
+    raw = mne.io.RawArray(
+        np.zeros((2, 20)),
+        mne.create_info(["A", "B"], 100, ["eeg", "misc"]),
+    )
+    path = tmp_path / "streams.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(
+        raw,
+        path,
+        source_streams=[
+            {"id": 1, "name": "EEG", "channel_names": ["A"]},
+            {"id": 2, "name": "Aux", "channel_names": ["B"]},
+        ],
+    )
+
+    model.pick_channels(["B"])
+
+    removed, active = model.current["source_streams"]
+    assert removed["id"] == 1
+    assert removed["channel_names"] == []
+    assert removed["removed_channel_names"] == ["A"]
+    assert removed["removed"] is True
+    assert removed["removal_reason"] == "all channels were removed"
+    assert active["channel_names"] == ["B"]
+
+
 def test_memory_size_does_not_copy_data(model_with_data):
     """Memory reporting reads the preloaded array without calling `get_data()`."""
     raw = model_with_data.current["data"]
