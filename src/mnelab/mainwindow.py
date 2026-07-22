@@ -8,6 +8,7 @@ import multiprocessing as mp
 import re
 import sys
 import traceback
+import warnings
 from functools import partial
 from operator import itemgetter
 from pathlib import Path
@@ -147,6 +148,45 @@ def _empty_xdf_stream_warning(rows, skipped_stream_ids):
         "The other selected streams were loaded successfully. An empty stream can "
         "occur when a device or application announces a stream but records no data."
     )
+
+
+def _repair_nonfinite_psd(data, spectrum, fmin, fmax):
+    """Recompute non-finite Raw PSD rows without bridging missing-data gaps."""
+    psds = spectrum.get_data(picks="all")
+    nonfinite = ~np.isfinite(psds).all(axis=1)
+    if not nonfinite.any() or not isinstance(data, mne.io.BaseRaw):
+        return spectrum
+
+    samples = data.get_data(
+        picks=spectrum.ch_names, reject_by_annotation="NaN"
+    ).copy()
+    samples[~np.isfinite(samples)] = np.nan
+    n_fft = min(data.n_times, 2048)
+
+    for index in np.flatnonzero(nonfinite):
+        if not np.isfinite(samples[index]).any():
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"nperseg = .* greater than input length"
+            )
+            repaired, freqs = mne.time_frequency.psd_array_welch(
+                samples[index : index + 1],
+                data.info["sfreq"],
+                fmin=fmin,
+                fmax=fmax,
+                n_fft=n_fft,
+                verbose=False,
+            )
+        if np.array_equal(freqs, spectrum.freqs):
+            psds[index] = repaired[0]
+
+    finite = np.isfinite(psds).all(axis=1)
+    if not finite.any():
+        return None
+    repaired_spectrum = spectrum.copy().pick(np.flatnonzero(finite))
+    repaired_spectrum._data[...] = psds[finite]
+    return repaired_spectrum
 
 
 class _MNELogHandler(logging.Handler):
@@ -1435,17 +1475,33 @@ class MainWindow(QMainWindow):
                 "exclude": dialog.exclude,
             }
             data = self.model.current["data"]
-            try:
-                spectrum = data.compute_psd(**psd_kwds)
-            except ValueError as error:
-                if "yielded no channels" not in str(error):
-                    raise
-                # MNE's default picks contain only physiological data channels.
-                # Fall back to all channels for recordings containing only
-                # auxiliary channel types such as ``misc``.
-                psd_kwds["picks"] = "all"
-                plot_kwds["picks"] = "all"
-                spectrum = data.compute_psd(**psd_kwds)
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Non-finite values .* PSD for those channels will be NaN",
+                    category=RuntimeWarning,
+                )
+                try:
+                    spectrum = data.compute_psd(**psd_kwds)
+                except ValueError as error:
+                    if "yielded no channels" not in str(error):
+                        raise
+                    # MNE's default picks contain only physiological data channels.
+                    # Fall back to all channels for recordings containing only
+                    # auxiliary channel types such as ``misc``.
+                    psd_kwds["picks"] = "all"
+                    plot_kwds["picks"] = "all"
+                    spectrum = data.compute_psd(**psd_kwds)
+            spectrum = _repair_nonfinite_psd(
+                data, spectrum, dialog.fmin, dialog.fmax
+            )
+            if spectrum is None:
+                QMessageBox.warning(
+                    self,
+                    "Power Spectral Density",
+                    "The selected data contain no finite samples to plot.",
+                )
+                return
             fig = spectrum.plot(show=False, **plot_kwds)
             psd_kwds = ", ".join(f"{key}={value!r}" for key, value in psd_kwds.items())
             plot_kwds = ", ".join(

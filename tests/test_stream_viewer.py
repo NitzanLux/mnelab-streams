@@ -475,6 +475,7 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     panel = viewer.panels[0]
     _, first_before = panel._curves[0].getData()
     _, second_before = panel._curves[1].getData()
+    channel_menu_brush = panel.channel_list.item(0).foreground()
     first_offset = panel._lane_step
     first_peak = np.nanmax(np.abs(first_before - first_offset))
 
@@ -490,8 +491,8 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     )
     np.testing.assert_array_equal(second_after, second_before)
     assert panel._curves[0].opts["pen"].color().name() == "#00ff00"
-    assert panel.channel_list.item(0).foreground().color().name() == "#00ff00"
     assert panel.plot.getAxis("left").label_colors["EEG A"].name() == "#00ff00"
+    assert panel.channel_list.item(0).foreground() == channel_menu_brush
     assert panel.channel_settings["EEG A"] == {
         "gain": 2.0,
         "offset": 0.1,
@@ -513,18 +514,17 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     panel._toggle_bad_channel_name("EEG A")
 
     assert panel._curves[0].opts["pen"].color().name() == "#d62728"
-    assert panel.channel_list.item(0).foreground().color().name() == "#d62728"
     assert panel.plot.getAxis("left").label_colors["EEG A"].name() == "#d62728"
+    assert panel.channel_list.item(0).foreground() == channel_menu_brush
 
 
-def test_automatic_channel_labels_match_trace_colors(viewer):
-    """Default-palette labels use the exact color of their traces."""
+def test_subplot_labels_match_automatic_trace_colors(viewer):
+    """Subplot labels use the exact default-palette color of their traces."""
     panel = viewer.panels[0]
     axis = panel.plot.getAxis("left")
 
     for index, name in enumerate(panel.visible_channel_names):
         trace_color = panel._curves[index].opts["pen"].color().name()
-        assert panel.channel_list.item(index).foreground().color().name() == trace_color
         assert axis.label_colors[name].name() == trace_color
 
 

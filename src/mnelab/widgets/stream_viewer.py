@@ -1534,7 +1534,6 @@ class StreamPanel(QFrame):
             item.setData(Qt.ItemDataRole.UserRole, name)
             item.setToolTip(name)
             settings = self.channel_settings[name]
-            item.setForeground(self._channel_color(name))
             if name in bads:
                 font = item.font()
                 font.setStrikeOut(True)
