@@ -2,6 +2,8 @@
 #
 # License: BSD (3-clause)
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QPalette
 from PySide6.QtWidgets import (
@@ -27,7 +29,7 @@ from mnelab.widgets import FlatDoubleSpinBox
 class XDFStreamsDialog(QDialog):
     def __init__(self, parent, rows, fname):
         super().__init__(parent)
-        self.setWindowTitle("Select XDF Stream")
+        self.setWindowTitle(f"Select XDF Streams — {Path(fname).name}")
         self.fname = fname
 
         muted = self.palette().color(
@@ -192,9 +194,7 @@ class XDFStreamsDialog(QDialog):
                 for r in self.view.selectedIndexes()
                 if not self._is_marker_row(r.row())
             }
-            suggested_fs = max(
-                self.view.item(row, 5).value() for row in row_indices
-            )
+            suggested_fs = max(self.view.item(row, 5).value() for row in row_indices)
             self.fs_new.setValue(suggested_fs)
 
     def _is_marker_row(self, row):

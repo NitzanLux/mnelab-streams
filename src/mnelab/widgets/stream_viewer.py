@@ -1216,6 +1216,94 @@ class StreamPanel(QFrame):
         """Open the read-only information dialog for one channel."""
         self.create_channel_information_dialog(name).exec()
 
+    def _channel_window_values(self, name):
+        """Return one channel's samples from the current visible time window."""
+        if name not in self.channel_settings:
+            raise KeyError(f"Unknown channel: {name}")
+        if name in self.visible_channel_names and self._values.size:
+            row = self.visible_channel_names.index(name)
+            values = self._values[row]
+        else:
+            sfreq = float(self.raw.info["sfreq"])
+            start = max(0, int(np.floor(self._visible_start * sfreq)))
+            stop = min(
+                self.raw.n_times,
+                int(
+                    np.ceil(
+                        (self._visible_start + self._visible_duration) * sfreq
+                    )
+                )
+                + 1,
+            )
+            if stop <= start:
+                stop = min(self.raw.n_times, start + 1)
+            values = self.raw.get_data(picks=[name], start=start, stop=stop)[0]
+        return self._display_values(name, np.asarray(values, dtype=float))
+
+    def channel_statistics(self, name):
+        """Calculate EDFbrowser-style statistics for the visible time window."""
+        values = self._channel_window_values(name)
+        values = values[np.isfinite(values)]
+        factor = UNIT_FACTORS[self._display_unit]
+        values = values * factor
+        unit = "raw" if self._display_unit == "Raw" else self._display_unit
+        sample_count = int(values.size)
+
+        if sample_count:
+            total = float(np.sum(values))
+            mean = float(np.mean(values))
+            rms = float(np.sqrt(np.mean(np.square(values))))
+            mean_rectified = float(np.mean(np.abs(values)))
+            zero_crossings = int(
+                np.count_nonzero(np.signbit(values[1:]) != np.signbit(values[:-1]))
+            )
+        else:
+            total = mean = rms = mean_rectified = 0.0
+            zero_crossings = 0
+
+        duration = float(self._visible_duration)
+        frequency = zero_crossings / (2 * duration) if duration > 0 else 0.0
+        return OrderedDict(
+            [
+                ("Signal", name),
+                ("Samples", sample_count),
+                ("Unit", unit),
+                ("Sum", total),
+                ("Mean", mean),
+                ("RMS", rms),
+                ("Mean rectified signal (MRS)", mean_rectified),
+                ("Zero crossings", zero_crossings),
+                ("Frequency", frequency),
+            ]
+        )
+
+    def create_channel_statistics_dialog(self, name):
+        """Create an EDFbrowser-style statistics dialog for one channel."""
+        statistics = self.channel_statistics(name)
+        unit = statistics["Unit"]
+        lines = [
+            f"Signal: {statistics['Signal']}",
+            f"Samples: {statistics['Samples']}",
+            f"Sum: {statistics['Sum']:.6g} {unit}",
+            f"Mean: {statistics['Mean']:.6g} {unit}",
+            f"RMS: {statistics['RMS']:.6g} {unit}",
+            "Mean rectified signal (MRS): "
+            f"{statistics['Mean rectified signal (MRS)']:.6g} {unit}",
+            f"Zero crossings: {statistics['Zero crossings']}",
+            f"Frequency: {statistics['Frequency']:.6g} Hz",
+        ]
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Channel Statistics")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText(name)
+        dialog.setInformativeText("\n".join(lines))
+        dialog.setStandardButtons(QMessageBox.StandardButton.Close)
+        return dialog
+
+    def open_channel_statistics(self, name):
+        """Open current-window statistics for one channel."""
+        self.create_channel_statistics_dialog(name).exec()
+
     def create_channel_context_menu(self, name):
         """Create display, visibility, quality, and ordering actions."""
         if name not in self.channel_settings:
@@ -1225,6 +1313,10 @@ class StreamPanel(QFrame):
         menu.addAction(
             "Channel Information…",
             lambda _checked=False, name=name: self.open_channel_information(name),
+        )
+        menu.addAction(
+            "Statistics…",
+            lambda _checked=False, name=name: self.open_channel_statistics(name),
         )
         menu.addSeparator()
         visibility_text = "Hide Channel" if settings["visible"] else "Show Channel"

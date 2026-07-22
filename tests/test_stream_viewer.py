@@ -602,6 +602,63 @@ def test_channel_information_dialog_describes_recording_and_display_state(
     assert "Status: Bad" in dialog.informativeText()
 
 
+def test_channel_context_menu_opens_current_window_statistics(viewer):
+    """The channel menu routes Statistics to the channel that was clicked."""
+    panel = viewer.panels[0]
+    with patch.object(panel, "open_channel_statistics") as open_statistics:
+        menu = panel.create_channel_context_menu("EEG A")
+        statistics_action = next(
+            action for action in menu.actions() if action.text() == "Statistics…"
+        )
+        statistics_action.trigger()
+
+    open_statistics.assert_called_once_with("EEG A")
+
+
+def test_channel_statistics_match_edfbrowser_current_window_fields(qtbot, viewer):
+    """Statistics use the displayed page and expose EDFbrowser's signal metrics."""
+    panel = viewer.panels[0]
+    values = panel._values[panel.visible_channel_names.index("EEG A")] * 1e6
+    statistics = panel.channel_statistics("EEG A")
+    dialog = panel.create_channel_statistics_dialog("EEG A")
+    qtbot.addWidget(dialog)
+
+    assert statistics["Signal"] == "EEG A"
+    assert statistics["Samples"] == len(values)
+    assert statistics["Unit"] == "µV"
+    assert statistics["Sum"] == pytest.approx(np.sum(values))
+    assert statistics["Mean"] == pytest.approx(np.mean(values))
+    assert statistics["RMS"] == pytest.approx(np.sqrt(np.mean(values**2)))
+    assert statistics["Mean rectified signal (MRS)"] == pytest.approx(
+        np.mean(np.abs(values))
+    )
+    expected_crossings = np.count_nonzero(
+        np.signbit(values[1:]) != np.signbit(values[:-1])
+    )
+    assert statistics["Zero crossings"] == expected_crossings
+    assert statistics["Frequency"] == pytest.approx(
+        expected_crossings / (2 * panel._visible_duration)
+    )
+    assert "Mean rectified signal (MRS):" in dialog.informativeText()
+    assert "Frequency:" in dialog.informativeText()
+
+
+def test_hidden_channel_statistics_read_only_the_visible_time_window(viewer, raw):
+    """Statistics remain available after a trace is hidden from data fetching."""
+    panel = viewer.panels[0]
+    panel.set_channel_visible("EEG A", False)
+
+    with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
+        statistics = panel.channel_statistics("EEG A")
+
+    assert statistics["Samples"] == 201
+    assert get_data.call_args.kwargs == {
+        "picks": ["EEG A"],
+        "start": 0,
+        "stop": 201,
+    }
+
+
 def test_plot_context_menu_targets_trace_and_hides_it(qtbot, viewer):
     """Right-click actions resolve the trace lane under the pointer."""
     panel = viewer.panels[0]

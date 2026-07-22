@@ -2,7 +2,7 @@
 #
 # License: BSD (3-clause)
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import mne
 import numpy as np
@@ -29,9 +29,7 @@ def test_plot_psd_falls_back_to_all_channels(qtbot, tmp_path):
     values[2] = np.nan
     raw = mne.io.RawArray(
         values,
-        mne.create_info(
-            ["Aux 1", "Aux 2", "Empty"], 100, ["misc", "misc", "misc"]
-        ),
+        mne.create_info(["Aux 1", "Aux 2", "Empty"], 100, ["misc", "misc", "misc"]),
         verbose=False,
     )
     path = tmp_path / "auxiliary.edf"
@@ -41,29 +39,19 @@ def test_plot_psd_falls_back_to_all_channels(qtbot, tmp_path):
     model.view = window
     qtbot.addWidget(window)
     model.load_data(raw, path)
-    figure = Mock()
-    plotted = []
 
-    def plot(spectrum, **kwargs):
-        plotted.append(spectrum)
-        return figure
-
-    with (
-        patch("mnelab.mainwindow.PSDDialog", return_value=_AcceptedPSDDialog()),
-        patch.object(
-            mne.time_frequency.Spectrum, "plot", autospec=True, side_effect=plot
-        ) as plot_mock,
-    ):
+    with patch("mnelab.mainwindow.PSDDialog", return_value=_AcceptedPSDDialog()):
         window.plot_psd()
+    viewer = window._psd_viewers[-1]
 
-    assert plot_mock.call_args.kwargs["picks"] == "all"
-    assert plotted[0].ch_names == ["Aux 1", "Aux 2"]
-    assert np.isfinite(plotted[0].get_data(picks="all")).all()
+    assert viewer.spectrum.ch_names == ["Aux 1", "Aux 2"]
+    assert np.isfinite(viewer.spectrum.get_data(picks="all")).all()
+    assert len(viewer.panels) == 1
+    assert viewer.panels[0].visible_channel_names == ["Aux 1", "Aux 2"]
     assert model.history[-1] == (
         "data.compute_psd(fmin=0.0, fmax=50.0, picks='all')."
         "plot(spatial_colors=False, exclude=(), picks='all')"
     )
-    figure.canvas.manager.window.setWindowTitle.assert_called_once_with(
-        "Power spectral density"
-    )
-    figure.show.assert_called_once_with()
+    assert viewer.windowTitle() == "Power spectral density — auxiliary"
+    viewer.close()
+    qtbot.waitUntil(lambda: not window._psd_viewers)

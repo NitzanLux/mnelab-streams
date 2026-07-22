@@ -115,7 +115,9 @@ MainWindow (menus, dialogs, dataset tree, information panel)
         |        +---- annotation browser and annotation lane
         |        +---- asynchronous activation overview
         |
-        +---- MNE/Matplotlib or MNE Qt Browser for Epochs and scientific plots
+        +---- PSDViewerWindow for source-oriented PyQtGraph spectra
+        |
+        +---- MNE/Matplotlib or MNE Qt Browser for Epochs and other scientific plots
 ```
 
 ### 4.1 Main application components
@@ -128,6 +130,7 @@ MainWindow (menus, dialogs, dataset tree, information panel)
 | Dialog modules | Validated user input for individual workflows |
 | `StreamViewerWindow` | Responsive synchronized raw-data display and display-montage lifecycle |
 | `StreamPanel` | One or more source streams, channel paging, scale, overlays, and per-channel display state |
+| `PSDViewerWindow` | Source-oriented, paged, interactive power spectral density display |
 | `AnnotationSidebar` | Whole-recording annotation list, text/regex filtering, and navigation |
 | `ActivationMapWindow` | Whole-recording, per-source relative RMS overview |
 | `settings` | Typed persistent application preferences in an INI file |
@@ -161,6 +164,7 @@ of its parent. A dataset contains at least the following logical fields:
 | `montage` | Sensor/channel-location montage metadata |
 | `events`, `event_mapping` | Event array and optional numeric-to-text mapping |
 | `source_streams` | Ordered source descriptors, principally from XDF |
+| `source_files` | Ordered original paths when one dataset merges several files |
 | `ica`, `iclabel` | Fitted ICA object and optional component-label probabilities |
 | `reference` | Current reference description |
 | `_cache_path` | Temporary FIFF path used by memory-saving mode |
@@ -229,7 +233,7 @@ remembered.
 
 | Menu | Current commands |
 | --- | --- |
-| File | Open; Open Recent; Close; Close All; format-specific Export; Show XDF Metadata; Inspect XDF Chunks; Settings; Quit |
+| File | Open; Open XDF Folder; Open Recent; Close; Close All; format-specific Export; Show XDF Metadata; Inspect XDF Chunks; Settings; Quit |
 | Channels | Pick Channels; Rename Channels; Channel Properties; Set Montage; Change Reference; Import/Export Bad Channels; Interpolate Bad Channels; Channel Statistics |
 | Markers | Edit Annotations; Annotation Colors; Import/Export Annotations; Edit Events; Import/Export Events; Find Events; Events from Annotations; Annotations from Events |
 | Plot | Data; Power Spectral Density; Channel Locations; ERDS Maps; ERDS Topomaps; Evoked; Evoked Comparison; Evoked Topomaps; ICA Components; ICA Sources |
@@ -298,6 +302,19 @@ The XDF selection dialog shall show every stream's ID, name, type, channel count
 channel format, and nominal sampling rate. Numeric data streams and string marker
 streams shall be selectable in the same table.
 
+- Selecting multiple XDF files shall open an ordering dialog offering either separate
+  datasets or sequential concatenation into one dataset. Concatenation requires equal
+  channel identities, channel types, and sampling frequencies, reorders identical
+  channel sets safely, and inserts boundary annotations between recordings.
+- Folder import shall recursively include all `.xdf`, `.xdfz`, and `.xdf.gz` files.
+- Automatic ordering shall use absolute recording datetimes from the XDF headers. The
+  user shall configure a maximum allowed gap or overlap at each seam; a recording with
+  no absolute datetime or a seam outside the tolerance shall stop the atomic merge.
+- Streams whose names match case-insensitively across source files shall become one
+  source-stream descriptor containing their shared channels and per-file stream IDs.
+- Batch merging shall offer to skip files whose metadata inspection or full loading
+  fails, list every omission and reason, and require at least two readable files before
+  inserting the merged dataset. Compatibility and seam failures remain merge errors.
 - At least one numeric data stream is required.
 - Selected marker streams shall be converted to annotations.
 - Marker descriptions may be prefixed with stream IDs when more than one marker stream
@@ -315,6 +332,8 @@ streams shall be selectable in the same table.
   names.
 - The application shall provide separate dialogs for full XDF XML metadata and physical
   chunk inspection.
+- Malformed or incomplete XDF XML shall produce a file-specific error dialog rather
+  than an uncaught parser traceback.
 
 ### 7.3 Data export formats
 
@@ -361,6 +380,13 @@ Channel selection and renaming shall update stored XDF/source-stream membership 
 raw viewer retains correct source grouping. Added reference channels shall be placed in
 a synthetic `Derived` source when source descriptors exist.
 
+The main menu shall place **Streams** between **File** and **Channels**. It shall let
+users split channels into individual streams and edit each stream's name, type, channel
+membership, sample format, and nominal sampling rate. An accepted decomposition must
+assign every current channel to exactly one active stream. The main information view
+shall summarize all streams and expose these properties, including retained removed
+sources.
+
 ### 8.2 Sensor montage
 
 **Channels > Set Montage** controls scientific channel locations. It shall offer MNE's
@@ -400,6 +426,15 @@ annotations rather than silently replace them.
 ### 10.1 Filtering and time operations
 
 - Low-pass, high-pass, band-pass, and notch filters shall be available.
+- Filtering shall use the same ordered source-stream groups as the raw-data viewer.
+  Each stream can be filtered independently or left unchanged. Within an enabled
+  stream, checkable channel targets and a current-target summary shall make the exact
+  filter scope visible before processing. Cutoff controls shall not exceed half of
+  that stream's nominal sampling rate.
+- Notch filters shall optionally include every integer harmonic of the selected
+  fundamental frequency that remains strictly below the target stream's Nyquist
+  frequency. The expanded frequency list and selected channel picks shall be retained
+  in processing history.
 - Cutoff values must be positive; a band-pass upper cutoff must exceed its lower
   cutoff. The UI steps in 0.5 Hz increments.
 - Resampling shall accept 0.1-1,000,000 Hz and rely on MNE's anti-alias filtering.
@@ -444,6 +479,11 @@ The fitted component count is therefore determined by MNE's current defaults.
 MNELAB shall provide power spectral density, channel-location, ICA-component,
 ICA-source, ERDS, ERDS topomap, evoked-channel, evoked-comparison, and evoked-topomap
 views when their data prerequisites are met.
+
+The power spectral density viewer shall preserve the ordered source-stream panel
+model used for raw data. It shall offer fitted stacked channel lanes and a per-stream
+channel overlay; overlay mode shall use a numeric PSD-amplitude y-axis in the selected
+dB or linear power scale.
 
 Epoch browsing uses MNE's configured Matplotlib or optional Qt browser backend. The
 settings determine the default number of displayed epochs and channels and whether
@@ -538,6 +578,8 @@ Right-clicking a channel row shall expose:
 
 - view channel information, including its type, source, sampling rate, status, and
   current trace visibility;
+- view EDFbrowser-style statistics for the current time window: sample count, sum,
+  mean, RMS, mean rectified signal, zero crossings, and estimated frequency;
 - show/hide trace;
 - increase/decrease, fit, or enter its amplitude multiplier;
 - enter a vertical visual offset from -1 to +1 channel lanes;
@@ -608,6 +650,22 @@ source stream and no merging caused by the current panel layout.
   shall center the raw viewer there.
 - Worker errors shall be shown in the child window, and pressing **Activation Map**
   again shall retry after a failure.
+
+### 12.9 Power spectral density viewer
+
+Power spectral density shall open in an MNELAB-native PyQtGraph window rather than a
+Matplotlib figure. It shall reuse the raw viewer's visual organization where applicable:
+
+- one panel per XDF source, or per MNE channel type when source metadata is unavailable;
+- a clickable channel list, configured channel-page size, colored fitted lanes, and red
+  strikeout styling for included bad channels;
+- adjustable panel columns, per-panel and global frequency-range reset controls, and
+  interactive frequency zooming and panning; and
+- a shared choice between decibel and linear power display.
+
+NaN-padded streams shall be estimated independently over their finite spans without
+interpolating across gaps. Channels with no finite samples shall be omitted. Timeline,
+event, and annotation controls do not apply in frequency space and shall not be shown.
 
 ## 13. Display montage lifecycle
 

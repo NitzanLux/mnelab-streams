@@ -38,6 +38,8 @@ from mnelab.dialogs.reference import ReferenceDialog
 from mnelab.dialogs.rename_channels import RenameChannelsDialog
 from mnelab.dialogs.resample import ResampleDialog
 from mnelab.dialogs.run_ica import RunICADialog
+from mnelab.dialogs.stream_properties import StreamPropertiesDialog
 from mnelab.dialogs.xdf_chunks import XDFChunksDialog
+from mnelab.dialogs.xdf_import import XDFImportDialog
 from mnelab.dialogs.xdf_metadata import XDFMetadataDialog
 from mnelab.dialogs.xdf_streams import XDFStreamsDialog

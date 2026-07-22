@@ -14,6 +14,7 @@ from operator import itemgetter
 from pathlib import Path
 from sys import version_info
 from urllib.request import Request, urlopen
+from xml.etree.ElementTree import ParseError
 
 import mne
 import numpy as np
@@ -58,6 +59,7 @@ from mnelab.model import (
     InvalidBadChannelsError,
     LabelsNotFoundError,
     Model,
+    _effective_streams,
 )
 from mnelab.settings import SettingsDialog, read_settings, write_settings
 from mnelab.utils import (
@@ -81,6 +83,264 @@ from mnelab.widgets import EmptyWidget, InfoWidget, SidebarWidget
 
 SIDEBAR_MIN_WIDTH = 150
 INFOWIDGET_MIN_WIDTH = 200
+XDF_SUFFIXES = (".xdf", ".xdfz", ".xdf.gz")
+
+
+class XDFImportError(Exception):
+    """An XDF file could not be inspected, loaded, or merged."""
+
+
+def _is_xdf_file(fname):
+    """Return whether a path has a supported XDF suffix."""
+    suffixes = "".join(Path(fname).suffixes).lower()
+    return any(suffixes.endswith(suffix) for suffix in XDF_SUFFIXES)
+
+
+def _describe_xdf_error(fname, error):
+    """Return a concise, file-specific explanation for an XDF failure."""
+    if isinstance(error, XDFImportError):
+        return str(error)
+    if isinstance(error, ParseError):
+        return (
+            f'Could not load "{Path(fname).name}" because it contains incomplete '
+            "or malformed XML. The file may be truncated or damaged."
+        )
+    return f'Could not load "{Path(fname).name}": {error}'
+
+
+def _skipped_xdf_message(failures):
+    """Describe unreadable XDF files omitted from a batch import."""
+    lines = [f"- {_describe_xdf_error(fname, error)}" for fname, error in failures]
+    count = len(lines)
+    noun = "file was" if count == 1 else "files were"
+    return (
+        f"{count} unreadable XDF {noun} skipped:\n\n"
+        + "\n".join(lines)
+        + "\n\nNo data from these files will be included."
+    )
+
+
+def _xdf_files_in_folder(folder):
+    """Return every supported XDF file below a folder in stable path order."""
+    return sorted(
+        (
+            str(path)
+            for path in Path(folder).rglob("*")
+            if path.is_file() and _is_xdf_file(path)
+        ),
+        key=str.casefold,
+    )
+
+
+def _resolve_xdf_rows(fname):
+    """Return stream-selection rows with a useful error for broken XML."""
+    try:
+        streams = resolve_streams(fname)
+    except ParseError as error:
+        location = ""
+        if getattr(error, "position", None) is not None:
+            line, column = error.position
+            location = f" at line {line}, column {column}"
+        raise XDFImportError(
+            f'Could not read stream metadata from "{Path(fname).name}". The file '
+            f"contains incomplete or malformed XML{location}. It may be truncated "
+            "or damaged."
+        ) from error
+    except (EOFError, OSError, RuntimeError, ValueError) as error:
+        raise XDFImportError(
+            f'Could not read stream metadata from "{Path(fname).name}": {error}'
+        ) from error
+
+    rows = [
+        [
+            stream["stream_id"],
+            stream["name"],
+            stream["type"],
+            stream["channel_count"],
+            stream["channel_format"],
+            stream["nominal_srate"],
+        ]
+        for stream in streams
+    ]
+    if not rows:
+        raise XDFImportError(
+            f'No streams were found in "{Path(fname).name}". The file may be empty '
+            "or incomplete."
+        )
+    return rows
+
+
+def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
+    """Return chronological indices after validating adjacent recording seams."""
+    if len(raws) != len(fnames):
+        raise ValueError("Every XDF Raw object must have a source filename.")
+    if maximum_seam_difference < 0:
+        raise ValueError("The maximum seam difference must be non-negative.")
+
+    starts = []
+    for raw, fname in zip(raws, fnames):
+        meas_date = raw.info.get("meas_date")
+        if meas_date is None:
+            raise XDFImportError(
+                f'Cannot order "{Path(fname).name}" by recording time because its '
+                "XDF header has no absolute recording datetime. Disable automatic "
+                "time ordering to use the displayed file order."
+            )
+        try:
+            if hasattr(meas_date, "timestamp"):
+                start = meas_date.timestamp()
+            elif isinstance(meas_date, tuple):
+                start = float(meas_date[0]) + float(meas_date[1]) / 1_000_000
+            else:
+                start = float(meas_date)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise XDFImportError(
+                f'Cannot interpret the recording datetime in "{Path(fname).name}".'
+            ) from error
+        starts.append(start)
+
+    order = sorted(range(len(raws)), key=lambda index: (starts[index], fnames[index]))
+    for previous_index, current_index in zip(order, order[1:]):
+        previous = raws[previous_index]
+        expected_start = starts[previous_index] + previous.n_times / float(
+            previous.info["sfreq"]
+        )
+        seam_difference = starts[current_index] - expected_start
+        if abs(seam_difference) > maximum_seam_difference:
+            kind = "gap" if seam_difference >= 0 else "overlap"
+            raise XDFImportError(
+                f'Cannot stitch "{Path(fnames[previous_index]).name}" to '
+                f'"{Path(fnames[current_index]).name}": the {kind} is '
+                f"{abs(seam_difference):.6g} s, exceeding the "
+                f"{maximum_seam_difference:.6g} s threshold."
+            )
+    return order
+
+
+def _unify_xdf_streams(stream_sets, fnames, channel_names, sfreq):
+    """Unify same-name source streams across merged XDF recordings."""
+    if len(stream_sets) != len(fnames):
+        raise ValueError("Every source-stream set must have a source filename.")
+
+    groups = {}
+    channel_groups = {}
+    for streams, fname in zip(stream_sets, fnames):
+        for stream in streams:
+            name = str(stream.get("name") or "Unnamed").strip()
+            key = name.casefold()
+            if key not in groups:
+                groups[key] = {
+                    "id": f"merged:{len(groups) + 1}",
+                    "name": name,
+                    "type": stream.get("type") or "Data",
+                    "channel_names": [],
+                    "channel_format": stream.get("channel_format"),
+                    "nominal_srate": stream.get("nominal_srate"),
+                    "declared_channel_count": 0,
+                    "removed": True,
+                    "source_stream_ids": [],
+                }
+            group = groups[key]
+            group["source_stream_ids"].append(
+                {"file": str(fname), "id": stream.get("id")}
+            )
+            group["declared_channel_count"] = max(
+                group["declared_channel_count"],
+                int(stream.get("declared_channel_count") or 0),
+            )
+            if stream.get("channel_format") != group["channel_format"]:
+                group["channel_format"] = "mixed"
+            if stream.get("nominal_srate") != group["nominal_srate"]:
+                group["nominal_srate"] = sfreq
+
+            if stream.get("removed"):
+                continue
+            group["removed"] = False
+            for channel in stream.get("channel_names", []):
+                previous_group = channel_groups.get(channel)
+                if previous_group is not None and previous_group != key:
+                    raise XDFImportError(
+                        f'Cannot unify source streams because channel "{channel}" '
+                        f'is assigned to both "{groups[previous_group]["name"]}" '
+                        f'and "{name}" in "{Path(fname).name}".'
+                    )
+                channel_groups[channel] = key
+                if channel not in group["channel_names"]:
+                    group["channel_names"].append(channel)
+
+    missing = [channel for channel in channel_names if channel not in channel_groups]
+    if missing:
+        raise XDFImportError(
+            "Cannot unify source streams because these channels have no active source "
+            "stream: " + ", ".join(missing)
+        )
+
+    descriptors = list(groups.values())
+    for descriptor in descriptors:
+        if descriptor["removed"]:
+            descriptor["removal_reason"] = "unavailable in merged recordings"
+        else:
+            descriptor["declared_channel_count"] = len(descriptor["channel_names"])
+    return descriptors
+
+
+def _merge_xdf_raws(raws, fnames):
+    """Validate and concatenate XDF Raw objects in the requested order."""
+    if not raws:
+        raise XDFImportError("No XDF recordings were selected for merging.")
+    if len(raws) != len(fnames):
+        raise ValueError("Every XDF Raw object must have a source filename.")
+
+    reference = raws[0]
+    reference_names = reference.ch_names
+    reference_types = {
+        name: channel_type(reference.info, index)
+        for index, name in enumerate(reference_names)
+    }
+
+    for raw, fname in zip(raws[1:], fnames[1:]):
+        names = raw.ch_names
+        missing = [name for name in reference_names if name not in names]
+        extra = [name for name in names if name not in reference_names]
+        if missing or extra:
+            differences = []
+            if missing:
+                differences.append("missing: " + ", ".join(missing))
+            if extra:
+                differences.append("additional: " + ", ".join(extra))
+            raise XDFImportError(
+                f'Cannot merge "{Path(fname).name}" because its channels differ '
+                f"from the first file ({'; '.join(differences)})."
+            )
+        if raw.info["sfreq"] != reference.info["sfreq"]:
+            raise XDFImportError(
+                f'Cannot merge "{Path(fname).name}" because its sampling frequency '
+                f"is {raw.info['sfreq']:.6g} Hz; the first file uses "
+                f"{reference.info['sfreq']:.6g} Hz. Select the same resampling "
+                "frequency for every file."
+            )
+
+        types = {
+            name: channel_type(raw.info, index) for index, name in enumerate(names)
+        }
+        mismatched_types = [
+            name for name in reference_names if types[name] != reference_types[name]
+        ]
+        if mismatched_types:
+            raise XDFImportError(
+                f'Cannot merge "{Path(fname).name}" because the channel type differs '
+                "for: " + ", ".join(mismatched_types)
+            )
+        if names != reference_names:
+            raw.reorder_channels(reference_names)
+
+    try:
+        return mne.concatenate_raws(raws, preload=True)
+    except ValueError as error:
+        raise XDFImportError(
+            "The selected XDF recordings have incompatible measurement metadata: "
+            f"{error}"
+        ) from error
 
 
 def _xdf_stream_descriptors(rows, stream_ids, skipped_stream_ids, channel_names):
@@ -152,14 +412,12 @@ def _empty_xdf_stream_warning(rows, skipped_stream_ids):
 
 def _repair_nonfinite_psd(data, spectrum, fmin, fmax):
     """Recompute non-finite Raw PSD rows without bridging missing-data gaps."""
-    psds = spectrum.get_data(picks="all")
+    psds = spectrum.get_data(picks="all", exclude=())
     nonfinite = ~np.isfinite(psds).all(axis=1)
     if not nonfinite.any() or not isinstance(data, mne.io.BaseRaw):
         return spectrum
 
-    samples = data.get_data(
-        picks=spectrum.ch_names, reject_by_annotation="NaN"
-    ).copy()
+    samples = data.get_data(picks=spectrum.ch_names, reject_by_annotation="NaN").copy()
     samples[~np.isfinite(samples)] = np.nan
     n_fft = min(data.n_times, 2048)
 
@@ -215,6 +473,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.model = model  # data model
         self._stream_viewers = []
+        self._psd_viewers = []
         self._stream_viewer_bads_before = {}
         self.setWindowTitle("MNELAB")
         self.setMinimumSize(600, 500)
@@ -266,6 +525,11 @@ class MainWindow(QMainWindow):
             self.open_data,
             QKeySequence.StandardKey.Open,
         )
+        self.all_actions["open_xdf_folder"] = file_menu.addAction(
+            QIcon.fromTheme("open-file"),
+            "Open XDF &Folder...",
+            self.open_xdf_folder,
+        )
         self.recent_menu = file_menu.addMenu(
             QIcon.fromTheme("open-recent"), "Open Recent"
         )
@@ -313,6 +577,19 @@ class MainWindow(QMainWindow):
             "&Quit",
             self.close,
             QKeySequence.StandardKey.Quit,
+        )
+
+        streams_menu = self.menuBar().addMenu("&Streams")
+        self.all_actions["split_streams"] = streams_menu.addAction(
+            QIcon.fromTheme("plot-data"),
+            "&Split Streams...",
+            self.split_streams,
+        )
+        streams_menu.addSeparator()
+        self.all_actions["stream_properties"] = streams_menu.addAction(
+            QIcon.fromTheme("chan-props"),
+            "Stream &Properties...",
+            self.stream_properties,
         )
 
         channels_menu = self.menuBar().addMenu("&Channels")
@@ -568,6 +845,7 @@ class MainWindow(QMainWindow):
         # actions that are always enabled
         self.always_enabled = [
             "open_file",
+            "open_xdf_folder",
             "about",
             "about_qt",
             "check_updates",
@@ -643,6 +921,7 @@ class MainWindow(QMainWindow):
         self.infowidget = QStackedWidget()
         self.infowidget.setMinimumWidth(INFOWIDGET_MIN_WIDTH)
         self.infowidget.addWidget(InfoWidget())
+        self.infowidget.widget(0).streams_clicked.connect(self.stream_properties)
         self.infowidget.widget(0).channels_clicked.connect(self.channel_properties)
         self.infowidget.widget(0).events_clicked.connect(self.edit_events)
         self.infowidget.widget(0).annotations_clicked.connect(self.edit_annotations)
@@ -866,14 +1145,16 @@ class MainWindow(QMainWindow):
         prefix_markers,
         fs_new,
         gap_threshold,
+        model=None,
     ):
         """Load XDF data, omitting selected streams that contain no samples."""
+        model = self.model if model is None else model
         stream_ids = list(stream_ids)
         skipped_stream_ids = []
 
         while True:
             try:
-                self.model.load(
+                model.load(
                     fname,
                     stream_ids=stream_ids.copy(),
                     marker_ids=marker_ids,
@@ -899,6 +1180,228 @@ class MainWindow(QMainWindow):
             else:
                 return skipped_stream_ids
 
+    def _configure_xdf(self, fname):
+        """Inspect an XDF and ask which streams and loading options to use."""
+        rows = _resolve_xdf_rows(fname)
+        dialog = XDFStreamsDialog(self, rows, fname=fname)
+        if not dialog.exec():
+            return None
+
+        fs_new = None
+        gap_threshold = 0.0
+        if dialog.resample.isChecked():
+            fs_new = float(dialog.fs_new.value())
+            if dialog.gap_threshold_checkbox.isChecked():
+                gap_threshold = float(dialog.gap_threshold.value())
+        return {
+            "fname": fname,
+            "rows": rows,
+            "stream_ids": dialog.selected_streams,
+            "marker_ids": dialog.selected_markers,
+            "prefix_markers": dialog.prefix_markers,
+            "fs_new": fs_new,
+            "gap_threshold": gap_threshold,
+        }
+
+    def _load_xdf_configuration(self, configuration, model=None):
+        """Load one configured XDF and attach its source-stream metadata."""
+        skipped_stream_ids = self._load_xdf(
+            configuration["fname"],
+            stream_ids=configuration["stream_ids"],
+            marker_ids=configuration["marker_ids"],
+            prefix_markers=configuration["prefix_markers"],
+            fs_new=configuration["fs_new"],
+            gap_threshold=configuration["gap_threshold"],
+            model=model,
+        )
+        target_model = self.model if model is None else model
+        target_model.current["source_streams"] = _xdf_stream_descriptors(
+            configuration["rows"],
+            configuration["stream_ids"],
+            skipped_stream_ids,
+            target_model.current["data"].ch_names,
+        )
+        return skipped_stream_ids
+
+    def _show_xdf_error(self, fname, error, *, merging=False):
+        """Show a file-specific XDF error without exposing a traceback."""
+        message = _describe_xdf_error(fname, error)
+        title = "Could Not Merge XDF Files" if merging else "Could Not Open XDF"
+        QMessageBox.critical(self, title, message)
+
+    def _open_xdf(self, fname):
+        """Configure and load one XDF as a separate data set."""
+        try:
+            configuration = self._configure_xdf(fname)
+            if configuration is None:
+                return False
+            if read_settings("memory_saving") and self.model.data:
+                self.model.evict_dataset(self.model.index)
+            skipped_stream_ids = self._load_xdf_configuration(configuration)
+        except Exception as error:
+            self._show_xdf_error(fname, error)
+            return False
+
+        if skipped_stream_ids:
+            QMessageBox.warning(
+                self,
+                "Empty XDF Streams Skipped",
+                _empty_xdf_stream_warning(configuration["rows"], skipped_stream_ids),
+            )
+        return True
+
+    def _merge_xdfs(
+        self,
+        configurations,
+        *,
+        auto_order_by_time=False,
+        maximum_seam_difference=1.0,
+        skip_unreadable=False,
+        unreadable_failures=None,
+    ):
+        """Load configured XDFs atomically and concatenate them into one data set."""
+        raws = []
+        source_streams = []
+        skipped_streams = []
+        failures = list(unreadable_failures or [])
+        fnames = []
+
+        for configuration in configurations:
+            temporary_model = Model()
+            try:
+                skipped_stream_ids = self._load_xdf_configuration(
+                    configuration, model=temporary_model
+                )
+            except Exception as error:
+                if not skip_unreadable:
+                    raise
+                failures.append((configuration["fname"], error))
+                continue
+            fnames.append(configuration["fname"])
+            raws.append(temporary_model.current["data"])
+            source_streams.append(temporary_model.current["source_streams"])
+            if skipped_stream_ids:
+                skipped_streams.append(
+                    (configuration["rows"], skipped_stream_ids, configuration["fname"])
+                )
+
+        if len(raws) < 2:
+            readable = (
+                "one readable file remains" if raws else "no readable files remain"
+            )
+            message = (
+                f"At least two readable XDF files are required for a merge, but "
+                f"{readable}."
+            )
+            if failures:
+                message += "\n\n" + _skipped_xdf_message(failures)
+            raise XDFImportError(message)
+
+        if auto_order_by_time:
+            order = _chronological_xdf_order(raws, fnames, maximum_seam_difference)
+            raws = [raws[index] for index in order]
+            source_streams = [source_streams[index] for index in order]
+            fnames = [fnames[index] for index in order]
+
+        merged = _merge_xdf_raws(raws, fnames)
+        unified_streams = _unify_xdf_streams(
+            source_streams,
+            fnames,
+            merged.ch_names,
+            merged.info["sfreq"],
+        )
+        if read_settings("memory_saving") and self.model.data:
+            self.model.evict_dataset(self.model.index)
+        name = f"{Path(fnames[0]).stem} ({len(fnames)} XDF files merged)"
+        self.model.load_data(
+            merged,
+            fnames[0],
+            name=name,
+            source_streams=unified_streams,
+            source_files=fnames,
+        )
+        self.model.history.append("data = mne.concatenate_raws(raws, preload=True)")
+
+        if failures:
+            QMessageBox.warning(
+                self,
+                "Unreadable XDF Files Skipped",
+                _skipped_xdf_message(failures),
+            )
+
+        if skipped_streams:
+            sections = []
+            for rows, stream_ids, fname in skipped_streams:
+                sections.append(
+                    f"{Path(fname).name}:\n"
+                    + _empty_xdf_stream_warning(rows, stream_ids)
+                )
+            QMessageBox.warning(
+                self,
+                "Empty XDF Streams Skipped",
+                "\n\n".join(sections),
+            )
+
+    def _open_multiple_xdfs(self, fnames):
+        """Show the multiple-XDF workflow and perform the chosen import."""
+        dialog = XDFImportDialog(self, fnames)
+        if not dialog.exec():
+            return
+        fnames = dialog.ordered_files
+        if not dialog.merge_files:
+            for fname in fnames:
+                self._set_last_dir(fname)
+                self._open_xdf(fname)
+            return
+
+        configurations = []
+        unreadable_failures = []
+        try:
+            for fname in fnames:
+                self._set_last_dir(fname)
+                try:
+                    configuration = self._configure_xdf(fname)
+                except Exception as error:
+                    if not dialog.skip_unreadable_files:
+                        raise
+                    unreadable_failures.append((fname, error))
+                    continue
+                if configuration is None:
+                    return
+                configurations.append(configuration)
+            self._merge_xdfs(
+                configurations,
+                auto_order_by_time=dialog.auto_order_by_time,
+                maximum_seam_difference=dialog.maximum_seam_difference,
+                skip_unreadable=dialog.skip_unreadable_files,
+                unreadable_failures=unreadable_failures,
+            )
+        except Exception as error:
+            failed_fname = fname if "fname" in locals() else fnames[0]
+            self._show_xdf_error(failed_fname, error, merging=True)
+
+    def open_xdf_folder(self):
+        """Import all XDF files in a selected folder and its subfolders."""
+        folder = QFileDialog.getExistingDirectory(
+            self, "Open XDF Folder", self._get_last_dir()
+        )
+        if not folder:
+            return
+        write_settings(last_dir=str(folder))
+        fnames = _xdf_files_in_folder(folder)
+        if not fnames:
+            QMessageBox.information(
+                self,
+                "No XDF Files Found",
+                "The selected folder and its subfolders contain no supported XDF "
+                "files.",
+            )
+            return
+        if len(fnames) == 1:
+            self._open_xdf(fnames[0])
+        else:
+            self._open_multiple_xdfs(fnames)
+
     def open_data(self, fname=None):
         """Open raw file."""
         if fname is None:
@@ -908,62 +1411,30 @@ class MainWindow(QMainWindow):
             )
         else:
             fnames = [fname]
-        for fname in fnames:
-            if not (Path(fname).is_file() or Path(fname).is_dir()):
-                self._remove_recent(fname)
+
+        for selected_fname in fnames:
+            if not (Path(selected_fname).is_file() or Path(selected_fname).is_dir()):
+                self._remove_recent(selected_fname)
                 QMessageBox.critical(
-                    self, "File does not exist", f"File {fname} does not exist anymore."
+                    self,
+                    "File does not exist",
+                    f"File {selected_fname} does not exist anymore.",
                 )
                 return
 
-            if read_settings("memory_saving") and self.model.data:
-                self.model.evict_dataset(self.model.index)
+        if len(fnames) > 1 and all(_is_xdf_file(path) for path in fnames):
+            self._open_multiple_xdfs(fnames)
+            return
 
+        for fname in fnames:
             self._set_last_dir(fname)
             ext = "".join(Path(fname).suffixes)
 
-            if any(ext.endswith(e) for e in (".xdf", ".xdfz", ".xdf.gz")):  # XDF
-                rows = [
-                    [
-                        s["stream_id"],
-                        s["name"],
-                        s["type"],
-                        s["channel_count"],
-                        s["channel_format"],
-                        s["nominal_srate"],
-                    ]
-                    for s in resolve_streams(fname)
-                ]
-                dialog = XDFStreamsDialog(self, rows, fname=fname)
-                if dialog.exec():
-                    selected_stream_ids = dialog.selected_streams
-                    fs_new = None
-                    gap_threshold = 0.0
-                    if dialog.resample.isChecked():
-                        fs_new = float(dialog.fs_new.value())
-                        if dialog.gap_threshold_checkbox.isChecked():
-                            gap_threshold = float(dialog.gap_threshold.value())
-                    skipped_stream_ids = self._load_xdf(
-                        fname,
-                        stream_ids=selected_stream_ids,
-                        marker_ids=dialog.selected_markers,
-                        prefix_markers=dialog.prefix_markers,
-                        fs_new=fs_new,
-                        gap_threshold=gap_threshold,
-                    )
-                    self.model.current["source_streams"] = _xdf_stream_descriptors(
-                        rows,
-                        selected_stream_ids,
-                        skipped_stream_ids,
-                        self.model.current["data"].ch_names,
-                    )
-                    if skipped_stream_ids:
-                        QMessageBox.warning(
-                            self,
-                            "Empty XDF Streams Skipped",
-                            _empty_xdf_stream_warning(rows, skipped_stream_ids),
-                        )
+            if _is_xdf_file(fname):
+                self._open_xdf(fname)
             elif ext.lower() == ".mat":
+                if read_settings("memory_saving") and self.model.data:
+                    self.model.evict_dataset(self.model.index)
                 dialog = MatDialog(self, Path(fname).name, parse_mat(fname))
                 if dialog.exec():
                     self.model.load(
@@ -973,16 +1444,22 @@ class MainWindow(QMainWindow):
                         transpose=dialog.transpose,
                     )
             elif ext == ".npy":
+                if read_settings("memory_saving") and self.model.data:
+                    self.model.evict_dataset(self.model.index)
                 dialog = NpyDialog(self, parse_npy(fname))
                 if dialog.exec_():
                     self.model.load(fname, dialog.fs, dialog.transpose)
             elif ext == ".vhdr":
+                if read_settings("memory_saving") and self.model.data:
+                    self.model.evict_dataset(self.model.index)
                 dialog = BrainVisionDialog(self)
                 if dialog.exec():
                     self.model.load(
                         fname, ignore_marker_types=dialog.ignore_marker_types
                     )
             elif ext in (".bvrh", ".bvrd", ".bvrm", ".bvri"):
+                if read_settings("memory_saving") and self.model.data:
+                    self.model.evict_dataset(self.model.index)
                 try:
                     header = read_bvrf_header(Path(fname).with_suffix(".bvrh"))
                     if header["n_participants"] > 1:
@@ -1010,6 +1487,8 @@ class MainWindow(QMainWindow):
                 except Exception as e:
                     QMessageBox.critical(self, "Error loading BVRF file", str(e))
             else:  # all other file formats
+                if read_settings("memory_saving") and self.model.data:
+                    self.model.evict_dataset(self.model.index)
                 try:
                     self.model.load(fname)
                 except FileNotFoundError as e:
@@ -1188,8 +1667,31 @@ class MainWindow(QMainWindow):
     def xdf_metadata(self, fname=None):
         """Show XDF metadata."""
         if fname is None:
-            fname = self.model.current["fname"]
-        xml = get_xml(fname)
+            source_files = self.model.current.get("source_files") or [
+                self.model.current["fname"]
+            ]
+            if len(source_files) > 1:
+                labels = [
+                    f"{index + 1}. {Path(path).name}"
+                    for index, path in enumerate(source_files)
+                ]
+                selected, accepted = QInputDialog.getItem(
+                    self,
+                    "Select Source XDF",
+                    "Show metadata for:",
+                    labels,
+                    editable=False,
+                )
+                if not accepted:
+                    return
+                fname = source_files[labels.index(selected)]
+            else:
+                fname = source_files[0]
+        try:
+            xml = get_xml(fname)
+        except Exception as error:
+            self._show_xdf_error(fname, error)
+            return
         dialog = XDFMetadataDialog(self, xml)
         dialog.exec()
 
@@ -1209,6 +1711,31 @@ class MainWindow(QMainWindow):
                     return
             self.auto_duplicate()
             self.model.pick_channels(picks)
+
+    def stream_properties(self):
+        """Edit how the current dataset's channels are decomposed into streams."""
+        self._edit_streams(split=False)
+
+    def split_streams(self):
+        """Decompose the current dataset into one stream per channel."""
+        self._edit_streams(split=True)
+
+    def _edit_streams(self, *, split):
+        """Open the stream editor, optionally with an individual-channel split."""
+        data = self.model.current["data"]
+        streams, _inferred = _effective_streams(
+            data, self.model.current["source_streams"]
+        )
+        dialog = StreamPropertiesDialog(self, data.info, streams)
+        if split:
+            dialog.split_into_channels()
+        if dialog.exec():
+            dataset_id = self.model.current["id"]
+            for viewer in list(self._stream_viewers):
+                if viewer.dataset_id == dataset_id:
+                    viewer._closing_stale_data = True
+                    viewer.close()
+            self.model.set_streams(dialog.streams)
 
     def channel_properties(self):
         """Show channel properties dialog."""
@@ -1492,9 +2019,7 @@ class MainWindow(QMainWindow):
                     psd_kwds["picks"] = "all"
                     plot_kwds["picks"] = "all"
                     spectrum = data.compute_psd(**psd_kwds)
-            spectrum = _repair_nonfinite_psd(
-                data, spectrum, dialog.fmin, dialog.fmax
-            )
+            spectrum = _repair_nonfinite_psd(data, spectrum, dialog.fmin, dialog.fmax)
             if spectrum is None:
                 QMessageBox.warning(
                     self,
@@ -1502,16 +2027,44 @@ class MainWindow(QMainWindow):
                     "The selected data contain no finite samples to plot.",
                 )
                 return
-            fig = spectrum.plot(show=False, **plot_kwds)
+            if dialog.exclude == "bads":
+                good_channels = [
+                    name
+                    for name in spectrum.ch_names
+                    if name not in spectrum.info["bads"]
+                ]
+                if not good_channels:
+                    QMessageBox.warning(
+                        self,
+                        "Power Spectral Density",
+                        "All available channels are marked as bad.",
+                    )
+                    return
+                spectrum = spectrum.copy().pick(good_channels)
             psd_kwds = ", ".join(f"{key}={value!r}" for key, value in psd_kwds.items())
             plot_kwds = ", ".join(
                 f"{key}={value!r}" for key, value in plot_kwds.items()
             )
             hist = f"data.compute_psd({psd_kwds}).plot({plot_kwds})"
             self.model.history.append(hist)
-            win = fig.canvas.manager.window
-            win.setWindowTitle("Power spectral density")
-            fig.show()
+            from mnelab.widgets.psd_viewer import PSDViewerWindow
+
+            viewer = PSDViewerWindow(
+                spectrum,
+                streams=self.model.current["source_streams"],
+                spatial_colors=dialog.spatial_colors,
+                max_channels=read_settings("max_channels"),
+                title=self.model.current["name"],
+                parent=self,
+            )
+            self._psd_viewers.append(viewer)
+
+            def viewer_destroyed(*_args):
+                if viewer in self._psd_viewers:
+                    self._psd_viewers.remove(viewer)
+
+            viewer.destroyed.connect(viewer_destroyed)
+            viewer.show()
 
     def plot_locations(self):
         """Plot current montage."""
@@ -1760,12 +2313,16 @@ class MainWindow(QMainWindow):
             msgbox.show()
 
     def filter_data(self):
-        """Filter data."""
-        nyquist = self.model.current["data"].info["sfreq"] / 2
-        dialog = FilterDialog(self, fmax=nyquist)
+        """Configure and apply independent filters for each source stream."""
+        from mnelab.widgets.stream_viewer import normalize_streams
+
+        data = self.model.current["data"]
+        nyquist = data.info["sfreq"] / 2
+        streams = normalize_streams(data, self.model.current["source_streams"])
+        dialog = FilterDialog(self, fmax=nyquist, streams=streams)
         if dialog.exec():
             self.auto_duplicate()
-            self.model.filter(dialog.lower, dialog.upper, dialog.notch)
+            self.model.filter(stream_filters=dialog.filters)
 
     def resample_data(self):
         """Resample data."""
