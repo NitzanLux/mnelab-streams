@@ -6,6 +6,7 @@ import re
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -16,6 +17,8 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+ANNOTATION_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
 class AnnotationSidebar(QWidget):
@@ -154,17 +157,20 @@ class AnnotationSidebar(QWidget):
         self.list.clear()
         records = []
         if hasattr(self.raw, "annotations"):
-            records = sorted(
-                zip(
-                    self.raw.annotations.onset,
-                    self.raw.annotations.duration,
-                    self.raw.annotations.description,
-                    strict=True,
-                ),
-                key=lambda record: float(record[0]),
-            )
+            records = [
+                (index, onset, duration, description)
+                for index, (onset, duration, description) in enumerate(
+                    zip(
+                        self.raw.annotations.onset,
+                        self.raw.annotations.duration,
+                        self.raw.annotations.description,
+                        strict=True,
+                    )
+                )
+            ]
+            records.sort(key=lambda record: float(record[1]))
         visible_count = 0
-        for onset, duration, description in records:
+        for annotation_index, onset, duration, description in records:
             description = str(description)
             if not self.accepts(description):
                 continue
@@ -173,6 +179,7 @@ class AnnotationSidebar(QWidget):
             duration_text = f"  ({duration:.3f} s)" if duration > 0 else ""
             item = QListWidgetItem(f"{start:10.3f} s  {description}{duration_text}")
             item.setData(Qt.ItemDataRole.UserRole, start)
+            item.setData(ANNOTATION_INDEX_ROLE, annotation_index)
             item.setToolTip(
                 f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
                 f"Description: {description}"
@@ -183,6 +190,19 @@ class AnnotationSidebar(QWidget):
             self.count_label.setText(f"Showing {visible_count} of {len(records)}")
         else:
             self.count_label.setText(f"Invalid regex: {self._regex_error}")
+
+    def select_annotation(self, annotation_index):
+        """Select and reveal an annotation already visible in the browser."""
+        for row in range(self.list.count()):
+            item = self.list.item(row)
+            if item.data(ANNOTATION_INDEX_ROLE) == annotation_index:
+                self.list.setCurrentItem(item)
+                self.list.scrollToItem(
+                    item,
+                    QAbstractItemView.ScrollHint.PositionAtCenter,
+                )
+                return True
+        return False
 
     def _compile_regex(self):
         """Compile the active pattern and expose syntax errors in the filter UI."""

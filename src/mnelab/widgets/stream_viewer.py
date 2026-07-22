@@ -21,6 +21,7 @@ from PySide6.QtCore import (
 )
 from PySide6.QtGui import QColor, QCursor, QDrag, QKeyEvent
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QApplication,
     QCheckBox,
     QColorDialog,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
+    QRubberBand,
     QScrollArea,
     QSlider,
     QSpinBox,
@@ -428,6 +430,158 @@ class DetachedStreamWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class StreamPlotWidget(pg.PlotWidget):
+    """Plot with EDFbrowser-style time navigation gestures."""
+
+    zoom_requested = Signal(float, float)
+    pan_requested = Signal(float)
+    context_requested = Signal(object)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._gesture = None
+        self._press_position = None
+        self._press_start = 0.0
+        self._press_duration = 0.0
+        self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+
+    def _scene_position(self, position):
+        point = position.toPoint() if hasattr(position, "toPoint") else position
+        return self.mapToScene(point)
+
+    def _inside_data_area(self, position):
+        scene_position = self._scene_position(position)
+        return self.getPlotItem().vb.sceneBoundingRect().contains(scene_position)
+
+    def _time_at(self, position):
+        scene_position = self._scene_position(position)
+        return float(self.getPlotItem().vb.mapSceneToView(scene_position).x())
+
+    def _time_range(self):
+        start, stop = self.getPlotItem().vb.viewRange()[0]
+        return float(start), max(float(stop - start), np.finfo(float).eps)
+
+    def zoom_at(self, factor, anchor):
+        """Request a cursor-anchored time zoom by ``factor``."""
+        start, duration = self._time_range()
+        factor = float(factor)
+        if not np.isfinite(factor) or factor <= 0:
+            return
+        ratio = float(np.clip((float(anchor) - start) / duration, 0.0, 1.0))
+        new_duration = duration * factor
+        self.zoom_requested.emit(float(anchor) - ratio * new_duration, new_duration)
+
+    def mousePressEvent(self, event):
+        if not self._inside_data_area(event.position()):
+            super().mousePressEvent(event)
+            return
+        modifiers = event.modifiers()
+        if event.button() == Qt.MouseButton.MiddleButton or (
+            event.button() == Qt.MouseButton.LeftButton
+            and modifiers & Qt.KeyboardModifier.ShiftModifier
+        ):
+            self._gesture = "pan"
+            self._press_position = event.position()
+            self._press_start, self._press_duration = self._time_range()
+            self.viewport().setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._gesture = "zoom"
+            self._press_position = event.position()
+            self._update_rubber_band(event.position())
+            self._rubber_band.show()
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._gesture == "zoom":
+            self._update_rubber_band(event.position())
+            event.accept()
+            return
+        if self._gesture == "pan":
+            view_width = max(self.getPlotItem().vb.sceneBoundingRect().width(), 1.0)
+            delta_pixels = event.position().x() - self._press_position.x()
+            self.pan_requested.emit(
+                self._press_start - delta_pixels / view_width * self._press_duration
+            )
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._gesture == "zoom" and event.button() == Qt.MouseButton.LeftButton:
+            self._rubber_band.hide()
+            distance = abs(event.position().x() - self._press_position.x())
+            if distance >= QApplication.startDragDistance():
+                start = self._time_at(self._press_position)
+                stop = self._time_at(event.position())
+                self.zoom_requested.emit(min(start, stop), abs(stop - start))
+            self._clear_gesture()
+            event.accept()
+            return
+        if self._gesture == "pan" and event.button() in (
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.MiddleButton,
+        ):
+            self._clear_gesture()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self._inside_data_area(event.position())
+        ):
+            self._rubber_band.hide()
+            self._clear_gesture()
+            self.zoom_at(0.5, self._time_at(event.position()))
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def wheelEvent(self, event):
+        if not self._inside_data_area(event.position()):
+            super().wheelEvent(event)
+            return
+        delta = event.angleDelta().y()
+        if not delta:
+            return
+        start, duration = self._time_range()
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            self.zoom_at(0.5 if delta > 0 else 2.0, self._time_at(event.position()))
+        else:
+            self.pan_requested.emit(start + (-1 if delta > 0 else 1) * duration / 4)
+        event.accept()
+
+    def contextMenuEvent(self, event):
+        if self._inside_data_area(event.pos()):
+            self.context_requested.emit(event.pos())
+            event.accept()
+            return
+        super().contextMenuEvent(event)
+
+    def _update_rubber_band(self, position):
+        data_rect = self.getPlotItem().vb.sceneBoundingRect()
+        top = self.mapFromScene(data_rect.topLeft()).y()
+        bottom = self.mapFromScene(data_rect.bottomLeft()).y()
+        left = int(round(self._press_position.x()))
+        right = int(round(position.x()))
+        self._rubber_band.setGeometry(
+            min(left, right),
+            min(top, bottom),
+            max(1, abs(right - left)),
+            max(1, abs(bottom - top)),
+        )
+
+    def _clear_gesture(self):
+        self._gesture = None
+        self._press_position = None
+        self.viewport().unsetCursor()
+
+
 class StreamPanel(QFrame):
     """A single display group containing one or more source streams."""
 
@@ -438,6 +592,11 @@ class StreamPanel(QFrame):
     page_changed = Signal()
     float_requested = Signal()
     swap_requested = Signal(object)
+    time_zoom_requested = Signal(float, float)
+    time_pan_requested = Signal(float)
+    zoom_back_requested = Signal()
+    zoom_forward_requested = Signal()
+    reset_time_requested = Signal()
 
     def __init__(
         self,
@@ -451,6 +610,7 @@ class StreamPanel(QFrame):
         annotation_visible=None,
         unit="Auto",
         gain=1.0,
+        channel_order=None,
         channels_per_page=20,
         parent=None,
     ):
@@ -465,9 +625,16 @@ class StreamPanel(QFrame):
         self.channel_settings = channel_settings
         self.channel_fits = channel_fits
         self.annotation_visible = annotation_visible or (lambda _description: True)
-        self.channel_names = [
+        source_channel_names = [
             name for source in sources for name in source["channel_names"]
         ]
+        requested_order = [
+            name for name in (channel_order or []) if name in source_channel_names
+        ]
+        self.channel_names = list(dict.fromkeys(requested_order))
+        self.channel_names.extend(
+            name for name in source_channel_names if name not in self.channel_names
+        )
         self.channels_per_page = max(1, int(channels_per_page))
         self._page = 0
         self._channel_types = dict(
@@ -589,21 +756,29 @@ class StreamPanel(QFrame):
         self.channel_list = QListWidget()
         self.channel_list.setFixedWidth(CHANNEL_LABEL_WIDTH)
         self.channel_list.setToolTip(
-            "Click to toggle bad status; right-click for channel display properties"
+            "Click to hide; drag to reorder; right-click for channel actions"
         )
         self.channel_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-        self.channel_list.itemClicked.connect(self._toggle_bad_channel)
+        self.channel_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
+        self.channel_list.setDefaultDropAction(Qt.DropAction.MoveAction)
+        self.channel_list.setDropIndicatorShown(True)
+        self.channel_list.itemClicked.connect(self._hide_channel)
+        self.channel_list.model().rowsMoved.connect(self._channel_rows_moved)
         self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.channel_list.customContextMenuRequested.connect(
             self._show_channel_context_menu
         )
         body.addWidget(self.channel_list)
 
-        self.plot = pg.PlotWidget()
+        self.plot = StreamPlotWidget()
         visible_count = min(len(self.channel_names), self.channels_per_page)
         self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
+        self.plot.setToolTip(
+            "Drag to zoom Â· Shift+drag or middle-drag to pan Â· "
+            "Wheel to move Â· Ctrl+wheel to zoom Â· Double-click to zoom in"
+        )
         self.plot.showAxis("left")
         # AxisItem otherwise grows to fit each panel's longest channel name,
         # shifting equal time values to different horizontal positions.
@@ -612,6 +787,9 @@ class StreamPanel(QFrame):
         self.plot.getPlotItem().setClipToView(True)
         self.plot.getPlotItem().setDownsampling(auto=True, mode="peak")
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.plot.zoom_requested.connect(self.time_zoom_requested.emit)
+        self.plot.pan_requested.connect(self.time_pan_requested.emit)
+        self.plot.context_requested.connect(self._show_plot_context_menu)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
         self._curves = [
@@ -620,7 +798,6 @@ class StreamPanel(QFrame):
         ]
         self._event_lines = []
         self._annotation_regions = []
-        self._annotation_labels = []
         self._update_channel_list()
         self._update_page_controls()
 
@@ -659,7 +836,11 @@ class StreamPanel(QFrame):
 
     @property
     def settings(self):
-        return {"unit": self.unit_combo.currentText(), "gain": self.gain.value()}
+        return {
+            "unit": self.unit_combo.currentText(),
+            "gain": self.gain.value(),
+            "channel_order": list(self.channel_names),
+        }
 
     def _source_tooltip(self):
         lines = []
@@ -811,12 +992,68 @@ class StreamPanel(QFrame):
         self._update_channel_list()
         self._settings_updated()
 
+    def reorder_channels(self, channel_order):
+        """Apply a display-only order containing every channel in this panel."""
+        channel_order = list(channel_order)
+        if (
+            len(channel_order) != len(self.channel_names)
+            or set(channel_order) != set(self.channel_names)
+        ):
+            raise ValueError("Channel order must contain every panel channel once.")
+        if channel_order == self.channel_names:
+            return
+        self.channel_names = channel_order
+        self._channel_indices = {
+            name: index for index, name in enumerate(self.channel_names)
+        }
+        self._values = np.empty((len(self.visible_channel_names), 0))
+        self._axis_channels = None
+        self._resize_curves()
+        self._update_channel_list()
+        self.page_changed.emit()
+        self._settings_updated()
+
+    def move_channel(self, name, index):
+        """Move one channel to an absolute display index."""
+        if name not in self.channel_names:
+            raise KeyError(f"Unknown channel: {name}")
+        order = list(self.channel_names)
+        order.remove(name)
+        order.insert(int(np.clip(index, 0, len(order))), name)
+        self.reorder_channels(order)
+
+    def _channel_rows_moved(self, *_args):
+        """Persist the order produced by an internal channel-list drop."""
+        visible_order = [
+            self.channel_list.item(row).data(Qt.ItemDataRole.UserRole)
+            for row in range(self.channel_list.count())
+        ]
+        visible_names = iter(visible_order)
+        page_order = [
+            next(visible_names)
+            if self.channel_settings[name]["visible"]
+            else name
+            for name in self.page_channel_names
+        ]
+        start = self._page * self.channels_per_page
+        order = list(self.channel_names)
+        order[start : start + len(page_order)] = page_order
+        self.reorder_channels(order)
+
+    def _hide_channel(self, item):
+        """Hide the clicked channel instead of marking it bad."""
+        self.set_channel_visible(item.data(Qt.ItemDataRole.UserRole), False)
+
     def set_channel_visible(self, name, visible):
-        """Show or hide one channel without removing its restorable list row."""
+        """Show or hide one channel and compact the remaining lanes."""
         visible = bool(visible)
         if self.channel_settings[name]["visible"] == visible:
             return
         self.channel_settings[name]["visible"] = visible
+        self._visibility_changed()
+
+    def _visibility_changed(self):
+        """Refresh labels, lanes, and fetched rows after a visibility change."""
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -879,17 +1116,24 @@ class StreamPanel(QFrame):
         self.create_channel_display_dialog(name).exec()
 
     def create_channel_context_menu(self, name):
-        """Create the context menu for one channel list entry."""
+        """Create display, visibility, quality, and ordering actions."""
         if name not in self.channel_settings:
             raise KeyError(f"Unknown channel: {name}")
         settings = self.channel_settings[name]
-        menu = QMenu(self.channel_list)
-        visible = menu.addAction("Show Trace")
-        visible.setCheckable(True)
-        visible.setChecked(settings["visible"])
-        visible.toggled.connect(
-            lambda checked, name=name: self.set_channel_visible(name, checked)
+        menu = QMenu(self)
+        visibility_text = "Hide Channel" if settings["visible"] else "Show Channel"
+        menu.addAction(
+            visibility_text,
+            lambda _checked=False, name=name: self.set_channel_visible(
+                name, not self.channel_settings[name]["visible"]
+            ),
         )
+        if settings["visible"] and len(self.visible_channel_names) > 1:
+            menu.addAction(
+                "Show Only This Channel",
+                lambda _checked=False, name=name: self.show_only_channel(name),
+            )
+        self._add_hidden_channel_actions(menu)
         menu.addSeparator()
         menu.addAction(
             "Edit Channel Display…",
@@ -941,6 +1185,22 @@ class StreamPanel(QFrame):
                 lambda _checked=False, name=name: self.set_channel_color(name, None),
             )
         menu.addSeparator()
+        channel_index = self.channel_names.index(name)
+        move_up = menu.addAction(
+            "Move Channel Up",
+            lambda _checked=False, name=name, index=channel_index: self.move_channel(
+                name, index - 1
+            ),
+        )
+        move_up.setEnabled(channel_index > 0)
+        move_down = menu.addAction(
+            "Move Channel Down",
+            lambda _checked=False, name=name, index=channel_index: self.move_channel(
+                name, index + 1
+            ),
+        )
+        move_down.setEnabled(channel_index < len(self.channel_names) - 1)
+        menu.addSeparator()
         bad = menu.addAction("Mark as Bad")
         bad.setCheckable(True)
         bad.setChecked(name in self.raw.info["bads"])
@@ -952,6 +1212,80 @@ class StreamPanel(QFrame):
             lambda _checked=False, name=name: self.reset_channel_display(name),
         )
         return menu
+
+    def _add_hidden_channel_actions(self, menu):
+        hidden = [
+            name
+            for name in self.channel_names
+            if not self.channel_settings[name]["visible"]
+        ]
+        if not hidden:
+            return
+        show_menu = menu.addMenu("Show Hidden Channel")
+        for hidden_name in hidden:
+            show_menu.addAction(
+                hidden_name,
+                lambda _checked=False, name=hidden_name: self.set_channel_visible(
+                    name, True
+                ),
+            )
+        menu.addAction("Show All Channels", self.show_all_channels)
+
+    def show_only_channel(self, name):
+        """Hide every peer while retaining ``name`` in its compact lane."""
+        changed = False
+        for channel_name in self.channel_names:
+            visible = channel_name == name
+            settings = self.channel_settings[channel_name]
+            changed |= settings["visible"] != visible
+            settings["visible"] = visible
+        if changed:
+            self._visibility_changed()
+
+    def show_all_channels(self):
+        """Restore all hidden channels in their current display order."""
+        changed = False
+        for name in self.channel_names:
+            changed |= not self.channel_settings[name]["visible"]
+            self.channel_settings[name]["visible"] = True
+        if changed:
+            self._visibility_changed()
+
+    def create_plot_context_menu(self, name=None):
+        """Create a context menu for a trace lane or empty plot area."""
+        menu = self.create_channel_context_menu(name) if name else QMenu(self)
+        if name is None:
+            self._add_hidden_channel_actions(menu)
+        if menu.actions():
+            menu.addSeparator()
+        menu.addAction("Zoom Back", lambda: self.zoom_back_requested.emit())
+        menu.addAction("Zoom Forward", lambda: self.zoom_forward_requested.emit())
+        menu.addAction("Reset Time Window", lambda: self.reset_time_requested.emit())
+        return menu
+
+    def channel_at_plot_position(self, position):
+        """Return the visible channel occupying a plot-widget position."""
+        visible_names = self.visible_channel_names
+        if not visible_names:
+            return None
+        scene_position = self.plot._scene_position(position)
+        view_box = self.plot.getPlotItem().vb
+        if not view_box.sceneBoundingRect().contains(scene_position):
+            return None
+        point = view_box.mapSceneToView(scene_position)
+        top_offset = (len(visible_names) - 1) * self._lane_step
+        channel_index = int(round((top_offset - point.y()) / self._lane_step))
+        if channel_index < 0 or channel_index >= len(visible_names):
+            return None
+        center = top_offset - channel_index * self._lane_step
+        if abs(point.y() - center) > self._lane_step / 2:
+            return None
+        return visible_names[channel_index]
+
+    def _show_plot_context_menu(self, position):
+        name = self.channel_at_plot_position(position)
+        menu = self.create_plot_context_menu(name)
+        menu.exec(self.plot.viewport().mapToGlobal(position))
 
     def _show_channel_context_menu(self, position):
         item = self.channel_list.itemAt(position)
@@ -1089,7 +1423,7 @@ class StreamPanel(QFrame):
     def _update_channel_list(self):
         self.channel_list.clear()
         bads = set(self.raw.info["bads"])
-        for name in self.page_channel_names:
+        for name in self.visible_channel_names:
             item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, name)
             settings = self.channel_settings[name]
@@ -1098,12 +1432,6 @@ class StreamPanel(QFrame):
                 font = item.font()
                 font.setStrikeOut(True)
                 item.setFont(font)
-            elif not settings["visible"]:
-                item.setForeground(QColor("gray"))
-                font = item.font()
-                font.setItalic(True)
-                item.setFont(font)
-                item.setToolTip("Trace hidden; right-click to show it")
             elif settings["color"]:
                 item.setForeground(QColor(settings["color"]))
             self.channel_list.addItem(item)
@@ -1193,6 +1521,23 @@ class StreamPanel(QFrame):
     def redraw(self, start_time, duration):
         """Redraw cached visible data without reading the Raw object again."""
         visible_names = self.visible_channel_names
+        offsets = (
+            len(visible_names) - 1 - np.arange(len(visible_names))
+        ) * self._lane_step
+        axis_channels = tuple(visible_names)
+        if axis_channels != self._axis_channels:
+            self.plot.getAxis("left").setTicks(
+                [
+                    [
+                        (float(offset), name)
+                        for offset, name in zip(offsets, visible_names, strict=True)
+                    ]
+                ]
+            )
+            self._axis_channels = axis_channels
+        margin = self._lane_step / 2
+        top = float(offsets[0]) if len(offsets) else 0.0
+        self.plot.setYRange(-margin, top + margin, padding=0)
         if not self._values.size:
             for curve in self._curves:
                 curve.hide()
@@ -1236,21 +1581,6 @@ class StreamPanel(QFrame):
         )
         max_points = max(200, self.plot.width() * 2)
         bads = set(self.raw.info["bads"])
-        offsets = (
-            len(visible_names) - 1 - np.arange(len(visible_names))
-        ) * self._lane_step
-        axis_channels = tuple(visible_names)
-        if axis_channels != self._axis_channels:
-            self.plot.getAxis("left").setTicks(
-                [
-                    [
-                        (float(offset), name)
-                        for offset, name in zip(offsets, visible_names)
-                    ]
-                ]
-            )
-            self._axis_channels = axis_channels
-
         for index, curve in enumerate(self._curves):
             if index >= len(visible_names):
                 curve.hide()
@@ -1291,8 +1621,6 @@ class StreamPanel(QFrame):
         self._update_scale_label(source_scales, amplitude, visible_names)
         self._draw_overlays(start_time, start_time + duration)
         self.plot.setXRange(start_time, start_time + duration, padding=0)
-        margin = self._lane_step / 2
-        self.plot.setYRange(-margin, offsets[0] + margin, padding=0)
 
     def _update_scale_label(self, source_scales, amplitude, visible_names):
         factor = UNIT_FACTORS[self._display_unit]
@@ -1361,8 +1689,6 @@ class StreamPanel(QFrame):
                     (
                         max(start, visible_start),
                         min(stop, visible_stop),
-                        str(description),
-                        duration,
                         color,
                     )
                 )
@@ -1371,17 +1697,9 @@ class StreamPanel(QFrame):
             region.setZValue(5)
             self.plot.addItem(region)
             self._annotation_regions.append(region)
-            label = pg.TextItem(anchor=(0, 1), ensureInBounds=True)
-            label.setZValue(30)
-            self.plot.addItem(label)
-            self._annotation_labels.append(label)
-        top = max(0, len(self.visible_channel_names) - 1) * self._lane_step
-        top += self._lane_step * 0.46
-        for index, (region, label) in enumerate(
-            zip(self._annotation_regions, self._annotation_labels, strict=True)
-        ):
+        for index, region in enumerate(self._annotation_regions):
             if index < len(visible_annotations):
-                start, stop, description, duration, color = visible_annotations[index]
+                start, stop, color = visible_annotations[index]
                 qcolor = QColor(color)
                 region.setRegion((start, stop))
                 region.setBrush(
@@ -1389,25 +1707,15 @@ class StreamPanel(QFrame):
                 )
                 for line in region.lines:
                     line.setPen(pg.mkPen(color, width=1.5))
-                duration_text = (
-                    f" · {duration * 1000:g} ms"
-                    if 0 < duration < 1
-                    else (f" · {duration:g} s" if duration > 0 else "")
-                )
-                label.setText(description + duration_text, color=color)
-                label.setPos(start, top - (index % 3) * self._lane_step * 0.24)
-                label.setToolTip(
-                    f"{description}\nOnset: {start:g} s\nDuration: {duration:g} s"
-                )
                 region.show()
-                label.show()
             else:
                 region.hide()
-                label.hide()
 
 
 class AnnotationStream(QFrame):
     """Dedicated timeline lane with bounded, wrapped annotation labels."""
+
+    annotation_clicked = Signal(int)
 
     def __init__(
         self,
@@ -1423,6 +1731,7 @@ class AnnotationStream(QFrame):
         self._regions = []
         self._labels = []
         self._last_window = None
+        self._visible_annotations = []
         self._wrapped_plot_width = None
         self._resize_timer = QTimer(self)
         self._resize_timer.setSingleShot(True)
@@ -1451,6 +1760,7 @@ class AnnotationStream(QFrame):
         self.plot.getAxis("left").setTicks([[]])
         self.plot.showGrid(x=True, y=False, alpha=0.15)
         self.plot.getPlotItem().setClipToView(True)
+        self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         layout.addWidget(self.plot, 1)
 
     @property
@@ -1467,10 +1777,17 @@ class AnnotationStream(QFrame):
         sfreq = float(self.raw.info["sfreq"])
         visible_annotations = []
         if hasattr(self.raw, "annotations"):
-            for onset, annotation_duration, description in zip(
-                self.raw.annotations.onset,
-                self.raw.annotations.duration,
-                self.raw.annotations.description,
+            for annotation_index, (
+                onset,
+                annotation_duration,
+                description,
+            ) in enumerate(
+                zip(
+                    self.raw.annotations.onset,
+                    self.raw.annotations.duration,
+                    self.raw.annotations.description,
+                    strict=True,
+                )
             ):
                 start = float(onset - self.raw.first_time)
                 stop = start + max(float(annotation_duration), 1 / sfreq)
@@ -1483,12 +1800,14 @@ class AnnotationStream(QFrame):
                 color = self.annotation_colors.get(description, "#4c78a8")
                 visible_annotations.append(
                     (
+                        annotation_index,
                         max(start, visible_start),
                         min(stop, visible_stop),
                         str(description),
                         color,
                     )
                 )
+        self._visible_annotations = visible_annotations
 
         while len(self._regions) < len(visible_annotations):
             region = pg.LinearRegionItem(values=(0, 0), movable=False)
@@ -1507,7 +1826,9 @@ class AnnotationStream(QFrame):
                 region.hide()
                 label.hide()
                 continue
-            start, stop, description, color = visible_annotations[index]
+            _annotation_index, start, stop, description, color = visible_annotations[
+                index
+            ]
             qcolor = QColor(color)
             region.setRegion((start, stop))
             region.setBrush(pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 70))
@@ -1525,6 +1846,22 @@ class AnnotationStream(QFrame):
             label.setToolTip(description)
             region.show()
             label.show()
+
+    def _mouse_clicked(self, event):
+        """Emit the source index of the annotation under a left click."""
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        view_box = self.plot.getViewBox()
+        scene_position = event.scenePos()
+        if not view_box.sceneBoundingRect().contains(scene_position):
+            return
+        time = float(view_box.mapSceneToView(scene_position).x())
+        for annotation_index, start, stop, _description, _color in reversed(
+            self._visible_annotations
+        ):
+            if start <= time <= stop:
+                self.annotation_clicked.emit(annotation_index)
+                return
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1781,6 +2118,9 @@ class StreamViewerWindow(QMainWindow):
         self._start_time = 0.0
         total_duration = max(1 / raw.info["sfreq"], raw.n_times / raw.info["sfreq"])
         self._duration = min(float(duration), total_duration)
+        self._initial_duration = self._duration
+        self._zoom_history = []
+        self._zoom_forward = []
         self._pending_slider_value = None
         self._navigation_timer = QTimer(self)
         self._navigation_timer.setSingleShot(True)
@@ -1829,6 +2169,14 @@ class StreamViewerWindow(QMainWindow):
             "Restore one panel per source stream in the original order"
         )
         self.reset_button.clicked.connect(self.reset_layout)
+        self.zoom_back_button = QPushButton("Zoom Back")
+        self.zoom_back_button.setToolTip(
+            "Restore the previous mouse-selected time window (Backspace)"
+        )
+        self.zoom_back_button.clicked.connect(self.zoom_back)
+        self.reset_time_button = QPushButton("Reset Time")
+        self.reset_time_button.setToolTip("Restore the initial time-window duration")
+        self.reset_time_button.clicked.connect(self.reset_time_window)
         self.activation_map_button = QPushButton("Activation Map")
         self.activation_map_button.setToolTip(
             "Show relative activity across every source stream"
@@ -1853,6 +2201,8 @@ class StreamViewerWindow(QMainWindow):
         controls.addWidget(self.split_button)
         controls.addWidget(self.swap_button)
         controls.addWidget(self.reset_button)
+        controls.addWidget(self.zoom_back_button)
+        controls.addWidget(self.reset_time_button)
         controls.addWidget(QLabel("Columns:"))
         controls.addWidget(self.column_spin)
         controls.addWidget(self.activation_map_button)
@@ -1911,7 +2261,8 @@ class StreamViewerWindow(QMainWindow):
         layout.addLayout(navigation)
         self.setCentralWidget(central)
         self.statusBar().showMessage(
-            "Left/Right: move · Shift+Left/Right: page · +/-: panel amplitude"
+            "Drag: zoom · Shift+drag/middle-drag: pan · Wheel: move · "
+            "Ctrl+wheel: zoom · Right-click: channel actions"
         )
 
         self._rebuild_panels()
@@ -2043,6 +2394,18 @@ class StreamViewerWindow(QMainWindow):
             panel_settings = deepcopy(panel_settings)
             panel_settings["unit"] = unit
             panel_settings["gain"] = gain
+            group_channels = [
+                name for stream in groups[-1] for name in stream["channel_names"]
+            ]
+            channel_order = panel_settings.get("channel_order", group_channels)
+            if (
+                not isinstance(channel_order, list)
+                or len(channel_order) != len(group_channels)
+                or any(not isinstance(name, str) for name in channel_order)
+                or set(channel_order) != set(group_channels)
+            ):
+                raise ValueError("A display panel channel order is invalid.")
+            panel_settings["channel_order"] = list(channel_order)
             settings.append(deepcopy(panel_settings))
             if panel_state.get("floating", False):
                 floating.add(tuple(stream["id"] for stream in groups[-1]))
@@ -2370,6 +2733,7 @@ class StreamViewerWindow(QMainWindow):
                 annotation_visible=self.annotation_sidebar.plot_accepts,
                 unit=settings["unit"],
                 gain=settings["gain"],
+                channel_order=settings.get("channel_order"),
                 channels_per_page=self.max_channels,
                 parent=self.panel_container,
             )
@@ -2379,6 +2743,11 @@ class StreamViewerWindow(QMainWindow):
             panel.bad_channels_changed.connect(self._bad_channels_updated)
             panel.page_changed.connect(self.refresh)
             panel.cursor_changed.connect(self.statusBar().showMessage)
+            panel.time_zoom_requested.connect(self.set_time_window)
+            panel.time_pan_requested.connect(self.pan_time_window)
+            panel.zoom_back_requested.connect(self.zoom_back)
+            panel.zoom_forward_requested.connect(self.zoom_forward)
+            panel.reset_time_requested.connect(self.reset_time_window)
             panel.float_requested.connect(
                 lambda panel=panel: self.toggle_panel_floating(panel)
             )
@@ -2639,6 +3008,76 @@ class StreamViewerWindow(QMainWindow):
             if redraw:
                 panel.redraw(self._start_time, self._duration)
 
+    def _apply_time_window(self, start, duration):
+        """Apply one clamped shared time window with a single data refresh."""
+        minimum = 1 / float(self.raw.info["sfreq"])
+        duration = float(np.clip(duration, minimum, self.total_duration))
+        maximum_start = max(0.0, self.total_duration - duration)
+        start = float(np.clip(start, 0.0, maximum_start))
+        if np.isclose(start, self._start_time) and np.isclose(
+            duration, self._duration
+        ):
+            self._sync_navigation()
+            return False
+        self._navigation_timer.stop()
+        self._pending_slider_value = None
+        self._start_time = start
+        self._duration = duration
+        self._sync_navigation()
+        self.refresh()
+        return True
+
+    def set_time_window(self, start, duration):
+        """Apply a mouse-selected zoom and record EDFbrowser-style history."""
+        previous = (self._start_time, self._duration)
+        if self._apply_time_window(start, duration):
+            self._zoom_history.append(previous)
+            self._zoom_history = self._zoom_history[-64:]
+            self._zoom_forward.clear()
+            self._sync_navigation()
+
+    def pan_time_window(self, start):
+        """Pan the shared window without adding each drag step to zoom history."""
+        self._apply_time_window(start, self._duration)
+
+    def zoom_time(self, factor, anchor=None):
+        """Zoom the shared timeline around ``anchor`` or the window center."""
+        factor = float(factor)
+        if not np.isfinite(factor) or factor <= 0:
+            return
+        anchor = (
+            self._start_time + self._duration / 2
+            if anchor is None
+            else float(anchor)
+        )
+        ratio = float(np.clip((anchor - self._start_time) / self._duration, 0, 1))
+        duration = self._duration * factor
+        self.set_time_window(anchor - ratio * duration, duration)
+
+    def zoom_back(self):
+        """Restore the previous mouse zoom (EDFbrowser Backspace behavior)."""
+        if not self._zoom_history:
+            return
+        target = self._zoom_history.pop()
+        self._zoom_forward.append((self._start_time, self._duration))
+        self._apply_time_window(*target)
+
+    def zoom_forward(self):
+        """Reapply a backed-out mouse zoom (EDFbrowser Insert behavior)."""
+        if not self._zoom_forward:
+            return
+        target = self._zoom_forward.pop()
+        self._zoom_history.append((self._start_time, self._duration))
+        self._apply_time_window(*target)
+
+    def reset_time_window(self):
+        """Restore the initial duration around the current window center."""
+        center = self._start_time + self._duration / 2
+        self.set_time_window(
+            center - self._initial_duration / 2,
+            self._initial_duration,
+        )
+
     def set_start_time(self, value):
         self._navigation_timer.stop()
         self._pending_slider_value = None
@@ -2696,6 +3135,8 @@ class StreamViewerWindow(QMainWindow):
         self.start_spin.blockSignals(False)
         self.time_slider.blockSignals(False)
         self.duration_spin.blockSignals(False)
+        if hasattr(self, "zoom_back_button"):
+            self.zoom_back_button.setEnabled(bool(self._zoom_history))
         if self.activation_map_window is not None:
             self.activation_map_window.set_current_window(
                 self._start_time,
@@ -2831,6 +3272,7 @@ class StreamViewerWindow(QMainWindow):
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        control = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
         if key == Qt.Key.Key_Left:
             self.set_start_time(
                 self._start_time - self._duration * (1.0 if shift else 0.25)
@@ -2840,13 +3282,23 @@ class StreamViewerWindow(QMainWindow):
                 self._start_time + self._duration * (1.0 if shift else 0.25)
             )
         elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
-            targets = [panel for panel in self.panels if panel.selected.isChecked()]
-            for panel in targets or self.panels:
-                panel.change_amplitude(AMPLITUDE_STEP)
+            if control:
+                self.zoom_time(0.5)
+            else:
+                targets = [panel for panel in self.panels if panel.selected.isChecked()]
+                for panel in targets or self.panels:
+                    panel.change_amplitude(AMPLITUDE_STEP)
         elif key == Qt.Key.Key_Minus:
-            targets = [panel for panel in self.panels if panel.selected.isChecked()]
-            for panel in targets or self.panels:
-                panel.change_amplitude(1.0 / AMPLITUDE_STEP)
+            if control:
+                self.zoom_time(2.0)
+            else:
+                targets = [panel for panel in self.panels if panel.selected.isChecked()]
+                for panel in targets or self.panels:
+                    panel.change_amplitude(1.0 / AMPLITUDE_STEP)
+        elif key == Qt.Key.Key_Backspace:
+            self.zoom_back()
+        elif key == Qt.Key.Key_Insert:
+            self.zoom_forward()
         elif key == Qt.Key.Key_Home:
             self.set_start_time(0)
         elif key == Qt.Key.Key_End:

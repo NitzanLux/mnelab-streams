@@ -9,7 +9,7 @@ import mne
 import numpy as np
 import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPointF, Qt
 from PySide6.QtWidgets import QMessageBox
 
 from mnelab.mainwindow import MainWindow
@@ -474,7 +474,7 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
         "visible": True,
     }
 
-    panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
+    panel._toggle_bad_channel_name("EEG A")
 
     assert panel._curves[0].opts["pen"].color().name() == "#d62728"
 
@@ -516,6 +516,67 @@ def test_channel_context_menu_exposes_combined_editor(viewer):
     open_editor.assert_called_once_with("EEG A")
 
 
+def test_plot_context_menu_targets_trace_and_hides_it(qtbot, viewer):
+    """Right-click actions resolve the trace lane under the pointer."""
+    panel = viewer.panels[0]
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    view_box = panel.plot.getPlotItem().vb
+    scene_position = view_box.mapViewToScene(QPointF(1.0, panel._lane_step))
+    plot_position = panel.plot.mapFromScene(scene_position)
+
+    name = panel.channel_at_plot_position(plot_position)
+    menu = panel.create_plot_context_menu(name)
+
+    assert name == "EEG A"
+    hide = next(action for action in menu.actions() if action.text() == "Hide Channel")
+    hide.trigger()
+    assert panel.visible_channel_names == ["EEG B"]
+
+
+def test_channels_can_be_reordered_without_changing_raw(viewer, raw):
+    """Display dragging order is independent of the underlying MNE channel order."""
+    panel = viewer.panels[0]
+    raw_order = list(raw.ch_names)
+
+    panel.reorder_channels(["EEG B", "EEG A"])
+
+    assert panel.channel_names == ["EEG B", "EEG A"]
+    assert [
+        panel.channel_list.item(row).text()
+        for row in range(panel.channel_list.count())
+    ] == ["EEG B", "EEG A"]
+    assert panel.settings["channel_order"] == ["EEG B", "EEG A"]
+    assert raw.ch_names == raw_order
+
+
+def test_mouse_time_navigation_is_shared_and_has_zoom_history(viewer):
+    """Plot zoom and pan requests update every panel through one shared window."""
+    panel = viewer.panels[0]
+
+    panel.plot.zoom_at(0.5, 1.5)
+
+    assert viewer.start_time == pytest.approx(0.75)
+    assert viewer.duration == pytest.approx(1.0)
+    assert viewer.zoom_back_button.isEnabled()
+    assert all(
+        current.plot.getPlotItem().vb.viewRange()[0]
+        == pytest.approx([0.75, 1.75])
+        for current in viewer.panels
+    )
+
+    panel.plot.pan_requested.emit(2.0)
+    assert viewer.start_time == pytest.approx(2.0)
+
+    viewer.zoom_back()
+    assert viewer.start_time == pytest.approx(0.0)
+    assert viewer.duration == pytest.approx(2.0)
+
+    viewer.zoom_forward()
+    assert viewer.start_time == pytest.approx(2.0)
+    assert viewer.duration == pytest.approx(1.0)
+
+
 def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
     """Zero Offset keeps a DC-biased trace centered as amplitude changes."""
     sfreq = 100.0
@@ -549,7 +610,7 @@ def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
 
 
 def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
-    """Hiding a trace keeps its list row while excluding it from Raw reads."""
+    """Hiding removes the label/lane and excludes the channel from Raw reads."""
     panel = viewer.panels[0]
 
     with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
@@ -557,13 +618,21 @@ def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
 
     assert panel.page_channel_names == ["EEG A", "EEG B"]
     assert panel.visible_channel_names == ["EEG B"]
-    assert panel.channel_list.item(0).font().italic()
+    assert panel.channel_list.count() == 1
+    assert panel.channel_list.item(0).text() == "EEG B"
+    assert panel._axis_channels == ("EEG B",)
+    assert panel.plot.getPlotItem().vb.viewRange()[1] == pytest.approx([-1.5, 1.5])
     assert get_data.call_args.kwargs["picks"] == ["EEG B", "Audio L"]
 
-    panel.set_channel_visible("EEG A", True)
+    menu = panel.create_plot_context_menu()
+    show_hidden = next(
+        action for action in menu.actions() if action.text() == "Show Hidden Channel"
+    )
+    show_hidden.menu().actions()[0].trigger()
 
     assert panel.visible_channel_names == ["EEG A", "EEG B"]
-    assert not panel.channel_list.item(0).font().italic()
+    assert panel.channel_list.count() == 2
+    assert panel._axis_channels == ("EEG A", "EEG B")
 
 
 def test_swap_selected_exchanges_panel_locations(viewer):
@@ -696,23 +765,15 @@ def test_missing_source_metadata_falls_back_to_channel_types(qtbot, raw):
     ]
 
 
-def test_channel_list_toggles_bad_status(qtbot, viewer, raw):
-    """Clicking a channel label toggles MNE bad-channel state and styling."""
+def test_channel_list_click_hides_instead_of_marking_bad(viewer, raw):
+    """A normal channel-label click compacts the display without editing Raw."""
     panel = viewer.panels[0]
 
-    with qtbot.waitSignal(viewer.bad_channels_changed):
-        panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
-
-    assert raw.info["bads"] == ["EEG A"]
-    assert viewer.panels[0].channel_list.item(0).font().strikeOut()
-
-    with qtbot.waitSignal(viewer.bad_channels_changed):
-        viewer.panels[0].channel_list.itemClicked.emit(
-            viewer.panels[0].channel_list.item(0)
-        )
+    panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
 
     assert raw.info["bads"] == []
-    assert not viewer.panels[0].channel_list.item(0).font().strikeOut()
+    assert panel.visible_channel_names == ["EEG B"]
+    assert panel.channel_list.item(0).text() == "EEG B"
 
 
 def test_bad_toggle_through_mainwindow_survives_cache_reload(qtbot, tmp_path, raw):
@@ -735,7 +796,10 @@ def test_bad_toggle_through_mainwindow_survives_cache_reload(qtbot, tmp_path, ra
         stream_viewer = window._stream_viewers[-1]
         panel = stream_viewer.panels[0]
         with qtbot.waitSignal(stream_viewer.bad_channels_changed):
-            panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
+            menu = panel.create_channel_context_menu("EEG A")
+            next(
+                action for action in menu.actions() if action.text() == "Mark as Bad"
+            ).trigger()
 
         assert model.current["data"].info["bads"] == ["EEG A"]
         assert model.current["_cache_path"] is None
