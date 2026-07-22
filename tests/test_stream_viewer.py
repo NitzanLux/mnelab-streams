@@ -471,6 +471,43 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     assert panel._curves[0].opts["pen"].color().name() == "#d62728"
 
 
+def test_combined_channel_display_dialog_updates_upstream_settings(qtbot, viewer):
+    """The combined editor maps amplitude and offset onto the shared model."""
+    panel = viewer.panels[0]
+    dialog = panel.create_channel_display_dialog("EEG A")
+    qtbot.addWidget(dialog)
+
+    dialog.amplitude_spin.setValue(2.5)
+    dialog.offset_spin.setValue(0.25)
+
+    assert panel.channel_settings["EEG A"]["gain"] == pytest.approx(2.5)
+    assert panel.channel_settings["EEG A"]["offset"] == pytest.approx(0.25)
+    assert panel.channel_settings["EEG B"]["gain"] == pytest.approx(1.0)
+    assert panel.channel_settings["EEG B"]["offset"] == pytest.approx(0.0)
+
+    panel.set_channel_gain("EEG A", 3.0)
+    qtbot.mouseClick(dialog.fit_button, Qt.MouseButton.LeftButton)
+
+    assert dialog.amplitude == pytest.approx(panel.channel_settings["EEG A"]["gain"])
+    assert dialog.offset == pytest.approx(panel.channel_settings["EEG A"]["offset"])
+
+
+def test_channel_context_menu_exposes_combined_editor(viewer):
+    """The channel context menu contains one entry for the combined editor."""
+    panel = viewer.panels[0]
+    with patch.object(panel, "open_channel_display") as open_editor:
+        menu = panel.create_channel_context_menu("EEG A")
+        editor_actions = [
+            action
+            for action in menu.actions()
+            if action.text() == "Edit Channel Display…"
+        ]
+        assert len(editor_actions) == 1
+        editor_actions[0].trigger()
+
+    open_editor.assert_called_once_with("EEG A")
+
+
 def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
     """Zero Offset keeps a DC-biased trace centered as amplitude changes."""
     sfreq = 100.0
@@ -535,7 +572,7 @@ def test_swap_selected_exchanges_panel_locations(viewer):
     assert not viewer.swap_button.isEnabled()
 
 
-def test_display_montage_save_load_round_trip_is_clean(viewer, tmp_path):
+def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
     """A loaded display montage restores its state and becomes the baseline."""
     viewer.column_spin.setValue(1)
     viewer.set_duration(3.0)
@@ -543,6 +580,13 @@ def test_display_montage_save_load_round_trip_is_clean(viewer, tmp_path):
         panel.selected.setChecked(True)
     viewer.join_selected()
     viewer.panels[0].gain.setValue(2.5)
+    viewer.panels[0].set_channel_gain("EEG A", 1.5)
+    viewer.panels[0].set_channel_offset("EEG A", 0.2)
+    viewer.panels[0].set_channel_color("EEG A", "#00ff00")
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    viewer.panels[0].float_button.click()
+    qtbot.waitUntil(lambda: viewer.is_panel_floating(viewer.panels[0]))
     expected = viewer.display_montage_state()
     path = tmp_path / "joined-layout.json"
 
@@ -559,6 +603,14 @@ def test_display_montage_save_load_round_trip_is_clean(viewer, tmp_path):
     assert viewer.columns == 1
     assert viewer.duration == pytest.approx(3.0)
     assert viewer.panels[0].gain.value() == pytest.approx(2.5)
+    assert viewer.is_panel_floating(viewer.panels[0])
+    assert viewer.panels[0].channel_settings["EEG A"] == {
+        "gain": 1.5,
+        "offset": 0.2,
+        "remove_dc": False,
+        "color": "#00ff00",
+        "visible": True,
+    }
     assert not viewer.display_montage_changed
 
 

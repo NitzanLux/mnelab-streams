@@ -2,7 +2,6 @@
 #
 # License: BSD (3-clause)
 
-import json
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
@@ -47,7 +46,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mnelab.widgets.channel_display import ChannelDisplayDialog
 from mnelab.widgets.viewer_controls import AnnotationSidebar
+from mnelab.widgets.viewer_layout import (
+    ViewerLayoutError,
+    load_viewer_layout,
+    save_viewer_layout,
+)
 
 UNIT_FACTORS = {
     "V": 1.0,
@@ -813,11 +818,39 @@ class StreamPanel(QFrame):
         gain = source_scale * target / (peak * self.amplitude.value())
         self.set_channel_gain(name, gain)
 
-    def _show_channel_context_menu(self, position):
-        item = self.channel_list.itemAt(position)
-        if item is None:
-            return
-        name = item.data(Qt.ItemDataRole.UserRole)
+    def create_channel_display_dialog(self, name):
+        """Create a combined amplitude and offset editor for one channel."""
+        if name not in self.channel_settings:
+            raise KeyError(f"Unknown channel: {name}")
+        settings = self.channel_settings[name]
+        dialog = ChannelDisplayDialog(
+            name,
+            amplitude=settings["gain"],
+            offset=settings["offset"],
+            parent=self,
+        )
+
+        def update_display(gain, offset):
+            self.set_channel_gain(name, gain)
+            self.set_channel_offset(name, offset)
+
+        def fit_and_sync():
+            self.fit_channel_to_pane(name)
+            current = self.channel_settings[name]
+            dialog.set_values(current["gain"], current["offset"])
+
+        dialog.values_changed.connect(update_display)
+        dialog.fit_requested.connect(fit_and_sync)
+        return dialog
+
+    def open_channel_display(self, name):
+        """Open the combined display editor for one channel."""
+        self.create_channel_display_dialog(name).exec()
+
+    def create_channel_context_menu(self, name):
+        """Create the context menu for one channel list entry."""
+        if name not in self.channel_settings:
+            raise KeyError(f"Unknown channel: {name}")
         settings = self.channel_settings[name]
         menu = QMenu(self.channel_list)
         visible = menu.addAction("Show Trace")
@@ -827,6 +860,10 @@ class StreamPanel(QFrame):
             lambda checked, name=name: self.set_channel_visible(name, checked)
         )
         menu.addSeparator()
+        menu.addAction(
+            "Edit Channel Display…",
+            lambda _checked=False, name=name: self.open_channel_display(name),
+        )
         menu.addAction(
             "Increase Amplitude",
             lambda _checked=False, name=name: self.set_channel_gain(
@@ -877,12 +914,20 @@ class StreamPanel(QFrame):
         bad.setCheckable(True)
         bad.setChecked(name in self.raw.info["bads"])
         bad.triggered.connect(
-            lambda _checked=False, item=item: self._toggle_bad_channel(item)
+            lambda _checked=False, name=name: self._toggle_bad_channel_name(name)
         )
         menu.addAction(
             "Reset Channel Display",
             lambda _checked=False, name=name: self.reset_channel_display(name),
         )
+        return menu
+
+    def _show_channel_context_menu(self, position):
+        item = self.channel_list.itemAt(position)
+        if item is None:
+            return
+        name = item.data(Qt.ItemDataRole.UserRole)
+        menu = self.create_channel_context_menu(name)
         menu.exec(self.channel_list.viewport().mapToGlobal(position))
 
     def _choose_channel_gain(self, name):
@@ -1034,6 +1079,10 @@ class StreamPanel(QFrame):
 
     def _toggle_bad_channel(self, item):
         name = item.data(Qt.ItemDataRole.UserRole)
+        self._toggle_bad_channel_name(name)
+
+    def _toggle_bad_channel_name(self, name):
+        """Toggle bad-channel status by channel name."""
         bads = list(self.raw.info["bads"])
         if name in bads:
             bads.remove(name)
@@ -2062,11 +2111,8 @@ class StreamViewerWindow(QMainWindow):
             path = path.with_suffix(".json")
         state = self.display_montage_state()
         try:
-            path.write_text(
-                json.dumps(state, indent=2, ensure_ascii=False) + "\n",
-                encoding="utf-8",
-            )
-        except (OSError, TypeError, ValueError) as error:
+            save_viewer_layout(path, state)
+        except ViewerLayoutError as error:
             QMessageBox.critical(self, "Could not save montage", str(error))
             return False
         self._display_montage_path = path
@@ -2086,9 +2132,9 @@ class StreamViewerWindow(QMainWindow):
             return False
         path = Path(path)
         try:
-            state = json.loads(path.read_text(encoding="utf-8"))
+            state = load_viewer_layout(path)
             self.apply_display_montage(state)
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        except (ViewerLayoutError, ValueError) as error:
             QMessageBox.critical(self, "Could not load montage", str(error))
             return False
         self._display_montage_path = path
