@@ -16,6 +16,7 @@ from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
 from mnelab.widgets.stream_viewer import (
     CHANNEL_LABEL_WIDTH,
+    CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
     StreamViewerWindow,
     activation_matrix,
@@ -190,6 +191,15 @@ def test_channel_axes_use_same_width_for_aligned_time_axes(viewer):
     ]
 
 
+def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(viewer):
+    """The duplicate channel-name columns use a compact, shared width budget."""
+    assert all(
+        panel.channel_list.width() == CHANNEL_LIST_WIDTH for panel in viewer.panels
+    )
+    assert viewer.annotation_stream.title_label.width() == CHANNEL_LIST_WIDTH
+    assert CHANNEL_LIST_WIDTH + CHANNEL_LABEL_WIDTH < 200
+
+
 def test_panels_have_independent_units_and_gain(viewer):
     """Changing one panel's display scale does not affect another panel."""
     eeg, audio = viewer.panels
@@ -197,10 +207,18 @@ def test_panels_have_independent_units_and_gain(viewer):
     eeg.unit_combo.setCurrentText("µV")
     eeg.gain.setValue(2.5)
 
-    assert eeg.settings == {"unit": "µV", "gain": 2.5}
+    assert eeg.settings == {
+        "unit": "µV",
+        "gain": 2.5,
+        "channel_order": ["EEG A", "EEG B"],
+    }
     assert eeg._display_unit == "µV"
     assert "µV/div" in eeg.scale_label.text()
-    assert audio.settings == {"unit": "Auto", "gain": 1.0}
+    assert audio.settings == {
+        "unit": "Auto",
+        "gain": 1.0,
+        "channel_order": ["Audio L"],
+    }
     assert audio._display_unit == "Raw"
     assert "raw/div" in audio.scale_label.text()
     assert [
@@ -333,17 +351,13 @@ def test_join_split_round_trip_does_not_mutate_raw(viewer, raw, streams):
     assert streams == streams_before
 
 
-def test_visible_annotations_and_events_are_drawn_on_each_panel(viewer):
-    """Trace overlays identify annotation meaning as well as its interval."""
+def test_signal_panels_draw_annotation_regions_without_text(viewer):
+    """Trace panels show annotation intervals without duplicating lane text."""
     for panel in viewer.panels:
         items = panel.plot.getPlotItem().items
         assert sum(isinstance(item, pg.InfiniteLine) for item in items) == 1
         assert sum(isinstance(item, pg.LinearRegionItem) for item in items) == 1
-        assert len(panel._annotation_labels) == 1
-        label = panel._annotation_labels[0]
-        assert label.textItem.toPlainText() == "Visible · 200 ms"
-        assert label.isVisible()
-        assert "Onset: 1.25 s" in label.toolTip()
+        assert not any(isinstance(item, pg.TextItem) for item in items)
 
 
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
@@ -381,7 +395,6 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     assert sidebar.list.count() == 1
     assert "Outside" in sidebar.list.item(0).text()
     assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
-    assert all(not panel._annotation_labels[0].isVisible() for panel in viewer.panels)
     assert not viewer.annotation_stream.labels[0].isVisible()
 
     sidebar.list.itemClicked.emit(sidebar.list.item(0))
@@ -400,6 +413,29 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     )
 
 
+def test_annotation_stream_click_highlights_matching_sidebar_item(qtbot, viewer):
+    """Clicking a lane annotation reveals its corresponding browser row."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    sidebar = viewer.annotation_sidebar
+    sidebar.list.setCurrentRow(-1)
+    viewer.annotations_button.setChecked(False)
+    qtbot.waitUntil(viewer.annotation_dock.isHidden)
+    view_box = viewer.annotation_stream.plot.getViewBox()
+    scene_position = view_box.mapViewToScene(QPointF(1.3, 0.5))
+    plot_position = viewer.annotation_stream.plot.mapFromScene(scene_position)
+
+    qtbot.mouseClick(
+        viewer.annotation_stream.plot.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=plot_position,
+    )
+
+    assert sidebar.list.currentRow() == 0
+    assert "Visible" in sidebar.list.currentItem().text()
+    assert not viewer.annotation_dock.isHidden()
+
+
 def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
     """Regex search filters list and plots without failing on invalid syntax."""
     sidebar = viewer.annotation_sidebar
@@ -409,7 +445,6 @@ def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
     assert sidebar.list.count() == 1
     assert "Visible" in sidebar.list.item(0).text()
     assert all(panel._annotation_regions[0].isVisible() for panel in viewer.panels)
-    assert all(panel._annotation_labels[0].isVisible() for panel in viewer.panels)
     assert sidebar.filter_edit.toolTip() == ("Case-insensitive annotation text filter")
 
     sidebar.filter_edit.setText("[")
@@ -418,7 +453,6 @@ def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
     assert sidebar.count_label.text().startswith("Invalid regex:")
     assert "Invalid regular expression" in sidebar.filter_edit.toolTip()
     assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
-    assert all(not panel._annotation_labels[0].isVisible() for panel in viewer.panels)
 
     sidebar.regex_checkbox.setChecked(False)
 
@@ -456,6 +490,8 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     )
     np.testing.assert_array_equal(second_after, second_before)
     assert panel._curves[0].opts["pen"].color().name() == "#00ff00"
+    assert panel.channel_list.item(0).foreground().color().name() == "#00ff00"
+    assert panel.plot.getAxis("left").label_colors["EEG A"].name() == "#00ff00"
     assert panel.channel_settings["EEG A"] == {
         "gain": 2.0,
         "offset": 0.1,
@@ -477,6 +513,19 @@ def test_channel_display_properties_are_independent_and_bad_stays_red(viewer):
     panel._toggle_bad_channel_name("EEG A")
 
     assert panel._curves[0].opts["pen"].color().name() == "#d62728"
+    assert panel.channel_list.item(0).foreground().color().name() == "#d62728"
+    assert panel.plot.getAxis("left").label_colors["EEG A"].name() == "#d62728"
+
+
+def test_automatic_channel_labels_match_trace_colors(viewer):
+    """Default-palette labels use the exact color of their traces."""
+    panel = viewer.panels[0]
+    axis = panel.plot.getAxis("left")
+
+    for index, name in enumerate(panel.visible_channel_names):
+        trace_color = panel._curves[index].opts["pen"].color().name()
+        assert panel.channel_list.item(index).foreground().color().name() == trace_color
+        assert axis.label_colors[name].name() == trace_color
 
 
 def test_combined_channel_display_dialog_updates_upstream_settings(qtbot, viewer):
@@ -516,6 +565,43 @@ def test_channel_context_menu_exposes_combined_editor(viewer):
     open_editor.assert_called_once_with("EEG A")
 
 
+def test_channel_context_menu_opens_channel_information(viewer):
+    """The channel menu exposes the details for the channel that was clicked."""
+    panel = viewer.panels[0]
+    with patch.object(panel, "open_channel_information") as open_information:
+        menu = panel.create_channel_context_menu("EEG A")
+        information_action = next(
+            action
+            for action in menu.actions()
+            if action.text() == "Channel Information…"
+        )
+        information_action.trigger()
+
+    open_information.assert_called_once_with("EEG A")
+
+
+def test_channel_information_dialog_describes_recording_and_display_state(
+    qtbot, viewer
+):
+    """Channel details include source metadata and current channel state."""
+    panel = viewer.panels[0]
+    panel.set_channel_visible("EEG A", False)
+    panel.raw.info["bads"] = ["EEG A"]
+
+    dialog = panel.create_channel_information_dialog("EEG A")
+    qtbot.addWidget(dialog)
+    information = panel.channel_information("EEG A")
+
+    assert information["Name"] == "EEG A"
+    assert information["Type"] == "EEG"
+    assert information["Source"] == "BrainAmp"
+    assert information["Sampling rate"] == "100 Hz"
+    assert information["Status"] == "Bad"
+    assert information["Trace"] == "Hidden"
+    assert "Name: EEG A" in dialog.informativeText()
+    assert "Status: Bad" in dialog.informativeText()
+
+
 def test_plot_context_menu_targets_trace_and_hides_it(qtbot, viewer):
     """Right-click actions resolve the trace lane under the pointer."""
     panel = viewer.panels[0]
@@ -532,6 +618,8 @@ def test_plot_context_menu_targets_trace_and_hides_it(qtbot, viewer):
     hide = next(action for action in menu.actions() if action.text() == "Hide Channel")
     hide.trigger()
     assert panel.visible_channel_names == ["EEG B"]
+    viewer._display_montage_baseline = viewer.display_montage_state()
+    viewer.hide()
 
 
 def test_channels_can_be_reordered_without_changing_raw(viewer, raw):
@@ -550,7 +638,7 @@ def test_channels_can_be_reordered_without_changing_raw(viewer, raw):
     assert raw.ch_names == raw_order
 
 
-def test_mouse_time_navigation_is_shared_and_has_zoom_history(viewer):
+def test_mouse_time_navigation_is_shared_and_has_zoom_history(qtbot, viewer):
     """Plot zoom and pan requests update every panel through one shared window."""
     panel = viewer.panels[0]
 
@@ -566,6 +654,7 @@ def test_mouse_time_navigation_is_shared_and_has_zoom_history(viewer):
     )
 
     panel.plot.pan_requested.emit(2.0)
+    qtbot.waitUntil(lambda: viewer.start_time == pytest.approx(2.0))
     assert viewer.start_time == pytest.approx(2.0)
 
     viewer.zoom_back()
@@ -610,7 +699,7 @@ def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
 
 
 def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
-    """Hiding removes the label/lane and excludes the channel from Raw reads."""
+    """Hiding retains a struck label and excludes the trace from Raw reads."""
     panel = viewer.panels[0]
 
     with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
@@ -618,8 +707,11 @@ def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
 
     assert panel.page_channel_names == ["EEG A", "EEG B"]
     assert panel.visible_channel_names == ["EEG B"]
-    assert panel.channel_list.count() == 1
-    assert panel.channel_list.item(0).text() == "EEG B"
+    assert panel.channel_list.count() == 2
+    assert panel.channel_list.item(0).text() == "EEG A"
+    assert panel.channel_list.item(0).font().strikeOut()
+    assert panel.channel_list.item(1).text() == "EEG B"
+    assert not panel.channel_list.item(1).font().strikeOut()
     assert panel._axis_channels == ("EEG B",)
     assert panel.plot.getPlotItem().vb.viewRange()[1] == pytest.approx([-1.5, 1.5])
     assert get_data.call_args.kwargs["picks"] == ["EEG B", "Audio L"]
@@ -671,6 +763,7 @@ def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
     for panel in viewer.panels:
         panel.selected.setChecked(True)
     viewer.join_selected()
+    viewer.panels[0].reorder_channels(["EEG B", "EEG A", "Audio L"])
     viewer.panels[0].gain.setValue(2.5)
     viewer.panels[0].set_channel_gain("EEG A", 1.5)
     viewer.panels[0].set_channel_offset("EEG A", 0.2)
@@ -696,6 +789,7 @@ def test_display_montage_save_load_round_trip_is_clean(qtbot, viewer, tmp_path):
     assert viewer.columns == 1
     assert viewer.duration == pytest.approx(3.0)
     assert viewer.panels[0].gain.value() == pytest.approx(2.5)
+    assert viewer.panels[0].channel_names == ["EEG B", "EEG A", "Audio L"]
     assert viewer.is_panel_floating(viewer.panels[0])
     assert viewer.panels[0].channel_settings["EEG A"] == {
         "gain": 1.5,
@@ -765,15 +859,23 @@ def test_missing_source_metadata_falls_back_to_channel_types(qtbot, raw):
     ]
 
 
-def test_channel_list_click_hides_instead_of_marking_bad(viewer, raw):
-    """A normal channel-label click compacts the display without editing Raw."""
+def test_channel_list_click_toggles_trace_with_strikethrough(viewer, raw):
+    """A label click hides its trace but keeps a struck restore target."""
     panel = viewer.panels[0]
 
     panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
 
     assert raw.info["bads"] == []
     assert panel.visible_channel_names == ["EEG B"]
-    assert panel.channel_list.item(0).text() == "EEG B"
+    assert panel.channel_list.count() == 2
+    assert panel.channel_list.item(0).font().strikeOut()
+    assert not panel.channel_list.item(1).font().strikeOut()
+
+    panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
+
+    assert panel.visible_channel_names == ["EEG A", "EEG B"]
+    assert not panel.channel_list.item(0).font().strikeOut()
+    assert not panel.channel_list.item(1).font().strikeOut()
 
 
 def test_bad_toggle_through_mainwindow_survives_cache_reload(qtbot, tmp_path, raw):

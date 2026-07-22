@@ -19,7 +19,7 @@ from mnelab.widgets import FlatDoubleSpinBox
 
 
 class FilterDialog(QDialog):
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, fmax=None):
         super().__init__(parent)
         self.setWindowTitle("Filter Data")
         vbox = QVBoxLayout(self)
@@ -75,6 +75,14 @@ class FilterDialog(QDialog):
         self.notch_edit.setValue(50)
         self.notch_edit.setSingleStep(0.5)
         self.notch_edit.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        if fmax is not None:
+            for frequency_input in (
+                self.lower_edit,
+                self.upper_edit,
+                self.notch_edit,
+            ):
+                frequency_input.setMaximum(fmax)
 
         self.grid.addWidget(self.lower_label, 0, 0)
         self.grid.addWidget(self.lower_edit, 0, 1)

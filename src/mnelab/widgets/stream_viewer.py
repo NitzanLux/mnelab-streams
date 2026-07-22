@@ -106,7 +106,12 @@ STREAM_PANEL_MIME = "application/x-mnelab-stream-panel"
 AMPLITUDE_STEP = 1.25
 MIN_AMPLITUDE = 0.001
 MAX_AMPLITUDE = 1000.0
-CHANNEL_LABEL_WIDTH = 145
+# Keep the interactive channel list roomy enough for short sensor names, while the
+# duplicate plot-axis labels only need a compact lane marker. Long names remain
+# available from the list-item tooltip.
+CHANNEL_LIST_WIDTH = 96
+CHANNEL_LABEL_WIDTH = 64
+PANEL_BODY_SPACING = 2
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
@@ -430,6 +435,36 @@ class DetachedStreamWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class TraceLabelAxis(pg.AxisItem):
+    """Axis whose tick-label colors can match their corresponding traces."""
+
+    def __init__(self, orientation, **kwargs):
+        super().__init__(orientation, **kwargs)
+        self.label_colors = {}
+
+    def set_label_colors(self, colors):
+        """Set individual tick-label colors, keyed by displayed label text."""
+        colors = {
+            label: QColor(color) for label, color in colors.items()
+        }
+        if colors == self.label_colors:
+            return
+        self.label_colors = colors
+        self.picture = None
+        self.update()
+
+    def drawPicture(self, painter, axis_spec, tick_specs, text_specs):
+        """Draw standard axis geometry, then color each tick label separately."""
+        super().drawPicture(painter, axis_spec, tick_specs, [])
+        if self.style["tickFont"] is not None:
+            painter.setFont(self.style["tickFont"])
+        painter.setClipRect(self.boundingRect().toAlignedRect())
+        default_pen = self.textPen()
+        for rect, flags, label in text_specs:
+            painter.setPen(pg.mkPen(self.label_colors.get(label, default_pen.color())))
+            painter.drawText(rect, int(flags), label)
+
+
 class StreamPlotWidget(pg.PlotWidget):
     """Plot with EDFbrowser-style time navigation gestures."""
 
@@ -437,8 +472,8 @@ class StreamPlotWidget(pg.PlotWidget):
     pan_requested = Signal(float)
     context_requested = Signal(object)
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
+    def __init__(self, parent=None, **kwargs):
+        super().__init__(parent, **kwargs)
         self._gesture = None
         self._press_position = None
         self._press_start = 0.0
@@ -753,16 +788,22 @@ class StreamPanel(QFrame):
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
+        body.setSpacing(PANEL_BODY_SPACING)
         self.channel_list = QListWidget()
-        self.channel_list.setFixedWidth(CHANNEL_LABEL_WIDTH)
+        self.channel_list.setFixedWidth(CHANNEL_LIST_WIDTH)
+        self.channel_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self.channel_list.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.channel_list.setToolTip(
-            "Click to hide; drag to reorder; right-click for channel actions"
+            "Click to show or hide a trace; drag to reorder; "
+            "right-click for channel actions"
         )
         self.channel_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.channel_list.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.channel_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.channel_list.setDropIndicatorShown(True)
-        self.channel_list.itemClicked.connect(self._hide_channel)
+        self.channel_list.itemClicked.connect(self._toggle_channel_visibility)
         self.channel_list.model().rowsMoved.connect(self._channel_rows_moved)
         self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.channel_list.customContextMenuRequested.connect(
@@ -770,14 +811,16 @@ class StreamPanel(QFrame):
         )
         body.addWidget(self.channel_list)
 
-        self.plot = StreamPlotWidget()
+        self.plot = StreamPlotWidget(
+            axisItems={"left": TraceLabelAxis(orientation="left")}
+        )
         visible_count = min(len(self.channel_names), self.channels_per_page)
         self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.setToolTip(
-            "Drag to zoom Â· Shift+drag or middle-drag to pan Â· "
-            "Wheel to move Â· Ctrl+wheel to zoom Â· Double-click to zoom in"
+            "Drag to zoom; Shift+drag or middle-drag to pan; "
+            "wheel to move; Ctrl+wheel to zoom; double-click to zoom in"
         )
         self.plot.showAxis("left")
         # AxisItem otherwise grows to fit each panel's longest channel name,
@@ -992,6 +1035,17 @@ class StreamPanel(QFrame):
         self._update_channel_list()
         self._settings_updated()
 
+    def _channel_color(self, name):
+        """Return the effective color shared by a trace and its labels."""
+        if name in self.raw.info["bads"]:
+            return QColor("#d62728")
+        return QColor(
+            self.channel_settings[name]["color"]
+            or pg.intColor(
+                self._channel_indices[name], max(1, len(self.channel_names))
+            )
+        )
+
     def reorder_channels(self, channel_order):
         """Apply a display-only order containing every channel in this panel."""
         channel_order = list(channel_order)
@@ -1024,25 +1078,19 @@ class StreamPanel(QFrame):
 
     def _channel_rows_moved(self, *_args):
         """Persist the order produced by an internal channel-list drop."""
-        visible_order = [
+        page_order = [
             self.channel_list.item(row).data(Qt.ItemDataRole.UserRole)
             for row in range(self.channel_list.count())
-        ]
-        visible_names = iter(visible_order)
-        page_order = [
-            next(visible_names)
-            if self.channel_settings[name]["visible"]
-            else name
-            for name in self.page_channel_names
         ]
         start = self._page * self.channels_per_page
         order = list(self.channel_names)
         order[start : start + len(page_order)] = page_order
         self.reorder_channels(order)
 
-    def _hide_channel(self, item):
-        """Hide the clicked channel instead of marking it bad."""
-        self.set_channel_visible(item.data(Qt.ItemDataRole.UserRole), False)
+    def _toggle_channel_visibility(self, item):
+        """Toggle a trace while retaining its clickable channel label."""
+        name = item.data(Qt.ItemDataRole.UserRole)
+        self.set_channel_visible(name, not self.channel_settings[name]["visible"])
 
     def set_channel_visible(self, name, visible):
         """Show or hide one channel and compact the remaining lanes."""
@@ -1115,12 +1163,70 @@ class StreamPanel(QFrame):
         """Open the combined display editor for one channel."""
         self.create_channel_display_dialog(name).exec()
 
+    def channel_information(self, name):
+        """Return concise recording and display information for one channel."""
+        if name not in self.channel_settings:
+            raise KeyError(f"Unknown channel: {name}")
+        source = self.sources[self._source_by_channel[name]]
+        sampling_rate = source.get("nominal_srate") or self.raw.info["sfreq"]
+        try:
+            sampling_rate = f"{float(sampling_rate):g} Hz"
+        except (TypeError, ValueError):
+            sampling_rate = str(sampling_rate)
+
+        information = OrderedDict(
+            [
+                ("Name", name),
+                ("Type", self._channel_types[name].upper()),
+                ("Source", str(source.get("name") or "Data")),
+                ("Source type", str(source.get("type") or "Data")),
+                ("Sampling rate", sampling_rate),
+                ("Status", "Bad" if name in self.raw.info["bads"] else "Good"),
+                (
+                    "Trace",
+                    "Shown" if self.channel_settings[name]["visible"] else "Hidden",
+                ),
+            ]
+        )
+        if source.get("channel_format"):
+            information["Data format"] = str(source["channel_format"])
+
+        channel_index = self.raw.ch_names.index(name)
+        location = np.asarray(self.raw.info["chs"][channel_index]["loc"][:3])
+        if np.all(np.isfinite(location)) and not np.allclose(location, 0):
+            information["Location"] = ", ".join(
+                f"{coordinate:.4g} m" for coordinate in location
+            )
+        return information
+
+    def create_channel_information_dialog(self, name):
+        """Create a read-only information dialog for one channel."""
+        information = self.channel_information(name)
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Channel Information")
+        dialog.setIcon(QMessageBox.Icon.Information)
+        dialog.setText(name)
+        dialog.setInformativeText(
+            "\n".join(f"{label}: {value}" for label, value in information.items())
+        )
+        dialog.setStandardButtons(QMessageBox.StandardButton.Close)
+        return dialog
+
+    def open_channel_information(self, name):
+        """Open the read-only information dialog for one channel."""
+        self.create_channel_information_dialog(name).exec()
+
     def create_channel_context_menu(self, name):
         """Create display, visibility, quality, and ordering actions."""
         if name not in self.channel_settings:
             raise KeyError(f"Unknown channel: {name}")
         settings = self.channel_settings[name]
         menu = QMenu(self)
+        menu.addAction(
+            "Channel Information…",
+            lambda _checked=False, name=name: self.open_channel_information(name),
+        )
+        menu.addSeparator()
         visibility_text = "Hide Channel" if settings["visible"] else "Show Channel"
         menu.addAction(
             visibility_text,
@@ -1423,17 +1529,20 @@ class StreamPanel(QFrame):
     def _update_channel_list(self):
         self.channel_list.clear()
         bads = set(self.raw.info["bads"])
-        for name in self.visible_channel_names:
+        for name in self.page_channel_names:
             item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, name)
+            item.setToolTip(name)
             settings = self.channel_settings[name]
+            item.setForeground(self._channel_color(name))
             if name in bads:
-                item.setForeground(QColor("red"))
                 font = item.font()
                 font.setStrikeOut(True)
                 item.setFont(font)
-            elif settings["color"]:
-                item.setForeground(QColor(settings["color"]))
+            if not settings["visible"]:
+                font = item.font()
+                font.setStrikeOut(True)
+                item.setFont(font)
             self.channel_list.addItem(item)
 
     def _toggle_bad_channel(self, item):
@@ -1525,6 +1634,9 @@ class StreamPanel(QFrame):
             len(visible_names) - 1 - np.arange(len(visible_names))
         ) * self._lane_step
         axis_channels = tuple(visible_names)
+        self.plot.getAxis("left").set_label_colors(
+            {name: self._channel_color(name) for name in visible_names}
+        )
         if axis_channels != self._axis_channels:
             self.plot.getAxis("left").setTicks(
                 [
@@ -1580,7 +1692,6 @@ class StreamPanel(QFrame):
             else selected_unit
         )
         max_points = max(200, self.plot.width() * 2)
-        bads = set(self.raw.info["bads"])
         for index, curve in enumerate(self._curves):
             if index >= len(visible_names):
                 curve.hide()
@@ -1604,16 +1715,7 @@ class StreamPanel(QFrame):
                 transformed + offsets[index] + settings["offset"] * self._lane_step
             )
             x, y = peak_envelope(self._times, normalized, max_points)
-            color = (
-                "#d62728"
-                if name in bads
-                else (
-                    settings["color"]
-                    or pg.intColor(
-                        self._channel_indices[name], max(1, len(self.channel_names))
-                    )
-                )
-            )
+            color = self._channel_color(name)
             curve.setData(x, y)
             curve.setPen(pg.mkPen(color, width=1))
             curve.show()
@@ -1741,13 +1843,13 @@ class AnnotationStream(QFrame):
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(6, 4, 6, 6)
-        layout.setSpacing(4)
+        layout.setSpacing(PANEL_BODY_SPACING)
 
         self.title_label = QLabel("Annotations")
         font = self.title_label.font()
         font.setBold(True)
         self.title_label.setFont(font)
-        self.title_label.setFixedWidth(CHANNEL_LABEL_WIDTH)
+        self.title_label.setFixedWidth(CHANNEL_LIST_WIDTH)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.title_label)
 
@@ -2231,8 +2333,12 @@ class StreamViewerWindow(QMainWindow):
             annotation_visible=self.annotation_sidebar.plot_accepts,
             parent=central,
         )
+        self.annotation_stream.annotation_clicked.connect(
+            self._select_annotation_from_stream
+        )
         self.annotation_stream.setToolTip(
-            "Annotation descriptions wrap inside the visible plot width"
+            "Click an annotation to highlight it in the annotation browser; "
+            "descriptions wrap inside the visible plot width"
         )
         layout.addWidget(self.annotation_stream)
 
@@ -2633,6 +2739,12 @@ class StreamViewerWindow(QMainWindow):
     def _center_on_annotation(self, onset):
         """Center a selected whole-recording annotation in the shared view."""
         self.set_start_time(float(onset) - self._duration / 2)
+
+    def _select_annotation_from_stream(self, annotation_index):
+        """Reveal and highlight a clicked annotation in the browser dock."""
+        if self.annotation_sidebar.select_annotation(annotation_index):
+            self.annotation_dock.show()
+            self.annotation_dock.raise_()
 
     @property
     def start_time(self):
@@ -3038,7 +3150,9 @@ class StreamViewerWindow(QMainWindow):
 
     def pan_time_window(self, start):
         """Pan the shared window without adding each drag step to zoom history."""
-        self._apply_time_window(start, self._duration)
+        self._pending_slider_value = float(start)
+        if not self._navigation_timer.isActive():
+            self._navigation_timer.start()
 
     def zoom_time(self, factor, anchor=None):
         """Zoom the shared timeline around ``anchor`` or the window center."""

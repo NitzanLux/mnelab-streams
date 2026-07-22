@@ -7,7 +7,11 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
-from mnelab.mainwindow import MainWindow, _xdf_stream_descriptors
+from mnelab.mainwindow import (
+    MainWindow,
+    _empty_xdf_stream_warning,
+    _xdf_stream_descriptors,
+)
 
 
 def _load_xdf(model, stream_ids=(30, 31), fs_new=256.0, gap_threshold=0.0):
@@ -77,6 +81,22 @@ def test_load_xdf_preserves_resampling_for_gap_detection():
 
     assert model.load.call_args_list[-1].kwargs["fs_new"] == 256.0
     assert model.load.call_args_list[-1].kwargs["gap_threshold"] == 0.1
+
+
+def test_empty_xdf_stream_warning_explains_stream_ids_and_outcome():
+    """The warning identifies streams and distinguishes IDs from channel indexes."""
+    rows = [
+        [2, "EEG", "Signal", 8, "float32", 256.0],
+        [4, "Triggers", "Markers", 1, "string", 0.0],
+    ]
+
+    message = _empty_xdf_stream_warning(rows, [2, 4])
+
+    assert '- ID 2: "EEG" (type: Signal)' in message
+    assert '- ID 4: "Triggers" (type: Markers)' in message
+    assert "stream identifier stored in the XDF file" in message
+    assert "it is not a channel index" in message
+    assert "The other selected streams were loaded successfully" in message
 
 
 @pytest.mark.parametrize(

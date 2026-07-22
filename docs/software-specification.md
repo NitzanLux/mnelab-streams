@@ -536,6 +536,8 @@ panel amplitude setting.
 
 Right-clicking a channel row shall expose:
 
+- view channel information, including its type, source, sampling rate, status, and
+  current trace visibility;
 - show/hide trace;
 - increase/decrease, fit, or enter its amplitude multiplier;
 - enter a vertical visual offset from -1 to +1 channel lanes;
@@ -561,8 +563,9 @@ modifies, filters, or writes the underlying MNE data.
 - Annotations shall appear as colored regions in every signal panel and in a dedicated
   150-pixel-high annotation lane below the panel area.
 - Zero-duration annotations shall receive a minimum visible width of one sample.
-- Annotation descriptions shall remain horizontal, wrap to the available plot/region
-  width, and be clipped within the plot rather than extending the window width.
+- Annotation descriptions shall appear only in the dedicated annotation lane. They
+  shall remain horizontal, wrap to the available region width, and be clipped within
+  the plot rather than extending the window width.
 - Global annotation colors from application settings shall be honored; otherwise the
   viewer uses its default annotation color.
 
@@ -571,7 +574,8 @@ modifies, filters, or writes the underlying MNE data.
 The right-side **Annotations** dock shall be closable/collapsible, movable between the
 left and right dock areas, and floatable. It shall list all recording annotations in
 chronological order with onset, description, optional duration, and a count of visible
-versus total records. Selecting an item shall center its onset in the shared viewer.
+versus total records. Selecting an item shall center its onset in the shared viewer;
+clicking an annotation in the dedicated lane shall highlight and reveal its list item.
 
 Filtering shall support:
 
@@ -580,7 +584,7 @@ Filtering shall support:
 - a **Regex** mode using a case-insensitive Python regular expression;
 - **Invert** to negate valid type/text matches; and
 - **Apply filter to plots** to choose whether the same filter hides annotation regions
-  and labels in signal/annotation plots.
+  in signal plots and annotation regions and labels in the dedicated lane.
 
 An invalid regular expression shall not crash or propagate an exception. The list
 shall become empty, the UI shall show `Invalid regex: <reason>`, and the text field

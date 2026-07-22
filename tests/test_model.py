@@ -4,7 +4,7 @@
 
 import math
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import mne
 import numpy as np
@@ -67,6 +67,31 @@ def test_source_with_zero_remaining_channels_is_retained_as_removed(tmp_path):
     assert removed["removed"] is True
     assert removed["removal_reason"] == "all channels were removed"
     assert active["channel_names"] == ["B"]
+
+
+def test_filter_falls_back_to_all_auxiliary_channels(tmp_path):
+    """Filtering retries with explicit picks for an auxiliary-only recording."""
+    raw = mne.io.RawArray(
+        np.zeros((1, 100)),
+        mne.create_info(["Aux"], 100, ["misc"]),
+        verbose=False,
+    )
+    path = tmp_path / "auxiliary.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    with patch.object(
+        raw,
+        "filter",
+        side_effect=[ValueError("picks (NoneNone) yielded no channels"), None],
+    ) as filter_mock:
+        model.filter(upper=30)
+
+    assert filter_mock.call_args_list == [
+        call(None, 30),
+        call(None, 30, picks="all"),
+    ]
 
 
 def test_memory_size_does_not_copy_data(model_with_data):

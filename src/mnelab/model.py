@@ -786,20 +786,33 @@ class Model:
     @data_changed
     def filter(self, lower=None, upper=None, notch=None):
         """Apply filters to the current data based on provided parameters."""
+        data = self.current["data"]
+
+        def apply_filter(method, *args):
+            try:
+                method(*args)
+            except ValueError as error:
+                if "yielded no channels" not in str(error):
+                    raise
+                # MNE's default picks omit auxiliary types such as ``misc``.
+                # Explicitly include them when the recording has no standard
+                # physiological data channels.
+                method(*args, picks="all")
+
         if lower is not None and upper is not None:  # bandpass filter
-            self.current["data"].filter(lower, upper)
+            apply_filter(data.filter, lower, upper)
             self.current["name"] += f" ({lower}-{upper}\u2009Hz)"
             self.history.append(f"data.filter({lower}, {upper})")
         elif lower is not None:  # highpass filter
-            self.current["data"].filter(lower, None)
+            apply_filter(data.filter, lower, None)
             self.current["name"] += f" (>{lower}\u2009Hz)"
             self.history.append(f"data.filter({lower}, None)")
         elif upper is not None:  # lowpass filter
-            self.current["data"].filter(None, upper)
+            apply_filter(data.filter, None, upper)
             self.current["name"] += f" (<{upper}\u2009Hz)"
             self.history.append(f"data.filter(None, {upper})")
         elif notch is not None:  # notch filter
-            self.current["data"].notch_filter(notch)
+            apply_filter(data.notch_filter, notch)
             self.current["name"] += f" (notch {notch}\u2009Hz)"
             self.history.append(f"data.notch_filter({notch})")
 

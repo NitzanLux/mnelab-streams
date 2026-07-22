@@ -124,6 +124,31 @@ def _xdf_stream_descriptors(rows, stream_ids, skipped_stream_ids, channel_names)
     return descriptors
 
 
+def _empty_xdf_stream_warning(rows, skipped_stream_ids):
+    """Explain which empty XDF streams were skipped and what their IDs mean."""
+    rows_by_id = {row[0]: row for row in rows}
+    streams = []
+    for stream_id in skipped_stream_ids:
+        row = rows_by_id.get(stream_id)
+        if row is None:
+            streams.append(f"- ID {stream_id}")
+            continue
+        name = row[1] or "unnamed stream"
+        stream_type = row[2] or "unspecified"
+        streams.append(f'- ID {stream_id}: "{name}" (type: {stream_type})')
+
+    stream_word = "stream" if len(streams) == 1 else "streams"
+    return (
+        f"The following selected XDF {stream_word} contained no recorded samples "
+        f"and {'was' if len(streams) == 1 else 'were'} skipped:\n\n"
+        + "\n".join(streams)
+        + "\n\nThe ID is the stream identifier stored in the XDF file and shown in "
+        "the ID column of the stream-selection window; it is not a channel index.\n\n"
+        "The other selected streams were loaded successfully. An empty stream can "
+        "occur when a device or application announces a stream but records no data."
+    )
+
+
 class _MNELogHandler(logging.Handler):
     """Logging handler that silently captures MNE messages into a list."""
 
@@ -893,11 +918,10 @@ class MainWindow(QMainWindow):
                         self.model.current["data"].ch_names,
                     )
                     if skipped_stream_ids:
-                        stream_text = ", ".join(map(str, skipped_stream_ids))
                         QMessageBox.warning(
                             self,
-                            "Empty XDF Stream",
-                            f"Skipped empty XDF stream IDs: {stream_text}.",
+                            "Empty XDF Streams Skipped",
+                            _empty_xdf_stream_warning(rows, skipped_stream_ids),
                         )
             elif ext.lower() == ".mat":
                 dialog = MatDialog(self, Path(fname).name, parse_mat(fname))
@@ -1410,12 +1434,20 @@ class MainWindow(QMainWindow):
                 "spatial_colors": dialog.spatial_colors,
                 "exclude": dialog.exclude,
             }
-            fig = (
-                self.model.current["data"]
-                .compute_psd(**psd_kwds)
-                .plot(show=False, **plot_kwds)
-            )
-            psd_kwds = ", ".join(f"{key}={value}" for key, value in psd_kwds.items())
+            data = self.model.current["data"]
+            try:
+                spectrum = data.compute_psd(**psd_kwds)
+            except ValueError as error:
+                if "yielded no channels" not in str(error):
+                    raise
+                # MNE's default picks contain only physiological data channels.
+                # Fall back to all channels for recordings containing only
+                # auxiliary channel types such as ``misc``.
+                psd_kwds["picks"] = "all"
+                plot_kwds["picks"] = "all"
+                spectrum = data.compute_psd(**psd_kwds)
+            fig = spectrum.plot(show=False, **plot_kwds)
+            psd_kwds = ", ".join(f"{key}={value!r}" for key, value in psd_kwds.items())
             plot_kwds = ", ".join(
                 f"{key}={value!r}" for key, value in plot_kwds.items()
             )
@@ -1673,7 +1705,8 @@ class MainWindow(QMainWindow):
 
     def filter_data(self):
         """Filter data."""
-        dialog = FilterDialog(self)
+        nyquist = self.model.current["data"].info["sfreq"] / 2
+        dialog = FilterDialog(self, fmax=nyquist)
         if dialog.exec():
             self.auto_duplicate()
             self.model.filter(dialog.lower, dialog.upper, dialog.notch)
