@@ -46,6 +46,8 @@ def test_chronological_merge_enables_stitch_threshold(qtbot):
 
     assert dialog.auto_order_by_time
     assert dialog.skip_unreadable_files
+    assert dialog.split_at_time_discontinuities
+    assert dialog.merge_channel_union
     assert dialog.maximum_seam_difference == 0.25
     assert dialog.stitch_threshold.isEnabled()
     assert not dialog.move_up_button.isEnabled()
@@ -53,6 +55,8 @@ def test_chronological_merge_enables_stitch_threshold(qtbot):
     dialog.auto_order.setChecked(False)
 
     assert not dialog.auto_order_by_time
+    assert not dialog.split_at_time_discontinuities
+    assert dialog.merge_channel_union
     assert not dialog.stitch_threshold.isEnabled()
     assert dialog.move_up_button.isEnabled()
 
@@ -69,3 +73,5 @@ def test_skip_unreadable_is_available_only_for_merge(qtbot):
 
     assert dialog.skip_unreadable.isEnabled()
     assert dialog.skip_unreadable_files
+    assert dialog.allow_channel_union.isEnabled()
+    assert dialog.merge_channel_union

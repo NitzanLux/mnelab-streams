@@ -226,6 +226,55 @@ def test_panels_have_independent_units_and_gain(viewer):
     ] == ["Auto", "Raw"]
 
 
+def test_channels_can_override_units_for_mixed_imu_and_emg_stream(qtbot):
+    """IMU labels and scaled EMG units can coexist in one display panel."""
+    raw = mne.io.RawArray(
+        np.vstack((np.full(100, 0.5), np.full(100, 2e-6))),
+        mne.create_info(["Accel X", "EMG"], 100.0, ["misc", "emg"]),
+        verbose=False,
+    )
+    streams = [
+        {
+            "id": "wearable",
+            "name": "Wearable",
+            "type": "Sensors",
+            "channel_names": ["Accel X", "EMG"],
+        }
+    ]
+    window = StreamViewerWindow(raw, streams=streams, duration=0.5)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    imu_dialog = panel.create_channel_display_dialog("Accel X")
+    emg_dialog = panel.create_channel_display_dialog("EMG")
+    qtbot.addWidget(imu_dialog)
+    qtbot.addWidget(emg_dialog)
+    assert "g" in [
+        imu_dialog.unit_combo.itemText(index)
+        for index in range(imu_dialog.unit_combo.count())
+    ]
+    assert "µV" in [
+        emg_dialog.unit_combo.itemText(index)
+        for index in range(emg_dialog.unit_combo.count())
+    ]
+
+    imu_dialog.unit_combo.setCurrentText("g")
+    emg_dialog.unit_combo.setCurrentText("µV")
+
+    assert panel.channel_settings["Accel X"]["unit"] == "g"
+    assert panel.channel_settings["EMG"]["unit"] == "µV"
+    assert panel.channel_statistics("Accel X")["Unit"] == "g"
+    assert panel.channel_statistics("EMG")["Unit"] == "µV"
+    assert panel.channel_statistics("EMG")["Mean"] == pytest.approx(2.0)
+    assert "g/div" in panel.scale_label.text()
+    assert "µV/div" in panel.scale_label.text()
+    assert panel.channel_information("Accel X")["Display unit"] == "g"
+
+    state = window.display_montage_state()
+    assert state["channel_settings"]["Accel X"]["unit"] == "g"
+    assert state["channel_settings"]["EMG"]["unit"] == "µV"
+
+
 def test_amplitude_controls_are_multiplicative_and_panel_local(qtbot, viewer):
     """Amplitude follows the EMG viewer's 1.25x model per stream panel."""
     eeg, audio = viewer.panels
@@ -358,6 +407,28 @@ def test_signal_panels_draw_annotation_regions_without_text(viewer):
         assert sum(isinstance(item, pg.InfiniteLine) for item in items) == 1
         assert sum(isinstance(item, pg.LinearRegionItem) for item in items) == 1
         assert not any(isinstance(item, pg.TextItem) for item in items)
+        assert panel._annotation_regions[0].zValue() < panel._curves[0].zValue()
+
+
+def test_trace_hover_shows_channel_name_and_value(qtbot, viewer):
+    """Hovering directly over a trace shows its channel and sampled value."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    panel = viewer.panels[0]
+    curve = panel._curves[0]
+    x, y = curve.getData()
+    sample = len(x) // 2
+    scene_position = panel.plot.getViewBox().mapViewToScene(
+        QPointF(float(x[sample]), float(y[sample]))
+    )
+
+    with patch("mnelab.widgets.stream_viewer.QToolTip.showText") as show_text:
+        panel._mouse_moved(scene_position)
+
+    data_sample = int(np.argmin(np.abs(panel._times - x[sample])))
+    expected_value = panel._values[0, data_sample] * 1e6
+    show_text.assert_called_once()
+    assert show_text.call_args.args[1] == f"EEG A\n{expected_value:.6g} µV"
 
 
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
@@ -688,8 +759,7 @@ def test_channels_can_be_reordered_without_changing_raw(viewer, raw):
 
     assert panel.channel_names == ["EEG B", "EEG A"]
     assert [
-        panel.channel_list.item(row).text()
-        for row in range(panel.channel_list.count())
+        panel.channel_list.item(row).text() for row in range(panel.channel_list.count())
     ] == ["EEG B", "EEG A"]
     assert panel.settings["channel_order"] == ["EEG B", "EEG A"]
     assert raw.ch_names == raw_order
@@ -705,8 +775,7 @@ def test_mouse_time_navigation_is_shared_and_has_zoom_history(qtbot, viewer):
     assert viewer.duration == pytest.approx(1.0)
     assert viewer.zoom_back_button.isEnabled()
     assert all(
-        current.plot.getPlotItem().vb.viewRange()[0]
-        == pytest.approx([0.75, 1.75])
+        current.plot.getPlotItem().vb.viewRange()[0] == pytest.approx([0.75, 1.75])
         for current in viewer.panels
     )
 

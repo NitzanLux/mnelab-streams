@@ -44,6 +44,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSlider,
     QSpinBox,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -100,6 +101,10 @@ UNIT_CHOICES = {
     "temperature": ["Auto", "°C", "Raw"],
     "raw": ["Auto", "Raw"],
 }
+
+# These units label values that MNE stores without a known physical conversion.
+# The channel unit combo is editable so hardware-specific units remain possible.
+SENSOR_UNIT_CHOICES = ["g", "m/s²", "rad/s", "°/s", "N", "Pa", "%"]
 
 MAX_ACTIVATION_ELEMENTS = 2_000_000
 STREAM_PANEL_MIME = "application/x-mnelab-stream-panel"
@@ -444,9 +449,7 @@ class TraceLabelAxis(pg.AxisItem):
 
     def set_label_colors(self, colors):
         """Set individual tick-label colors, keyed by displayed label text."""
-        colors = {
-            label: QColor(color) for label, color in colors.items()
-        }
+        colors = {label: QColor(color) for label, color in colors.items()}
         if colors == self.label_colors:
             return
         self.label_colors = colors
@@ -566,9 +569,8 @@ class StreamPlotWidget(pg.PlotWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event):
-        if (
-            event.button() == Qt.MouseButton.LeftButton
-            and self._inside_data_area(event.position())
+        if event.button() == Qt.MouseButton.LeftButton and self._inside_data_area(
+            event.position()
         ):
             self._rubber_band.hide()
             self._clear_gesture()
@@ -597,6 +599,10 @@ class StreamPlotWidget(pg.PlotWidget):
             event.accept()
             return
         super().contextMenuEvent(event)
+
+    def leaveEvent(self, event):
+        QToolTip.hideText()
+        super().leaveEvent(event)
 
     def _update_rubber_band(self, position):
         data_rect = self.getPlotItem().vb.sceneBoundingRect()
@@ -689,6 +695,7 @@ class StreamPanel(QFrame):
         self._visible_start = 0.0
         self._visible_duration = 0.0
         self._display_unit = "Raw"
+        self._display_units = {}
         self._lane_step = 3.0
         self._axis_channels = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -735,7 +742,9 @@ class StreamPanel(QFrame):
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(UNIT_CHOICES[self.unit_family])
         self.unit_combo.setCurrentText(unit)
-        self.unit_combo.setToolTip("Unit used by the cursor and scale readout")
+        self.unit_combo.setToolTip(
+            "Default unit used by channels whose individual unit is Auto"
+        )
         self.unit_combo.currentTextChanged.connect(self._settings_updated)
         header.addWidget(self.unit_combo)
         header.addWidget(QLabel("Amplitude:"))
@@ -989,6 +998,20 @@ class StreamPanel(QFrame):
         self.channel_settings[name]["offset"] = offset
         self._settings_updated()
 
+    def set_channel_unit(self, name, unit):
+        """Set one channel's display unit without changing its stored data."""
+        unit = str(unit).strip()
+        if not unit:
+            unit = "Auto"
+        current = self.channel_settings[name].get("unit", "Auto")
+        if current == unit:
+            return
+        if unit == "Auto":
+            self.channel_settings[name].pop("unit", None)
+        else:
+            self.channel_settings[name]["unit"] = unit
+        self._settings_updated()
+
     def zero_channel_offset(self, name):
         """Center one channel by removing its visible-window DC component."""
         settings = self.channel_settings[name]
@@ -1041,17 +1064,14 @@ class StreamPanel(QFrame):
             return QColor("#d62728")
         return QColor(
             self.channel_settings[name]["color"]
-            or pg.intColor(
-                self._channel_indices[name], max(1, len(self.channel_names))
-            )
+            or pg.intColor(self._channel_indices[name], max(1, len(self.channel_names)))
         )
 
     def reorder_channels(self, channel_order):
         """Apply a display-only order containing every channel in this panel."""
         channel_order = list(channel_order)
-        if (
-            len(channel_order) != len(self.channel_names)
-            or set(channel_order) != set(self.channel_names)
+        if len(channel_order) != len(self.channel_names) or set(channel_order) != set(
+            self.channel_names
         ):
             raise ValueError("Channel order must contain every panel channel once.")
         if channel_order == self.channel_names:
@@ -1141,6 +1161,8 @@ class StreamPanel(QFrame):
         settings = self.channel_settings[name]
         dialog = ChannelDisplayDialog(
             name,
+            unit=settings.get("unit", "Auto"),
+            unit_choices=self._unit_choices_for_channel(name),
             amplitude=settings["gain"],
             offset=settings["offset"],
             parent=self,
@@ -1156,6 +1178,9 @@ class StreamPanel(QFrame):
             dialog.set_values(current["gain"], current["offset"])
 
         dialog.values_changed.connect(update_display)
+        dialog.unit_changed.connect(
+            lambda unit, name=name: self.set_channel_unit(name, unit)
+        )
         dialog.fit_requested.connect(fit_and_sync)
         return dialog
 
@@ -1181,6 +1206,7 @@ class StreamPanel(QFrame):
                 ("Source", str(source.get("name") or "Data")),
                 ("Source type", str(source.get("type") or "Data")),
                 ("Sampling rate", sampling_rate),
+                ("Display unit", self._channel_display_unit(name)),
                 ("Status", "Bad" if name in self.raw.info["bads"] else "Good"),
                 (
                     "Trace",
@@ -1228,11 +1254,7 @@ class StreamPanel(QFrame):
             start = max(0, int(np.floor(self._visible_start * sfreq)))
             stop = min(
                 self.raw.n_times,
-                int(
-                    np.ceil(
-                        (self._visible_start + self._visible_duration) * sfreq
-                    )
-                )
+                int(np.ceil((self._visible_start + self._visible_duration) * sfreq))
                 + 1,
             )
             if stop <= start:
@@ -1244,9 +1266,10 @@ class StreamPanel(QFrame):
         """Calculate EDFbrowser-style statistics for the visible time window."""
         values = self._channel_window_values(name)
         values = values[np.isfinite(values)]
-        factor = UNIT_FACTORS[self._display_unit]
+        display_unit = self._channel_display_unit(name)
+        factor = UNIT_FACTORS.get(display_unit, 1.0)
         values = values * factor
-        unit = "raw" if self._display_unit == "Raw" else self._display_unit
+        unit = "raw" if display_unit == "Raw" else display_unit
         sample_count = int(values.size)
 
         if sample_count:
@@ -1563,33 +1586,41 @@ class StreamPanel(QFrame):
         self.settings_changed.emit(self)
 
     def _unit_family(self):
-        families = []
-        for name in self.channel_names:
-            channel_type = self._channel_types[name]
-            source_type = str(
-                self.sources[self._source_by_channel[name]].get("type", "")
-            ).lower()
-            if channel_type in VOLTAGE_TYPES:
-                family = "voltage"
-            elif channel_type == "mag":
-                family = "magnetic"
-            elif channel_type == "grad":
-                family = "gradient"
-            elif channel_type in {"hbo", "hbr"}:
-                family = "molar"
-            elif channel_type == "gsr":
-                family = "conductance"
-            elif channel_type == "temperature":
-                family = "temperature"
-            elif source_type in VOLTAGE_TYPES:
-                family = "voltage"
-            else:
-                family = "raw"
-            families.append(family)
+        families = [self._unit_family_for_channel(name) for name in self.channel_names]
         return families[0] if families and len(set(families)) == 1 else "raw"
 
-    def _auto_unit(self, peak):
-        family = self.unit_family
+    def _unit_family_for_channel(self, name):
+        """Return the physical unit family inferred for one channel."""
+        channel_type = self._channel_types[name]
+        source_type = str(
+            self.sources[self._source_by_channel[name]].get("type", "")
+        ).lower()
+        if channel_type in VOLTAGE_TYPES:
+            return "voltage"
+        if channel_type == "mag":
+            return "magnetic"
+        if channel_type == "grad":
+            return "gradient"
+        if channel_type in {"hbo", "hbr"}:
+            return "molar"
+        if channel_type == "gsr":
+            return "conductance"
+        if channel_type == "temperature":
+            return "temperature"
+        if source_type in VOLTAGE_TYPES:
+            return "voltage"
+        return "raw"
+
+    def _unit_choices_for_channel(self, name):
+        """Return suggested units; the channel editor also accepts custom text."""
+        family = self._unit_family_for_channel(name)
+        choices = list(UNIT_CHOICES[family])
+        if family == "raw":
+            choices.extend(SENSOR_UNIT_CHOICES)
+        return list(dict.fromkeys(choices))
+
+    def _auto_unit(self, peak, family=None):
+        family = family or self.unit_family
         if family == "voltage":
             if peak < 1e-7:
                 return "nV"
@@ -1618,13 +1649,29 @@ class StreamPanel(QFrame):
             return "°C"
         return "Raw"
 
+    def _channel_display_unit(self, name, peak=None):
+        """Return the effective unit for one channel."""
+        selected = self.channel_settings[name].get("unit", "Auto")
+        if selected != "Auto":
+            return selected
+        panel_unit = self.unit_combo.currentText()
+        if panel_unit != "Auto":
+            return panel_unit
+        if peak is None and name in self._display_units:
+            return self._display_units[name]
+        if peak is None:
+            source = self.sources[self._source_by_channel[name]]
+            peak = self.display_scales.get(source["id"], 1.0)
+            peak /= max(self.amplitude.value(), np.finfo(float).eps)
+        return self._auto_unit(peak, family=self._unit_family_for_channel(name))
+
     def _update_channel_list(self):
         self.channel_list.clear()
         bads = set(self.raw.info["bads"])
         for name in self.page_channel_names:
             item = QListWidgetItem(name)
             item.setData(Qt.ItemDataRole.UserRole, name)
-            item.setToolTip(name)
+            item.setToolTip(f"{name} ({self._channel_display_unit(name)})")
             settings = self.channel_settings[name]
             if name in bads:
                 font = item.font()
@@ -1666,21 +1713,51 @@ class StreamPanel(QFrame):
             or not len(self._times)
             or not self.visible_channel_names
         ):
+            QToolTip.hideText()
             return
         point = self.plot.getPlotItem().vb.mapSceneToView(scene_pos)
         sample = int(
             np.clip(np.searchsorted(self._times, point.x()), 0, len(self._times) - 1)
         )
+        if sample > 0 and abs(self._times[sample - 1] - point.x()) < abs(
+            self._times[sample] - point.x()
+        ):
+            sample -= 1
         visible_names = self.visible_channel_names
         top_offset = (len(visible_names) - 1) * self._lane_step
         channel = int(round((top_offset - point.y()) / self._lane_step))
         channel = int(np.clip(channel, 0, len(visible_names) - 1))
         value = self._values[channel, sample]
-        factor = UNIT_FACTORS[self._display_unit]
-        unit_label = "raw" if self._display_unit == "Raw" else self._display_unit
+        name = visible_names[channel]
+        display_unit = self._channel_display_unit(name)
+        factor = UNIT_FACTORS.get(display_unit, 1.0)
+        unit_label = "raw" if display_unit == "Raw" else display_unit
         self.cursor_changed.emit(
-            f"t={self._times[sample]:.4f} s   {visible_names[channel]}="
-            f"{value * factor:.6g} {unit_label}"
+            f"t={self._times[sample]:.4f} s   {name}={value * factor:.6g} {unit_label}"
+        )
+
+        hovered_channel = None
+        for index, item in enumerate(self._curves[: len(visible_names)]):
+            curve = item.curve
+            if item.isVisible() and curve.mouseShape().contains(
+                curve.mapFromScene(scene_pos)
+            ):
+                hovered_channel = index
+                break
+        if hovered_channel is None:
+            QToolTip.hideText()
+            return
+
+        name = visible_names[hovered_channel]
+        display_unit = self._channel_display_unit(name)
+        factor = UNIT_FACTORS.get(display_unit, 1.0)
+        unit_label = "raw" if display_unit == "Raw" else display_unit
+        value = self._values[hovered_channel, sample] * factor
+        position = self.plot.mapToGlobal(self.plot.mapFromScene(scene_pos))
+        QToolTip.showText(
+            position + QPoint(12, -24),
+            f"{name}\n{value:.6g} {unit_label}",
+            self.plot,
         )
 
     def _display_values(self, name, values):
@@ -1772,15 +1849,23 @@ class StreamPanel(QFrame):
             channel_scales[indices] = source_peak
 
         selected_unit = self.unit_combo.currentText()
-        self._display_unit = (
-            self._auto_unit(
-                max(
-                    (scale / amplitude for scale in source_scales.values()),
-                    default=1.0,
-                )
+        panel_peak = max(
+            (scale / amplitude for scale in source_scales.values()),
+            default=1.0,
+        )
+        self._display_units = {
+            name: self._channel_display_unit(
+                name,
+                source_scales.get(self._source_by_channel[name], panel_peak)
+                / amplitude,
             )
-            if selected_unit == "Auto"
-            else selected_unit
+            for name in visible_names
+        }
+        effective_units = set(self._display_units.values())
+        self._display_unit = (
+            next(iter(effective_units))
+            if len(effective_units) == 1
+            else (selected_unit if selected_unit != "Auto" else "Raw")
         )
         max_points = max(200, self.plot.width() * 2)
         for index, curve in enumerate(self._curves):
@@ -1816,17 +1901,27 @@ class StreamPanel(QFrame):
         self.plot.setXRange(start_time, start_time + duration, padding=0)
 
     def _update_scale_label(self, source_scales, amplitude, visible_names):
-        factor = UNIT_FACTORS[self._display_unit]
-        unit = "raw" if self._display_unit == "Raw" else self._display_unit
         parts = []
         for source_index, scale in source_scales.items():
-            value = scale / amplitude * factor
+            source_names = [
+                name
+                for name in visible_names
+                if self._source_by_channel[name] == source_index
+            ]
+            units = list(
+                dict.fromkeys(self._channel_display_unit(name) for name in source_names)
+            )
             prefix = (
                 f"{self.sources[source_index]['name']} "
                 if len(source_scales) > 1
                 else ""
             )
-            parts.append(f"{prefix}{value:.3g} {unit}/div")
+            for display_unit in units:
+                factor = UNIT_FACTORS.get(display_unit, 1.0)
+                unit = "raw" if display_unit == "Raw" else display_unit
+                value = scale / amplitude * factor
+                unit_prefix = f"{prefix}{display_unit}: " if len(units) > 1 else prefix
+                parts.append(f"{unit_prefix}{value:.3g} {unit}/div")
         visible_parts = parts[:2]
         if len(parts) > 2:
             visible_parts.append(f"+{len(parts) - 2} streams")
@@ -1887,7 +1982,7 @@ class StreamPanel(QFrame):
                 )
         while len(self._annotation_regions) < len(visible_annotations):
             region = pg.LinearRegionItem(values=(0, 0), movable=False)
-            region.setZValue(5)
+            region.setZValue(-10)
             self.plot.addItem(region)
             self._annotation_regions.append(region)
         for index, region in enumerate(self._annotation_regions):
@@ -2661,6 +2756,7 @@ class StreamViewerWindow(QMainWindow):
             remove_dc = channel_state.get("remove_dc", False)
             color = channel_state.get("color")
             visible = channel_state.get("visible", True)
+            unit = channel_state.get("unit", "Auto")
             if isinstance(gain, bool) or isinstance(offset, bool):
                 raise ValueError(f"Display settings for channel {name!r} are invalid.")
             try:
@@ -2677,6 +2773,8 @@ class StreamViewerWindow(QMainWindow):
                 or not -1 <= offset <= 1
                 or type(remove_dc) is not bool
                 or type(visible) is not bool
+                or not isinstance(unit, str)
+                or not unit.strip()
                 or (color is not None and not QColor(str(color)).isValid())
             ):
                 raise ValueError(f"Display settings for channel {name!r} are invalid.")
@@ -2687,6 +2785,8 @@ class StreamViewerWindow(QMainWindow):
                 "color": QColor(str(color)).name() if color is not None else None,
                 "visible": visible,
             }
+            if unit != "Auto":
+                validated_channel_settings[name]["unit"] = unit.strip()
         channel_fits = state.get("channel_fits", {})
         if not isinstance(channel_fits, dict):
             raise ValueError("The display montage channel fits are invalid.")
@@ -3217,9 +3317,7 @@ class StreamViewerWindow(QMainWindow):
         duration = float(np.clip(duration, minimum, self.total_duration))
         maximum_start = max(0.0, self.total_duration - duration)
         start = float(np.clip(start, 0.0, maximum_start))
-        if np.isclose(start, self._start_time) and np.isclose(
-            duration, self._duration
-        ):
+        if np.isclose(start, self._start_time) and np.isclose(duration, self._duration):
             self._sync_navigation()
             return False
         self._navigation_timer.stop()
@@ -3251,9 +3349,7 @@ class StreamViewerWindow(QMainWindow):
         if not np.isfinite(factor) or factor <= 0:
             return
         anchor = (
-            self._start_time + self._duration / 2
-            if anchor is None
-            else float(anchor)
+            self._start_time + self._duration / 2 if anchor is None else float(anchor)
         )
         ratio = float(np.clip((anchor - self._start_time) / self._duration, 0, 1))
         duration = self._duration * factor

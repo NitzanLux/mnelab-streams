@@ -85,10 +85,23 @@ class XDFImportDialog(QDialog):
         self.skip_unreadable.setChecked(True)
         layout.addWidget(self.skip_unreadable)
 
+        self.allow_channel_union = QCheckBox(
+            "Allow different channel sets and fill unavailable channels with NaN"
+        )
+        self.allow_channel_union.setChecked(True)
+        layout.addWidget(self.allow_channel_union)
+
+        self.split_on_discontinuity = QCheckBox(
+            "Start a new data set when the seam threshold is exceeded"
+        )
+        self.split_on_discontinuity.setChecked(True)
+        layout.addWidget(self.split_on_discontinuity)
+
         self.merge_note = QLabel(
-            "Merged files must have the same channels, channel types, and sampling "
-            "frequency. The seam threshold limits the absolute gap or overlap "
-            "between recordings. Boundary annotations are inserted at each seam."
+            "Merged files must use the same sampling frequency and type for every "
+            "shared channel. Different channel sets can be aligned with NaN-filled "
+            "intervals. The seam threshold can stop the import or split recordings "
+            "into time-contiguous data sets."
         )
         self.merge_note.setWordWrap(True)
         self.merge_note.setEnabled(False)
@@ -141,6 +154,16 @@ class XDFImportDialog(QDialog):
     def skip_unreadable_files(self):
         """Return whether unreadable XDFs may be omitted from the merge."""
         return self.merge_files and self.skip_unreadable.isChecked()
+
+    @property
+    def split_at_time_discontinuities(self):
+        """Return whether seams outside the tolerance start a new data set."""
+        return self.auto_order_by_time and self.split_on_discontinuity.isChecked()
+
+    @property
+    def merge_channel_union(self):
+        """Return whether differing channel sets may be aligned with NaN data."""
+        return self.merge_files and self.allow_channel_union.isChecked()
 
     @Slot()
     def _move_up(self):
@@ -197,6 +220,8 @@ class XDFImportDialog(QDialog):
         self.merge_note.setEnabled(merge)
         self.auto_order.setEnabled(merge)
         self.skip_unreadable.setEnabled(merge)
+        self.allow_channel_union.setEnabled(merge)
+        self.split_on_discontinuity.setEnabled(timed)
         self.stitch_threshold_label.setEnabled(timed)
         self.stitch_threshold.setEnabled(timed)
         self.files.setDragEnabled(not timed)

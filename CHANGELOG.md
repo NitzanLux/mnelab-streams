@@ -1,6 +1,8 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
-- Add file- and folder-based multi-XDF import with manual or recording-time ordering, configurable seam tolerance, same-name stream unification, and optional skipping of damaged files with a detailed summary (by [NitzanLux](https://github.com/NitzanLux))
+- Add file- and folder-based multi-XDF import with time-based dataset splitting, NaN-aligned channel unions, stream-qualified duplicate labels, same-name stream unification, and optional skipping of damaged files (by [NitzanLux](https://github.com/NitzanLux))
+- Allow each stream-viewer channel to use its own display unit, including custom IMU
+  and sensor unit labels, with persistence in display montages
 
 ### 🔧 Fixed
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))

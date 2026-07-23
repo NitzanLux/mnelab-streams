@@ -7,14 +7,15 @@ import pytest
 from mnelab.dialogs import FilterDialog, PSDDialog
 
 
-def test_psd_frequency_is_limited_to_nyquist(qtbot):
-    """The PSD upper-frequency control cannot exceed the Nyquist frequency."""
-    dialog = PSDDialog(None, fmin=0, fmax=50, montage=False)
+def test_psd_defaults_to_full_nyquist_range(qtbot):
+    """PSD defaults span zero through the Nyquist frequency."""
+    dialog = PSDDialog(None, fmin=0, fmax=500, montage=False)
     qtbot.addWidget(dialog)
 
-    assert dialog.fmin_input.maximum() == 50
-    assert dialog.fmax_input.maximum() == 50
-    assert dialog.fmax == 50
+    assert dialog.fmin == 0
+    assert dialog.fmin_input.maximum() == 500
+    assert dialog.fmax_input.maximum() == 500
+    assert dialog.fmax == 500
 
 
 @pytest.mark.parametrize("attribute", ["lower_edit", "upper_edit", "notch_edit"])

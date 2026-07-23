@@ -26,6 +26,22 @@ def test_dialog_exposes_channel_and_display_values(dialog):
     assert dialog.offset_spin.maximum() == pytest.approx(1.0)
 
 
+def test_dialog_accepts_suggested_and_custom_channel_units(qtbot):
+    dialog = ChannelDisplayDialog(
+        "Accelerometer X",
+        unit_choices=["Auto", "Raw", "g", "m/s²"],
+    )
+    qtbot.addWidget(dialog)
+
+    with qtbot.waitSignal(dialog.unit_changed) as changed:
+        dialog.unit_combo.setCurrentText("g")
+    assert dialog.unit == "g"
+    assert changed.args == ["g"]
+
+    dialog.unit_combo.setCurrentText("counts/s")
+    assert dialog.unit == "counts/s"
+
+
 def test_amplitude_buttons_use_multiplicative_steps(qtbot, dialog):
     with qtbot.waitSignal(dialog.values_changed) as increased:
         qtbot.mouseClick(dialog.amplitude_up_button, Qt.MouseButton.LeftButton)
@@ -66,6 +82,7 @@ def test_reset_restores_defaults_and_emits_once(qtbot, dialog):
 
     assert dialog.amplitude == pytest.approx(1.0)
     assert dialog.offset == pytest.approx(0.0)
+    assert dialog.unit == "Auto"
     assert changes == [(1.0, 0.0)]
 
 

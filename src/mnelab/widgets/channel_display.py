@@ -4,6 +4,7 @@
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
@@ -17,9 +18,10 @@ from PySide6.QtWidgets import (
 
 
 class ChannelDisplayDialog(QDialog):
-    """Edit the display amplitude and vertical offset for one channel."""
+    """Edit the display unit, amplitude, and vertical offset for one channel."""
 
     values_changed = Signal(float, float)
+    unit_changed = Signal(str)
     fit_requested = Signal()
     reset_requested = Signal()
 
@@ -31,6 +33,9 @@ class ChannelDisplayDialog(QDialog):
         amplitude=1.0,
         offset=0.0,
         parent=None,
+        *,
+        unit="Auto",
+        unit_choices=None,
     ):
         super().__init__(parent)
         self.channel_name = str(channel_name)
@@ -38,6 +43,18 @@ class ChannelDisplayDialog(QDialog):
 
         self.channel_label = QLabel(self.channel_name)
         self.channel_label.setObjectName("channelName")
+
+        self.unit_combo = QComboBox()
+        self.unit_combo.setObjectName("displayUnit")
+        self.unit_combo.setEditable(True)
+        self.unit_combo.addItems(list(unit_choices or ["Auto", "Raw"]))
+        if self.unit_combo.findText(unit) < 0:
+            self.unit_combo.addItem(unit)
+        self.unit_combo.setCurrentText(unit)
+        self.unit_combo.setToolTip(
+            "Display unit for this channel. Type a custom unit to label raw values "
+            "without conversion."
+        )
 
         self.amplitude_spin = QDoubleSpinBox()
         self.amplitude_spin.setObjectName("amplitudeMultiplier")
@@ -76,6 +93,7 @@ class ChannelDisplayDialog(QDialog):
 
         form = QFormLayout()
         form.addRow("Channel:", self.channel_label)
+        form.addRow("Unit:", self.unit_combo)
         form.addRow("Amplitude:", amplitude_row)
         form.addRow("Offset:", self.offset_spin)
 
@@ -101,6 +119,7 @@ class ChannelDisplayDialog(QDialog):
 
         self.amplitude_spin.valueChanged.connect(self._emit_values)
         self.offset_spin.valueChanged.connect(self._emit_values)
+        self.unit_combo.currentTextChanged.connect(self.unit_changed)
         self.amplitude_down_button.clicked.connect(self.decrease_amplitude)
         self.amplitude_up_button.clicked.connect(self.increase_amplitude)
         self.fit_button.clicked.connect(self.fit_requested)
@@ -116,6 +135,11 @@ class ChannelDisplayDialog(QDialog):
     def offset(self):
         """Current vertical offset in channel-lane divisions."""
         return self.offset_spin.value()
+
+    @property
+    def unit(self):
+        """Current channel display unit."""
+        return self.unit_combo.currentText().strip()
 
     def decrease_amplitude(self):
         """Decrease amplitude by the fixed multiplicative step."""
@@ -145,6 +169,7 @@ class ChannelDisplayDialog(QDialog):
     def reset(self):
         """Restore the default display values and notify the caller."""
         self.set_values(1.0, 0.0)
+        self.unit_combo.setCurrentText("Auto")
         self.reset_requested.emit()
 
     def _emit_values(self):

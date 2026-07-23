@@ -170,8 +170,10 @@ def _resolve_xdf_rows(fname):
     return rows
 
 
-def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
-    """Return chronological indices after validating adjacent recording seams."""
+def _chronological_xdf_groups(
+    raws, fnames, maximum_seam_difference, *, split_on_discontinuity
+):
+    """Return chronological groups separated by disallowed gaps or overlaps."""
     if len(raws) != len(fnames):
         raise ValueError("Every XDF Raw object must have a source filename.")
     if maximum_seam_difference < 0:
@@ -200,6 +202,9 @@ def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
         starts.append(start)
 
     order = sorted(range(len(raws)), key=lambda index: (starts[index], fnames[index]))
+    if not order:
+        return []
+    groups = [[order[0]]]
     for previous_index, current_index in zip(order, order[1:]):
         previous = raws[previous_index]
         expected_start = starts[previous_index] + previous.n_times / float(
@@ -207,6 +212,9 @@ def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
         )
         seam_difference = starts[current_index] - expected_start
         if abs(seam_difference) > maximum_seam_difference:
+            if split_on_discontinuity:
+                groups.append([current_index])
+                continue
             kind = "gap" if seam_difference >= 0 else "overlap"
             raise XDFImportError(
                 f'Cannot stitch "{Path(fnames[previous_index]).name}" to '
@@ -214,7 +222,19 @@ def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
                 f"{abs(seam_difference):.6g} s, exceeding the "
                 f"{maximum_seam_difference:.6g} s threshold."
             )
-    return order
+        groups[-1].append(current_index)
+    return groups
+
+
+def _chronological_xdf_order(raws, fnames, maximum_seam_difference):
+    """Return chronological indices after validating adjacent recording seams."""
+    groups = _chronological_xdf_groups(
+        raws,
+        fnames,
+        maximum_seam_difference,
+        split_on_discontinuity=False,
+    )
+    return groups[0] if groups else []
 
 
 def _unify_xdf_streams(stream_sets, fnames, channel_names, sfreq):
@@ -282,6 +302,160 @@ def _unify_xdf_streams(stream_sets, fnames, channel_names, sfreq):
         else:
             descriptor["declared_channel_count"] = len(descriptor["channel_names"])
     return descriptors
+
+
+def _qualify_xdf_duplicate_channels(raws, stream_sets, fnames):
+    """Qualify cross-stream duplicate labels with their distinct stream names."""
+    if not (len(raws) == len(stream_sets) == len(fnames)):
+        raise ValueError("Every XDF Raw object and stream set needs a source filename.")
+
+    records = []
+    root_streams = {}
+    for file_index, (raw, streams, fname) in enumerate(zip(raws, stream_sets, fnames)):
+        described = []
+        for stream_index, stream in enumerate(streams):
+            if stream.get("removed"):
+                continue
+            stream_name = str(stream.get("name") or "Unnamed").strip()
+            stream_key = stream_name.casefold()
+            stream_channels = list(stream.get("channel_names", []))
+            described.extend(stream_channels)
+            roots = []
+            for channel in stream_channels:
+                match = re.fullmatch(r"(.+)-\d+", channel)
+                root = match.group(1) if match else channel
+                roots.append(root)
+                root_streams.setdefault(root, set()).add(stream_key)
+            root_counts = {root: roots.count(root) for root in set(roots)}
+            for channel, root in zip(stream_channels, roots):
+                records.append(
+                    {
+                        "file_index": file_index,
+                        "stream_index": stream_index,
+                        "fname": fname,
+                        "stream_name": stream_name,
+                        "channel": channel,
+                        "root": root,
+                        "root_count": root_counts[root],
+                    }
+                )
+        if set(described) != set(raw.ch_names) or len(described) != len(raw.ch_names):
+            raise XDFImportError(
+                f'Cannot identify source streams in "{Path(fname).name}" because '
+                "their channel membership does not match the loaded channels."
+            )
+
+    ambiguous_roots = {
+        root for root, stream_keys in root_streams.items() if len(stream_keys) > 1
+    }
+    renames = []
+    for file_index, (raw, streams) in enumerate(zip(raws, stream_sets)):
+        mapping = {}
+        for record in records:
+            if (
+                record["file_index"] != file_index
+                or record["root"] not in ambiguous_roots
+            ):
+                continue
+            suffix = record["root"] if record["root_count"] == 1 else record["channel"]
+            target = f"{record['stream_name']}/{suffix}"
+            mapping[record["channel"]] = target
+            renames.append(
+                (
+                    record["fname"],
+                    record["stream_name"],
+                    record["channel"],
+                    target,
+                )
+            )
+
+        resulting_names = [mapping.get(name, name) for name in raw.ch_names]
+        if len(resulting_names) != len(set(resulting_names)):
+            raise XDFImportError(
+                f"Cannot create unique stream-qualified channel names for "
+                f'"{Path(fnames[file_index]).name}".'
+            )
+        if mapping:
+            raw.rename_channels(mapping)
+            for stream in streams:
+                stream["channel_names"] = [
+                    mapping.get(channel, channel)
+                    for channel in stream.get("channel_names", [])
+                ]
+    return renames
+
+
+def _qualified_xdf_channels_message(renames):
+    """Explain automatic source qualification of ambiguous channel labels."""
+    examples = []
+    seen = set()
+    for _fname, _stream, original, qualified in renames:
+        pair = (original, qualified)
+        if pair not in seen:
+            seen.add(pair)
+            examples.append(f'- "{original}" → "{qualified}"')
+    preview = examples[:10]
+    if len(examples) > len(preview):
+        preview.append(f"- … and {len(examples) - len(preview)} more")
+    return (
+        "Channels with duplicate labels belong to different XDF stream entities. "
+        "They were qualified with their source stream name so those entities remain "
+        "separate across files:\n\n" + "\n".join(preview)
+    )
+
+
+def _align_xdf_channel_union(raws, fnames):
+    """Align recordings to their channel union, filling absent channels with NaN."""
+    if len(raws) != len(fnames):
+        raise ValueError("Every XDF Raw object must have a source filename.")
+
+    channel_names = []
+    channel_types = {}
+    for raw, fname in zip(raws, fnames):
+        for index, name in enumerate(raw.ch_names):
+            kind = channel_type(raw.info, index)
+            previous_kind = channel_types.get(name)
+            if previous_kind is not None and previous_kind != kind:
+                raise XDFImportError(
+                    f'Cannot merge "{Path(fname).name}" because channel "{name}" '
+                    f'has type "{kind}" instead of "{previous_kind}".'
+                )
+            if name not in channel_types:
+                channel_names.append(name)
+                channel_types[name] = kind
+
+    filled = []
+    for raw, fname in zip(raws, fnames):
+        missing = [name for name in channel_names if name not in raw.ch_names]
+        if missing:
+            info = mne.create_info(
+                missing,
+                raw.info["sfreq"],
+                [channel_types[name] for name in missing],
+            )
+            placeholder = mne.io.RawArray(
+                np.full((len(missing), raw.n_times), np.nan),
+                info,
+                verbose=False,
+            )
+            placeholder.set_meas_date(raw.info.get("meas_date"))
+            raw.add_channels([placeholder], force_update_info=True)
+            filled.append((fname, missing))
+        if raw.ch_names != channel_names:
+            raw.reorder_channels(channel_names)
+    return filled
+
+
+def _filled_xdf_channels_message(filled):
+    """Describe per-file channels synthesized as missing-data placeholders."""
+    sections = [
+        f"- {Path(fname).name}: {', '.join(channels)}" for fname, channels in filled
+    ]
+    return (
+        "The merged recordings did not all contain the same channels. The following "
+        "channels were added and filled with NaN only where they were unavailable:\n\n"
+        + "\n".join(sections)
+    )
 
 
 def _merge_xdf_raws(raws, fnames):
@@ -1256,6 +1430,8 @@ class MainWindow(QMainWindow):
         *,
         auto_order_by_time=False,
         maximum_seam_difference=1.0,
+        split_on_time_discontinuities=False,
+        allow_channel_union=False,
         skip_unreadable=False,
         unreadable_failures=None,
     ):
@@ -1298,29 +1474,89 @@ class MainWindow(QMainWindow):
             raise XDFImportError(message)
 
         if auto_order_by_time:
-            order = _chronological_xdf_order(raws, fnames, maximum_seam_difference)
-            raws = [raws[index] for index in order]
-            source_streams = [source_streams[index] for index in order]
-            fnames = [fnames[index] for index in order]
+            groups = _chronological_xdf_groups(
+                raws,
+                fnames,
+                maximum_seam_difference,
+                split_on_discontinuity=split_on_time_discontinuities,
+            )
+        else:
+            groups = [list(range(len(raws)))]
 
-        merged = _merge_xdf_raws(raws, fnames)
-        unified_streams = _unify_xdf_streams(
-            source_streams,
-            fnames,
-            merged.ch_names,
-            merged.info["sfreq"],
-        )
-        if read_settings("memory_saving") and self.model.data:
-            self.model.evict_dataset(self.model.index)
-        name = f"{Path(fnames[0]).stem} ({len(fnames)} XDF files merged)"
-        self.model.load_data(
-            merged,
-            fnames[0],
-            name=name,
-            source_streams=unified_streams,
-            source_files=fnames,
-        )
-        self.model.history.append("data = mne.concatenate_raws(raws, preload=True)")
+        prepared = []
+        filled_channels = []
+        qualified_channels = []
+        for group_number, indices in enumerate(groups, start=1):
+            group_raws = [raws[index] for index in indices]
+            group_streams = [source_streams[index] for index in indices]
+            group_fnames = [fnames[index] for index in indices]
+            qualified_channels.extend(
+                _qualify_xdf_duplicate_channels(group_raws, group_streams, group_fnames)
+            )
+            if allow_channel_union:
+                filled_channels.extend(
+                    _align_xdf_channel_union(group_raws, group_fnames)
+                )
+            merged = _merge_xdf_raws(group_raws, group_fnames)
+            unified_streams = _unify_xdf_streams(
+                group_streams,
+                group_fnames,
+                merged.ch_names,
+                merged.info["sfreq"],
+            )
+            if len(groups) == 1:
+                name = (
+                    f"{Path(group_fnames[0]).stem} "
+                    f"({len(group_fnames)} XDF files merged)"
+                )
+            elif len(group_fnames) == 1:
+                name = (
+                    f"{Path(group_fnames[0]).stem} "
+                    f"(time group {group_number} of {len(groups)})"
+                )
+            else:
+                name = (
+                    f"{Path(group_fnames[0]).stem} "
+                    f"({len(group_fnames)} XDF files merged, time group "
+                    f"{group_number} of {len(groups)})"
+                )
+            prepared.append((merged, group_fnames, unified_streams, name))
+
+        memory_saving = read_settings("memory_saving")
+        for merged, group_fnames, unified_streams, name in prepared:
+            if memory_saving and self.model.data:
+                self.model.evict_dataset(self.model.index)
+            self.model.load_data(
+                merged,
+                group_fnames[0],
+                name=name,
+                source_streams=unified_streams,
+                source_files=group_fnames,
+            )
+            self.model.history.append("data = mne.concatenate_raws(raws, preload=True)")
+
+        if len(groups) > 1:
+            QMessageBox.information(
+                self,
+                "XDF Recordings Split by Time",
+                f"Created {len(groups)} data sets because one or more gaps or "
+                f"overlaps exceeded the {maximum_seam_difference:.6g} s seam "
+                "threshold.",
+            )
+
+        if qualified_channels:
+            QMessageBox.information(
+                self,
+                "XDF Channel Labels Qualified by Stream",
+                _qualified_xdf_channels_message(qualified_channels),
+            )
+
+        if filled_channels:
+            QMessageBox.warning(
+                self,
+                "Unavailable XDF Channels Filled",
+                _filled_xdf_channels_message(filled_channels),
+            )
 
         if failures:
             QMessageBox.warning(
@@ -1373,6 +1609,8 @@ class MainWindow(QMainWindow):
                 configurations,
                 auto_order_by_time=dialog.auto_order_by_time,
                 maximum_seam_difference=dialog.maximum_seam_difference,
+                split_on_time_discontinuities=(dialog.split_at_time_discontinuities),
+                allow_channel_union=dialog.merge_channel_union,
                 skip_unreadable=dialog.skip_unreadable_files,
                 unreadable_failures=unreadable_failures,
             )

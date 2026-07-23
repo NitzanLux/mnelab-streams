@@ -308,10 +308,20 @@ streams shall be selectable in the same table.
   channel sets safely, and inserts boundary annotations between recordings.
 - Folder import shall recursively include all `.xdf`, `.xdfz`, and `.xdf.gz` files.
 - Automatic ordering shall use absolute recording datetimes from the XDF headers. The
-  user shall configure a maximum allowed gap or overlap at each seam; a recording with
-  no absolute datetime or a seam outside the tolerance shall stop the atomic merge.
+  user shall configure a maximum allowed gap or overlap at each seam. A recording with
+  no absolute datetime shall stop the atomic import. A seam outside the tolerance shall
+  either stop the import or begin a separately inserted time-contiguous dataset,
+  according to the selected policy.
 - Streams whose names match case-insensitively across source files shall become one
   source-stream descriptor containing their shared channels and per-file stream IDs.
+- When heterogeneous-channel merging is enabled, each time group shall use the ordered
+  union of its channel names. A channel absent from a source recording shall contain
+  `NaN` over that recording's interval, and the application shall report every such
+  file/channel addition. Shared channel names must retain the same channel type.
+- Duplicate channel-label families belonging to differently named XDF streams shall be
+  qualified with their stream name before alignment. This stream-qualified identity
+  shall remain stable if stream order and PyXDF's numeric duplicate suffixes differ
+  between files; differently named streams remain separate entities.
 - Batch merging shall offer to skip files whose metadata inspection or full loading
   fails, list every omission and reason, and require at least two readable files before
   inserting the merged dataset. Compatibility and seam failures remain merge errors.
@@ -551,7 +561,7 @@ Keyboard commands are:
 
 ### 12.4 Units and amplitude
 
-Each panel shall provide a unit family appropriate to its channels:
+Each panel shall provide a default unit family appropriate to its channels:
 
 - voltage: Auto, V, mV, µV, nV, Raw;
 - magnetic field: Auto, T, mT, µT, nT, pT, fT, Raw;
@@ -560,6 +570,12 @@ Each panel shall provide a unit family appropriate to its channels:
 - conductance: Auto, S, mS, µS, Raw;
 - temperature: Auto, °C, Raw; and
 - unknown/raw: Auto or Raw.
+
+Each channel may override the panel default from its **Edit Channel Display** dialog.
+Known physical families provide scaled unit choices. Raw/unknown channels additionally
+offer common IMU and sensor labels, and accept a custom unit label without applying an
+unknown conversion. Per-channel units shall be used in cursor values, statistics,
+scale readouts, and saved display montages.
 
 Panel amplitude is a display-only multiplier from 0.001x through 1000x. Step buttons
 and keyboard changes use a factor of 1.25. The scale readout shall report the signal
@@ -582,6 +598,7 @@ Right-clicking a channel row shall expose:
   mean, RMS, mean rectified signal, zero crossings, and estimated frequency;
 - show/hide trace;
 - increase/decrease, fit, or enter its amplitude multiplier;
+- select an individual display unit or inherit the panel default;
 - enter a vertical visual offset from -1 to +1 channel lanes;
 - enable **Zero Offset (Remove DC)**;
 - select a trace color or return to automatic color;
