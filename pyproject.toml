@@ -3,13 +3,16 @@ requires = ["uv_build >= 0.11.6, < 0.12.0"]
 build-backend = "uv_build"
 
 [project]
-name = "mnelab"
-version = "1.6.0.dev0"
-description = "A graphical user interface for MNE"
+name = "mnelab-streams"
+version = "0.1.0"
+description = "A source-aware XDF and signal review interface based on MNELAB"
 license = "BSD-3-Clause"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 authors = [
     {name = "Clemens Brunner", email = "clemens.brunner@gmail.com"},
+]
+maintainers = [
+    {name = "NitzanLux"},
 ]
 readme = "README.md"
 requires-python = ">=3.12"
@@ -56,13 +59,17 @@ docs = [
 ]
 
 [project.gui-scripts]
-mnelab = "mnelab:main"
+mnelab-streams = "mnelab:main"
 
 [project.urls]
-homepage = "https://github.com/cbrnr/mnelab"
-documentation = "https://mnelab.readthedocs.io/en/latest/"
-repository = "https://github.com/cbrnr/mnelab"
-changelog = "https://github.com/cbrnr/mnelab/blob/main/CHANGELOG.md"
+homepage = "https://github.com/NitzanLux/mnelab-streams"
+documentation = "https://github.com/NitzanLux/mnelab-streams#readme"
+repository = "https://github.com/NitzanLux/mnelab-streams"
+changelog = "https://github.com/NitzanLux/mnelab-streams/blob/main/CHANGELOG.md"
+upstream = "https://github.com/cbrnr/mnelab"
+
+[tool.uv.build-backend]
+module-name = "mnelab"
 
 [tool.ruff.lint]
 select = ["C4", "E", "F", "I", "PERF", "UP", "W"]

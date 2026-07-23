@@ -919,8 +919,8 @@ wheels = [
 ]
 
 [[package]]
-name = "mnelab"
-version = "1.6.0.dev0"
+name = "mnelab-streams"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "black" },

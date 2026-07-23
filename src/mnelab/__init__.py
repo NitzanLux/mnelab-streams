@@ -15,7 +15,7 @@ import multiprocessing as mp
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("mnelab")
+    __version__ = version("mnelab-streams")
 except PackageNotFoundError:
     __version__ = "unknown"
 
@@ -48,8 +48,8 @@ def main():
 
     matplotlib.use("QtAgg")
 
-    class MNELAB(QApplication):
-        """MNELAB application."""
+    class MNELABStreams(QApplication):
+        """MNELAB Streams application."""
 
         def __init__(self, argv):
             super().__init__(argv)
@@ -61,11 +61,11 @@ def main():
                 return True
             return super().event(event)
 
-    app = MNELAB(sys.argv)
-    app.setApplicationName("mnelab")
-    app.setApplicationDisplayName("MNELAB")
-    app.setDesktopFileName("mnelab")
-    app.setOrganizationName("mnelab")
+    app = MNELABStreams(sys.argv)
+    app.setApplicationName("mnelab-streams")
+    app.setApplicationDisplayName("MNELAB Streams")
+    app.setDesktopFileName("mnelab-streams")
+    app.setOrganizationName("NitzanLux")
     if sys.platform.startswith("darwin"):
         # prevent any code from changing the dock icon (the app bundle handles it)
         app.setWindowIcon = lambda icon: None

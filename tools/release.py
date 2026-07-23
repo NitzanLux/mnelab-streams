@@ -1,14 +1,14 @@
 #!/usr/bin/env python
 
-"""Automate MNELAB release process.
+"""Automate the MNELAB Streams release process.
 
 Run from the repository root:
 
   # turn the current dev checkout into a release checkout (and update the lock)
-  uv run tools/release.py prepare 1.6.0
+  uv run tools/release.py prepare 0.1.0
 
   # after the release: bump to the next dev version and reopen the CHANGELOG
-  uv run tools/release.py bump 1.7.0
+  uv run tools/release.py bump 0.2.0
 
 `prepare` and `bump` run `uv lock` at the end. Both leave the resulting changes
 uncommitted so they can be reviewed before commit.
@@ -43,16 +43,17 @@ def update_urls(version):
     """Point the installer download links to `version`."""
     for path in URL_FILES:
         text = path.read_text(encoding="utf-8")
-        # e.g. releases/download/v1.6.0/MNELAB-1.6.0.dmg
+        # e.g. releases/download/v0.1.0/MNELAB-Streams-0.1.0.dmg
         text = re.sub(
-            r"releases/download/v\d+\.\d+\.\d+/MNELAB-\d+\.\d+\.\d+\.(dmg|exe)",
-            rf"releases/download/v{version}/MNELAB-{version}.\1",
+            r"releases/download/v\d+\.\d+\.\d+/MNELAB-Streams-"
+            r"\d+\.\d+\.\d+\.(dmg|exe)",
+            rf"releases/download/v{version}/MNELAB-Streams-{version}.\1",
             text,
         )
-        # e.g. link text "MNELAB 1.6.0 (macOS)"
+        # e.g. link text "MNELAB Streams 0.1.0 (macOS)"
         text = re.sub(
-            r"MNELAB \d+\.\d+\.\d+ \((macOS|Windows)\)",
-            rf"MNELAB {version} (\1)",
+            r"MNELAB Streams \d+\.\d+\.\d+ \((macOS|Windows)\)",
+            rf"MNELAB Streams {version} (\1)",
             text,
         )
         path.write_text(text, encoding="utf-8")

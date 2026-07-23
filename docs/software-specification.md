@@ -1,9 +1,9 @@
-# MNELAB Current Software Specification
+# MNELAB Streams Current Software Specification
 
 | Field | Value |
 | --- | --- |
-| Product | MNELAB |
-| Repository version | `1.6.0.dev0` |
+| Product | MNELAB Streams |
+| Repository version | `0.1.0` |
 | Specification status | Current implementation baseline |
 | Baseline date | 2026-07-21 |
 | License | BSD 3-Clause |
@@ -22,10 +22,10 @@ an intentional boundary or current limitation.
 
 ## 2. Product definition
 
-MNELAB is a local, cross-platform desktop GUI for loading, inspecting, transforming,
-visualizing, and exporting MNE-Python-compatible neurophysiology data. It exposes
-common analysis operations without requiring users to write Python, while recording
-the corresponding Python/MNE operations in an executable command history.
+MNELAB Streams is a local, cross-platform desktop GUI for loading, inspecting,
+transforming, visualizing, and exporting MNE-Python-compatible neurophysiology data.
+It exposes common analysis operations without requiring users to write Python, while
+recording the corresponding Python/MNE operations in an executable command history.
 
 The primary user is a researcher or analyst working interactively with continuous
 recordings (`Raw`) or epoched recordings (`Epochs`). The software is not a data
@@ -59,7 +59,7 @@ acquisition system, a cloud service, or a clinical diagnostic device.
 | GUI toolkit | PySide6 / Qt 6 |
 | Core scientific layer | MNE-Python, MNExtend, NumPy, and SciPy |
 | Plotting | PyQtGraph and Matplotlib; MNE Qt Browser is optional |
-| Packaging | `uv_build`; GUI entry point is `mnelab = mnelab:main` |
+| Packaging | `uv_build`; distribution and GUI command are `mnelab-streams`; the import package remains `mnelab` |
 
 Required package floors are declared in `pyproject.toml`: MNE 1.12.1, MNExtend 0.2.2,
 NumPy 2.4.4, SciPy 1.17.1, Matplotlib 3.10.8, PyQtGraph 0.13.7, PySide6 6.11.0,
@@ -74,7 +74,7 @@ From the repository root:
 
 ```powershell
 uv sync --locked --all-extras
-uv run mnelab
+uv run mnelab-streams
 ```
 
 The equivalent module entry point is:
@@ -86,19 +86,20 @@ uv run python -m mnelab
 One or more file paths may be supplied as command-line arguments. The application
 shall attempt to open each argument after the main window is created.
 
-`uvx mnelab` runs an isolated packaged copy from uv's tool cache; it does not guarantee
+`uvx mnelab-streams` runs an isolated packaged copy from uv's tool cache; it does not
+guarantee
 that the current checkout is being executed. Development and verification of local
-changes shall therefore use `uv run mnelab` or `uv run python -m mnelab`.
+changes shall therefore use `uv run mnelab-streams` or `uv run python -m mnelab`.
 
-At startup, MNELAB selects Matplotlib's Qt backend, enables multiprocessing support,
-creates one `QApplication`, and uses Qt's Fusion style on Windows. Frozen builds also
-configure a reusable Matplotlib cache. Development runs install a SIGINT handler so
-terminal interruption can stop the application.
+At startup, MNELAB Streams selects Matplotlib's Qt backend, enables multiprocessing
+support, creates one `QApplication`, and uses Qt's Fusion style on Windows. Frozen
+builds also configure a reusable Matplotlib cache. Development runs install a SIGINT
+handler so terminal interruption can stop the application.
 
 ## 4. System architecture
 
-MNELAB is a single-process desktop application, with bounded background work or a
-single worker process used for selected expensive calculations.
+MNELAB Streams is a single-process desktop application, with bounded background work
+or a single worker process used for selected expensive calculations.
 
 ```text
 Application entry point
@@ -464,7 +465,33 @@ annotations rather than silently replace them.
   sampling rate, high/low-pass metadata, and relevant calibration/epoch geometry are
   compatible. Epoch compatibility also requires identical `tmin`, `tmax`, and baseline.
 
-### 10.2 ICA
+### 10.2 Filter presets
+
+The **Filter Data** dialog shall provide **Load Preset** and **Save Preset** actions for
+reusable scientific filter settings. Filter presets are separate from display montages:
+loading one only populates the dialog for review and shall never process data until the
+user accepts the dialog.
+
+A filter preset is a UTF-8 JSON object with the format marker
+`mnelab-filter-preset`, version `1`, and one entry per source stream. Each stream entry
+contains its name, type, complete channel-name membership, and either `null` for a
+disabled stream or one semantic low-pass, high-pass, band-pass, or notch specification.
+Enabled filters store their targeted channel names; notch filters store the fundamental
+frequency and whether harmonics up to Nyquist are requested rather than storing an
+expanded frequency list. Dialog layout details such as the panel column count are not
+part of the preset.
+
+Loading shall be transactional and require an exact one-to-one match of stream name,
+type, and channel membership. Stream and channel order may differ. Missing, additional,
+or ambiguous streams and channels shall reject the complete preset rather than apply a
+partial match. Frequencies shall be finite, positive, and compatible with the target
+stream's current Nyquist limit; notch harmonics are recalculated for that target stream.
+Malformed, unsupported, or incompatible presets shall leave the dialog unchanged.
+
+Saving shall require at least one enabled valid filter, use an atomic file replacement,
+and append `.json` when the chosen filename has no suffix.
+
+### 10.3 ICA
 
 Infomax shall always be available. Picard and FastICA shall appear only when their
 optional dependencies are installed. The run dialog shall expose method-specific
@@ -480,7 +507,7 @@ Current implementation note: the ICA dialog displays a number-of-components cont
 but the run path currently creates `mne.preprocessing.ICA` without passing that value.
 The fitted component count is therefore determined by MNE's current defaults.
 
-### 10.3 Epochs and artifacts
+### 10.4 Epochs and artifacts
 
 - Creating epochs requires raw events and at least one selected event type.
 - The default interval is -0.2 to 0.5 s, with optional baseline correction defaulting
@@ -779,7 +806,8 @@ the display montage dirty.
 
 ## 14. Preferences and persistence
 
-Preferences shall be stored through `QSettings` in `mnelab.ini` beneath Qt's per-user
+Preferences shall be stored through `QSettings` in `mnelab-streams.ini` beneath Qt's
+per-user
 application configuration location.
 
 | Setting | Default | User-facing range or behavior |

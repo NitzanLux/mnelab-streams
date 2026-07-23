@@ -183,6 +183,7 @@ def _stream_header(raw, stream, source_file_count):
 def _marker_header(source_file_count):
     """Build the StreamHeader for annotations exported as XDF markers."""
     info = Element("info")
+    # Keep the established marker-stream name for downstream XDF compatibility.
     _add_text(info, "name", "MNELAB Annotations")
     _add_text(info, "type", "Markers")
     _add_text(info, "channel_count", 1)
@@ -202,7 +203,7 @@ def _marker_header(source_file_count):
 def _footer(first_timestamp, last_timestamp, sample_count, sfreq=None):
     """Build an XDF StreamFooter XML payload."""
     info = Element("info")
-    _add_text(info, "writer", "MNELAB")
+    _add_text(info, "writer", "MNELAB Streams")
     _add_text(info, "first_timestamp", f"{first_timestamp:.17g}")
     _add_text(info, "last_timestamp", f"{last_timestamp:.17g}")
     _add_text(info, "sample_count", sample_count)
@@ -243,7 +244,7 @@ def _write_xdf_file(file, raw, streams, source_file_count):
     recording_datetime = _measurement_datetime(raw)
     if recording_datetime is not None:
         _add_text(file_info, "datetime", recording_datetime)
-    _add_text(file_info, "writer", "MNELAB")
+    _add_text(file_info, "writer", "MNELAB Streams")
     _add_text(file_info, "merged_source_file_count", source_file_count)
     _write_chunk(file, 1, _xml_bytes(file_info))
 

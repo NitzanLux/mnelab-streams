@@ -2,13 +2,16 @@
 #
 # License: BSD (3-clause)
 
+from copy import deepcopy
 from unittest.mock import call, patch
 
 import mne
 import numpy as np
+import pytest
 from PySide6.QtCore import Qt
 
 from mnelab.dialogs import FilterDialog
+from mnelab.filter_preset import FilterPresetError
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
 
@@ -161,6 +164,247 @@ def test_notch_filter_can_include_nyquist_bounded_harmonics(qtbot):
     assert panel.notch == [50.0, 100.0]
     assert panel.filter_spec["notch"] == [50.0, 100.0]
     assert dialog.ok_button.isEnabled()
+
+
+@pytest.mark.parametrize(
+    ("filter_type", "values", "expected"),
+    [
+        ("Lowpass", {"upper": 20}, {"kind": "lowpass", "cutoff": 20.0}),
+        ("Highpass", {"lower": 2}, {"kind": "highpass", "cutoff": 2.0}),
+        (
+            "Bandpass",
+            {"lower": 2, "upper": 20},
+            {"kind": "bandpass", "low": 2.0, "high": 20.0},
+        ),
+        (
+            "Notch",
+            {"notch": 20, "harmonics": True},
+            {"kind": "notch", "frequency": 20.0, "harmonics": True},
+        ),
+    ],
+)
+def test_filter_preset_serializes_each_supported_filter(
+    qtbot, filter_type, values, expected
+):
+    """Preset JSON stores semantic filter values rather than hidden controls."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(dialog)
+    panel = dialog.panels[0]
+    panel.filter_type_edit.setCurrentText(filter_type)
+    if "lower" in values:
+        panel.lower_edit.setValue(values["lower"])
+    if "upper" in values:
+        panel.upper_edit.setValue(values["upper"])
+    if "notch" in values:
+        panel.notch_edit.setValue(values["notch"])
+    panel.harmonics_edit.setChecked(values.get("harmonics", False))
+
+    state = dialog.preset_state
+    preset_filter = state["streams"][0]["filter"]
+
+    assert preset_filter["channels"] == ["EEG 1", "EEG 2"]
+    details = {
+        key: value for key, value in preset_filter.items() if key != "channels"
+    }
+    assert details == expected
+
+    restored = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(restored)
+    restored.apply_filter_preset(state)
+    assert restored.preset_state == state
+
+
+def test_filter_preset_round_trip_matches_reordered_streams_and_channels(qtbot):
+    """Exact identities remain portable when stream and channel order changes."""
+    _raw, streams = _raw_and_streams()
+    source = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(source)
+    amplifier, accessory = source.panels
+    amplifier.filter_type_edit.setCurrentText("Bandpass")
+    amplifier.lower_edit.setValue(2)
+    amplifier.upper_edit.setValue(25)
+    amplifier.channel_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+    accessory.filter_type_edit.setCurrentText("Notch")
+    accessory.notch_edit.setValue(20)
+    accessory.harmonics_edit.setChecked(True)
+    state = source.preset_state
+
+    reordered_streams = [
+        deepcopy(streams[1]),
+        {
+            **deepcopy(streams[0]),
+            "channel_names": list(reversed(streams[0]["channel_names"])),
+        },
+    ]
+    restored = FilterDialog(fmax=50, streams=reordered_streams)
+    qtbot.addWidget(restored)
+
+    restored.apply_filter_preset(state)
+
+    accessory_filter, amplifier_filter = restored.filters
+    assert accessory_filter == {
+        "stream_name": "Accessory",
+        "picks": ["Aux"],
+        "lower": None,
+        "upper": None,
+        "notch": [20.0],
+    }
+    assert amplifier_filter == {
+        "stream_name": "Amplifier",
+        "picks": ["EEG 1"],
+        "lower": 2.0,
+        "upper": 25.0,
+        "notch": None,
+    }
+    assert restored.ok_button.isEnabled()
+    assert restored.save_preset_button.isEnabled()
+
+
+def test_filter_preset_restores_disabled_streams(qtbot):
+    """A null filter disables its stream and does not preserve hidden controls."""
+    _raw, streams = _raw_and_streams()
+    source = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(source)
+    source.panels[1].apply_edit.setChecked(False)
+    state = source.preset_state
+    assert state["streams"][1]["filter"] is None
+
+    restored = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(restored)
+    restored.apply_filter_preset(state)
+
+    assert restored.panels[0].apply_edit.isChecked()
+    assert not restored.panels[1].apply_edit.isChecked()
+    assert restored.filters == [restored.panels[0].filter_spec]
+
+
+def test_filter_preset_validation_is_transactional(qtbot):
+    """An incompatible cutoff leaves every existing dialog control unchanged."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(dialog)
+    before = dialog.preset_state
+    incompatible = deepcopy(before)
+    incompatible["streams"][1]["filter"]["cutoff"] = 41
+
+    with pytest.raises(FilterPresetError, match="Nyquist"):
+        dialog.apply_filter_preset(incompatible)
+
+    assert dialog.preset_state == before
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda state: state.update(version=99), "version"),
+        (
+            lambda state: state["streams"][0]["channel_names"].append("Missing"),
+            "do not match",
+        ),
+        (
+            lambda state: state["streams"][0]["filter"].update(kind="unknown"),
+            "type",
+        ),
+        (
+            lambda state: state["streams"][0]["filter"].update(channels=[]),
+            "channel selection",
+        ),
+        (
+            lambda state: state["streams"].append(deepcopy(state["streams"][0])),
+            "ambiguous",
+        ),
+        (
+            lambda state: state["streams"][0].pop("filter"),
+            "filter is missing",
+        ),
+        (
+            lambda state: state["streams"][0].update(
+                filter={
+                    "kind": "bandpass",
+                    "channels": ["EEG 1"],
+                    "low": 20,
+                    "high": 10,
+                }
+            ),
+            "upper cutoff",
+        ),
+        (
+            lambda state: [
+                stream.update(filter=None) for stream in state["streams"]
+            ],
+            "does not contain any enabled",
+        ),
+    ],
+)
+def test_filter_preset_rejects_unsupported_or_incompatible_state(
+    qtbot, mutate, message
+):
+    """Version, topology, operation, and target mismatches are rejected."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(dialog)
+    state = dialog.preset_state
+    mutate(state)
+
+    with pytest.raises(FilterPresetError, match=message):
+        dialog.apply_filter_preset(state)
+
+
+def test_filter_dialog_saves_suffix_and_loads_without_processing(
+    qtbot, tmp_path
+):
+    """Loading a preset changes controls only and appends a missing JSON suffix."""
+    _raw, streams = _raw_and_streams()
+    source = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(source)
+    source.panels[0].filter_type_edit.setCurrentText("Highpass")
+    source.panels[0].lower_edit.setValue(3)
+    source.panels[1].apply_edit.setChecked(False)
+    path = tmp_path / "reviewable-filter"
+
+    assert source.save_filter_preset(path)
+    saved_path = path.with_suffix(".json")
+    assert saved_path.exists()
+
+    restored = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(restored)
+    with patch.object(Model, "filter") as apply_filter:
+        assert restored.load_filter_preset(saved_path)
+
+    apply_filter.assert_not_called()
+    assert restored.filters == [
+        {
+            "stream_name": "Amplifier",
+            "picks": ["EEG 1", "EEG 2"],
+            "lower": 3.0,
+            "upper": None,
+            "notch": None,
+        }
+    ]
+
+
+def test_filter_preset_file_dialog_cancellation_is_a_no_op(qtbot):
+    """Cancelling either preset chooser preserves the current dialog state."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(dialog)
+    before = dialog.preset_state
+
+    with (
+        patch(
+            "mnelab.dialogs.filter.QFileDialog.getOpenFileName",
+            return_value=("", ""),
+        ),
+        patch(
+            "mnelab.dialogs.filter.QFileDialog.getSaveFileName",
+            return_value=("", ""),
+        ),
+    ):
+        assert not dialog.load_filter_preset()
+        assert not dialog.save_filter_preset()
+
+    assert dialog.preset_state == before
 
 
 def test_model_applies_notch_harmonics_to_selected_channels(tmp_path):

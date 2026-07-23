@@ -8,7 +8,7 @@ import PyInstaller.__main__
 
 def build_app():
     """Run PyInstaller to create the .app bundle."""
-    print("Building MNELAB.app...")
+    print("Building MNELAB-Streams.app...")
     PyInstaller.__main__.run(["mnelab-macos.spec", "--clean", "--noconfirm"])
 
 
@@ -16,21 +16,21 @@ def build_dmg():
     """Build the DMG from the existing .app bundle."""
     print("Building DMG...")
     try:
-        mnelab_version = version("mnelab")
+        mnelab_version = version("mnelab-streams")
     except PackageNotFoundError:
         raise RuntimeError(
-            "MNELAB version not found. Please install MNELAB in your environment."
+            "MNELAB Streams version not found. Install the project first."
         )
 
     dmgbuild.build_dmg(
-        filename=f"MNELAB-{mnelab_version}.dmg",
-        volume_name="MNELAB",
+        filename=f"MNELAB-Streams-{mnelab_version}.dmg",
+        volume_name="MNELAB Streams",
         settings={
             "format": "UDBZ",
-            "files": ["dist/MNELAB.app"],
+            "files": ["dist/MNELAB-Streams.app"],
             "symlinks": {"Applications": "/Applications"},
             "icon_locations": {
-                "MNELAB.app": (100, 100),
+                "MNELAB-Streams.app": (100, 100),
                 "Applications": (400, 100),
             },
             "icon_size": 128,

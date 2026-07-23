@@ -1,23 +1,25 @@
 [Setup]
-AppId={{D963A2CB-DBF5-4104-8142-9D039F65285E}
-AppName=MNELAB
+AppId={{59BED620-DD5F-4691-BB72-C38A8454CB2F}
+AppName=MNELAB Streams
 AppVersion={#version}
-AppVerName=MNELAB {#version}
-AppPublisher=MNELAB Developers
-AppPublisherURL=https://github.com/cbrnr/mnelab
-AppSupportURL=https://github.com/cbrnr/mnelab
-AppUpdatesURL=https://github.com/cbrnr/mnelab/releases
-DefaultDirName={autopf}\MNELAB
+AppVerName=MNELAB Streams {#version}
+AppPublisher=NitzanLux
+AppPublisherURL=https://github.com/NitzanLux/mnelab-streams
+AppSupportURL=https://github.com/NitzanLux/mnelab-streams/issues
+AppUpdatesURL=https://github.com/NitzanLux/mnelab-streams/releases
+DefaultDirName={autopf}\MNELAB Streams
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 UsePreviousAppDir=no
 DisableProgramGroupPage=yes
-OutputBaseFilename=MNELAB-{#version}
+OutputBaseFilename=MNELAB-Streams-{#version}
 OutputDir=.\ 
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
 SetupIconFile=..\src\mnelab\icons\mnelab-logo.ico
+LicenseFile=..\LICENSE
+InfoBeforeFile=..\NOTICE
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -26,11 +28,11 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
-Source: "dist\MNELAB\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "dist\MNELAB-Streams\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\MNELAB"; Filename: "{app}\MNELAB.exe"
-Name: "{autodesktop}\MNELAB"; Filename: "{app}\MNELAB.exe"; Tasks: desktopicon
+Name: "{autoprograms}\MNELAB Streams"; Filename: "{app}\MNELAB-Streams.exe"
+Name: "{autodesktop}\MNELAB Streams"; Filename: "{app}\MNELAB-Streams.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\MNELAB.exe"; Description: "{cm:LaunchProgram,MNELAB}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\MNELAB-Streams.exe"; Description: "{cm:LaunchProgram,MNELAB Streams}"; Flags: nowait postinstall skipifsilent

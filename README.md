@@ -1,68 +1,151 @@
-![Python](https://img.shields.io/pypi/pyversions/mnelab.svg?logo=python&logoColor=white)
-[![PyPI](https://img.shields.io/pypi/v/mnelab)](https://pypi.org/project/mnelab/)
-[![Docs](https://readthedocs.org/projects/mnelab/badge/?version=latest)](https://mnelab.readthedocs.io/)
-[![DOI](https://joss.theoj.org/papers/10.21105/joss.04650/status.svg)](https://doi.org/10.21105/joss.04650)
-[![License](https://img.shields.io/github/license/cbrnr/mnelab?color=68%2C192%2C58)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.12%2B-blue?logo=python&logoColor=white)
+[![License: BSD 3-Clause](https://img.shields.io/badge/License-BSD%203--Clause-blue.svg)](LICENSE)
 
+# MNELAB Streams
 
-# MNELAB
+<p align="center">
+  <img src="src/mnelab/images/mnelab_logo.png" alt="MNELAB Streams logo" width="420">
+</p>
 
-![](https://raw.githubusercontent.com/cbrnr/mnelab/main/mnelab/images/mnelab_logo.png)
+MNELAB Streams is a source-aware XDF and signal review application and a community
+fork of
+[MNELAB](https://github.com/cbrnr/mnelab), the cross-platform desktop interface
+for [MNE-Python](https://mne.tools/stable/index.html). It keeps MNELAB's general
+EEG/MEG inspection and preprocessing workflow and adds a source-oriented viewer,
+stream-specific filtering and power spectra, and a substantially expanded XDF
+workflow.
 
-MNELAB is a graphical user interface for [MNE-Python](https://mne.tools/stable/index.html) (the most popular Python package for EEG/MEG analysis).
+This is an independent fork, not an official upstream MNELAB release. The distribution
+and application command are `mnelab-streams`; the internal Python import package remains
+`mnelab` for source compatibility.
 
-![](https://raw.githubusercontent.com/cbrnr/mnelab/main/mnelab.png)
+![MNELAB Streams application](mnelab.png)
 
-Key features include:
+## What this fork adds
 
-- Cross-platform support (Linux, macOS, Windows).
-- A command history that records the underlying MNE-Python commands for each action, allowing users to learn how to use MNE-Python and to reproduce their analyses in code.
-- Import data from various formats supported by MNE-Python, and some additional formats like [XDF](https://github.com/sccn/xdf/wiki/Specifications), MATLAB, NumPy, and [BVRF](https://www.brainproducts.com/download/bvrf-reference-specification/).
-- Export to EDF, BDF, BrainVision, EEGLAB, and FIFF formats.
-- XDF-specific features such as chunk inspection (useful for debugging corrupted XDF files), stream selection, metadata inspection, resampling, gap detection and filling, and more.
-- Support for various ICA algorithms, including [FastICA](https://en.wikipedia.org/wiki/FastICA), [Infomax ICA](https://arnauddelorme.com/ica_for_dummies/), and [PICARD](https://mind-inria.github.io/picard/).
-- Automatic classification of independent components using [ICLabel](https://github.com/sccn/ICLabel).
-- Comprehensive tools for managing events and annotations.
-- Support for channel locations (montages), re-referencing, cropping, filtering, epoching, and more.
-- Plotting functions for raw data, epochs, evoked responses, independent components, ERD/ERS maps, and more.
- 
+- **Source-aware raw viewer:** organize channels by their originating XDF stream,
+  rearrange, join, split, dock, or float panels, and navigate all panels on one
+  synchronized timeline.
+- **Per-channel display controls:** change visibility, order, gain, vertical offset,
+  color, DC removal, and display unit without modifying the stored samples. Inspect
+  channel metadata and current-window statistics directly from the viewer.
+- **Reusable display montages:** save and load viewer-only layouts as validated JSON.
+- **Stream-aware processing:** edit stream definitions and apply independent filters
+  to selected channels in each stream, with per-stream Nyquist limits and optional
+  notch harmonics.
+- **Native PSD viewer:** inspect source-oriented spectra in stacked or overlay mode,
+  in linear power or decibels, with safe handling of NaN-padded channels and
+  source-specific Nyquist limits.
+- **Multi-file XDF workflows:** open selected files or a folder, order recordings by
+  time, split at discontinuities, skip unreadable files, merge heterogeneous channel
+  sets with NaN padding, preserve source identities, and export a merged dataset back
+  to XDF.
 
-## Documentation
+The complete implementation audit, including the exact fork comparison range and
+behavioral details, is in [FORK_CHANGES.md](FORK_CHANGES.md). The current full product
+behavior is specified in
+[docs/software-specification.md](docs/software-specification.md), and release-level
+changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 
-The [documentation](https://mnelab.readthedocs.io/) contains hands-on examples and tutorials for different use cases. Check out the [changelog](https://github.com/cbrnr/mnelab/blob/main/CHANGELOG.md) to learn what we added, changed, or fixed.
+## Requirements
 
+- Windows, macOS, or Linux
+- Python 3.12 or newer
+- [uv](https://docs.astral.sh/uv/)
 
-## Quick Start
+The main runtime uses PySide6/Qt, MNE-Python, MNExtend, NumPy, SciPy, Matplotlib, and
+PyQtGraph. Exact minimum versions are declared in [pyproject.toml](pyproject.toml).
 
-We recommend using the standalone installers for macOS and Windows:
+## Install and run this fork
 
-- [MNELAB 1.5.6 (macOS)](https://github.com/cbrnr/mnelab/releases/download/v1.5.6/MNELAB-1.5.6.dmg)
-- [MNELAB 1.5.6 (Windows)](https://github.com/cbrnr/mnelab/releases/download/v1.5.6/MNELAB-1.5.6.exe)
+Clone the repository:
 
-If you use [Arch Linux](https://archlinux.org/), you can install MNELAB from the [AUR](https://aur.archlinux.org/packages/python-mnelab) (e.g., `yay -S python-mnelab`).
-
-Alternatively, you can use [uv](https://docs.astral.sh/uv/) to run MNELAB directly without installing it (this works on all platforms, but for the best experience we recommend using the standalone installers when available):
-
+```shell
+git clone https://github.com/NitzanLux/mnelab-streams.git
+cd mnelab-streams
+uv sync --locked --all-extras
+uv run mnelab-streams
 ```
-uvx mnelab
+
+For development, install all dependency groups and run the warning-strict test suite:
+
+```shell
+uv sync --locked --all-groups --all-extras
+uv run pytest -W error tests
 ```
 
+Run Ruff before submitting code changes:
 
-## Advanced Usage
-
-To run the latest development version:
-
-```
-uvx --from https://github.com/cbrnr/mnelab/archive/refs/heads/main.zip mnelab
+```shell
+uv run ruff check
+uv run ruff format --check
 ```
 
-On Linux, running MNELAB via `uvx mnelab` uses the [Fusion](https://doc.qt.io/qt-6/gallery.html) style shipped with [PySide6](https://doc.qt.io/qtforpython-6/index.html), which may not fit well with the rest of the system. However, if you use [KDE](https://kde.org/), you can set the `QT_PLUGIN_PATH` environment variable to force the use of the native KDE theme instead, for example:
+## Getting started
 
-```
-QT_PLUGIN_PATH=/usr/lib/qt6/plugins uvx mnelab
-```
+### Inspect one recording
 
+1. Choose **File > Open** and select a supported file.
+2. Choose **Plot > Data** to open the synchronized raw stream viewer.
+3. Use a stream header to fit, rearrange, join, split, dock, or float panels.
+4. Right-click a channel for display controls, metadata, statistics, or bad-channel
+   status.
+5. Use **Display Montage** in the viewer to save or restore the presentation layout.
 
-## Contributing
+### Merge XDF recordings
 
-The [contributing guide](https://github.com/cbrnr/mnelab/blob/main/CONTRIBUTING.md) provides detailed instructions for contributing to MNELAB.
+1. Select several XDF files with **File > Open**, or choose
+   **File > Open XDF Folder** for recursive folder discovery.
+2. Review file order and choose separate loading or sequential merging.
+3. For automatic time ordering, set the accepted seam gap/overlap and decide whether
+   discontinuities should stop the operation or start a new dataset.
+4. Enable heterogeneous-channel merging when recordings do not all contain the same
+   channels. Missing intervals are represented by `NaN`.
+5. A successful multi-file merge is marked in the dataset tree and information panel.
+   Use the XDF export action to write it as a new XDF file.
+
+### Filter or inspect spectra by source
+
+- Choose **Process > Filter** to enable a filter independently for each stream and
+  select its target channels.
+- Choose **Plot > Power Spectral Density** for source-oriented stacked or overlay
+  spectra. Each source is clipped to its own valid Nyquist range.
+
+## Important behavior
+
+- Display gain, offset, units, color, layout, and DC removal are presentation settings;
+  they do not alter the MNE data.
+- Filtering, bad-channel changes, and other scientific processing do change dataset
+  state and are reflected in MNELAB's history where applicable.
+- A display montage is not a sensor montage. It stores viewer presentation only.
+- The merged-XDF writer is available for raw datasets assembled from multiple XDF
+  files. It validates channel ownership before replacing the destination atomically.
+- MNELAB Streams is research software. It is not a data-acquisition system or clinical
+  diagnostic device.
+
+## Upstream documentation and contribution
+
+General MNELAB usage is documented in the
+[upstream documentation](https://mnelab.readthedocs.io/). Fork-specific behavior is
+documented in this repository.
+
+Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md). Source and test files
+must retain the repository's BSD license header, and every change should include
+tests and a changelog entry.
+
+## License and attribution
+
+This fork remains licensed under the
+[BSD 3-Clause License](LICENSE). The original copyright notice, license conditions,
+and warranty disclaimer are retained in the repository.
+
+Source redistributions must retain that notice, the three conditions, and the
+disclaimer. Binary redistributions must reproduce them in the accompanying
+documentation or other materials. The names of the copyright holder and contributors
+may not be used to endorse or promote derived products without prior written
+permission.
+
+MNELAB was created by the MNELAB developers and upstream contributors. Fork-specific
+work is identified in [CHANGELOG.md](CHANGELOG.md) and
+[FORK_CHANGES.md](FORK_CHANGES.md). No upstream endorsement of this fork is implied.
+Additional provenance is recorded in [NOTICE](NOTICE).

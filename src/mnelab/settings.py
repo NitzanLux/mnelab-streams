@@ -42,7 +42,7 @@ SETTINGS_PATH = str(
             QStandardPaths.StandardLocation.AppConfigLocation
         )
     )
-    / "mnelab.ini"
+    / "mnelab-streams.ini"
 )
 
 

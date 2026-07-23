@@ -633,10 +633,10 @@ class _MNELogHandler(logging.Handler):
 
 
 class MainWindow(QMainWindow):
-    """MNELAB main window."""
+    """MNELAB Streams main window."""
 
     def __init__(self, model: Model):
-        """Initialize MNELAB main window.
+        """Initialize the MNELAB Streams main window.
 
         Parameters
         ----------
@@ -649,7 +649,7 @@ class MainWindow(QMainWindow):
         self._stream_viewers = []
         self._psd_viewers = []
         self._stream_viewer_bads_before = {}
-        self.setWindowTitle("MNELAB")
+        self.setWindowTitle("MNELAB Streams")
         self.setMinimumSize(600, 500)
         sys.excepthook = self._excepthook
 
@@ -2792,10 +2792,14 @@ class MainWindow(QMainWindow):
     def show_about(self):
         """Show About dialog."""
         msg_box = QMessageBox(self)
-        text = f"<img src='{image_path('mnelab_logo.png')}'><p>MNELAB {__version__}</p>"
+        text = (
+            f"<img src='{image_path('mnelab_logo.png')}'>"
+            f"<p>MNELAB Streams {__version__}</p>"
+        )
         msg_box.setText(text)
 
-        mnelab_url = "github.com/cbrnr/mnelab"
+        fork_url = "github.com/NitzanLux/mnelab-streams"
+        upstream_url = "github.com/cbrnr/mnelab"
         mne_url = "github.com/mne-tools/mne-python"
 
         pkgs = []
@@ -2808,11 +2812,15 @@ class MainWindow(QMainWindow):
         text = (
             f"<nobr><p>This program uses Python {version} and the following packages:"
             f"</p></nobr><p>{', '.join(pkgs)}</p>"
-            f"<nobr><p>MNELAB repository: <a href=https://{mnelab_url}>{mnelab_url}</a>"
+            f"<nobr><p>Fork repository: <a href=https://{fork_url}>{fork_url}</a>"
+            f"</p></nobr><nobr><p>Upstream MNELAB: "
+            f"<a href=https://{upstream_url}>{upstream_url}</a>"
             f"</p></nobr><nobr><p>MNE repository: "
             f"<a href=https://{mne_url}>{mne_url}</a></p></nobr>"
             f"<p>Licensed under the BSD 3-clause license.</p>"
-            f"<p>© MNELAB developers.</p>"
+            f"<p>Original software © MNELAB developers and contributors.<br>"
+            f"Fork-specific modifications © 2026 NitzanLux and contributors.</p>"
+            f"<p>This is an independent fork; no upstream endorsement is implied.</p>"
         )
         msg_box.setInformativeText(text)
         msg_box.exec()
@@ -2822,11 +2830,11 @@ class MainWindow(QMainWindow):
         QMessageBox.aboutQt(self, "About Qt")
 
     def show_check_for_updates(self):
-        """Check GitHub for a newer MNELAB release."""
+        """Check GitHub for a newer MNELAB Streams release."""
         try:
             req = Request(
-                "https://api.github.com/repos/cbrnr/mnelab/releases/latest",
-                headers={"User-Agent": "MNELAB"},
+                "https://api.github.com/repos/NitzanLux/mnelab-streams/releases/latest",
+                headers={"User-Agent": "MNELAB-Streams"},
             )
             with urlopen(req, timeout=10) as response:
                 data = json.loads(response.read())
@@ -2834,7 +2842,7 @@ class MainWindow(QMainWindow):
         except Exception:
             latest = None
 
-        repo_url = "https://github.com/cbrnr/mnelab"
+        repo_url = "https://github.com/NitzanLux/mnelab-streams"
         repo_link = f'<a href="{repo_url}">{repo_url}</a>'
         msg_box = QMessageBox(self)
         msg_box.setWindowTitle("Check for Updates")
@@ -2865,19 +2873,19 @@ class MainWindow(QMainWindow):
             if _version_tuple(latest) > _version_tuple(__version__):
                 msg_box.setIcon(QMessageBox.Icon.Information)
                 msg_box.setText(
-                    f"MNELAB {latest} is available (you have {__version__})."
+                    f"MNELAB Streams {latest} is available (you have {__version__})."
                 )
                 msg_box.setInformativeText(
                     f"Visit {repo_link} to find download links for the latest release."
                 )
             else:
                 msg_box.setIcon(QMessageBox.Icon.Information)
-                msg_box.setText(f"MNELAB {__version__} is the latest version.")
+                msg_box.setText(f"MNELAB Streams {__version__} is the latest version.")
                 msg_box.setInformativeText("No update is available.")
         msg_box.exec()
 
     def show_documentation(self):
-        url = QUrl("https://mnelab.readthedocs.io/")
+        url = QUrl("https://github.com/NitzanLux/mnelab-streams#readme")
         if not QDesktopServices.openUrl(url):
             QMessageBox.warning(self, "Open Url", "Could not open url")
 
@@ -2898,7 +2906,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Restart required",
-                'The "Menu icons" setting will take effect after restarting MNELAB.',
+                'The "Menu icons" setting will take effect after restarting '
+                "MNELAB Streams.",
             )
 
     def auto_duplicate(self):

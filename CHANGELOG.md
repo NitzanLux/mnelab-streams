@@ -4,12 +4,16 @@
 - Mark merged XDF datasets in the sidebar and information panel, and allow them to be saved as a single XDF while retaining distinct source-stream entities (by [NitzanLux](https://github.com/NitzanLux))
 - Allow each stream-viewer channel to use its own display unit, including custom IMU
   and sensor unit labels, with persistence in display montages
+- Add reusable JSON filter presets for per-stream filter operations and channel targets
 
 ### 🔧 Fixed
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
 - Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Rename the independent distribution and application to MNELAB Streams, retain the
+  upstream BSD license and import namespace, and separate fork metadata and release
+  identity from upstream (by [NitzanLux](https://github.com/NitzanLux))
 - Add main-window stream splitting and property editing, and show source-stream properties in the dataset information view (by [NitzanLux](https://github.com/NitzanLux))
 - Improve the stream viewer with independent lane fitting, per-channel information and current-window statistics, labeled trace annotations, drag-to-swap panels, and retained metadata for removed sources (by [NitzanLux](https://github.com/NitzanLux))
 - Display power spectral density in a native source-oriented PyQtGraph viewer with stacked-lane and numeric-amplitude overlay modes (by [NitzanLux](https://github.com/NitzanLux))

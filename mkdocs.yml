@@ -1,8 +1,8 @@
-site_name: MNELAB
-site_url: https://mnelab.readthedocs.io/
-repo_name: cbrnr/mnelab
-repo_url: https://github.com/cbrnr/mnelab
-copyright: © MNELAB Developers
+site_name: MNELAB Streams
+site_url: https://nitzanlux.github.io/mnelab-streams/
+repo_name: NitzanLux/mnelab-streams
+repo_url: https://github.com/NitzanLux/mnelab-streams
+copyright: © MNELAB developers and MNELAB Streams contributors
 nav:
   - Home: index.md
   - Quick Start: quickstart/index.md
