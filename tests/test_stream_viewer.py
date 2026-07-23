@@ -10,14 +10,19 @@ import numpy as np
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import QPointF, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QMessageBox
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
 from mnelab.widgets.stream_viewer import (
+    ACTIVATION_AXIS_MAX_WIDTH,
+    ACTIVATION_AXIS_MIN_WIDTH,
+    ACTIVATION_NAN_COLOR,
     CHANNEL_LABEL_WIDTH,
     CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
+    ActivationMapWindow,
     StreamViewerWindow,
     activation_matrix,
     peak_envelope,
@@ -435,6 +440,15 @@ def test_trace_hover_shows_channel_name_and_value(qtbot, viewer):
     expected_value = panel._values[0, data_sample] * 1e6
     show_text.assert_called_once()
     assert show_text.call_args.args[1] == f"EEG A\n{expected_value:.6g} µV"
+
+
+def test_plot_help_is_persistent_instead_of_hovering(viewer):
+    """Navigation help stays visible below the plots without masking traces."""
+    assert all(not panel.plot.toolTip() for panel in viewer.panels)
+    hint = viewer.interaction_hint_label.text()
+    assert "Hover trace: name + value" in hint
+    assert "Drag: zoom" in hint
+    assert "Ctrl+wheel: zoom" in hint
 
 
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
@@ -954,6 +968,28 @@ def test_loaded_unchanged_montage_does_not_prompt_on_close(
     assert viewer._closing
 
 
+def test_restored_default_montage_does_not_prompt_on_close(
+    qtbot, raw, streams, tmp_path
+):
+    """The original default remains clean after saving another montage."""
+    viewer = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    default = viewer.display_montage_state()
+    assert not viewer.display_montage_changed
+    viewer.column_spin.setValue(2)
+    assert viewer.save_display_montage(tmp_path / "two-columns.json")
+    viewer.apply_display_montage(default)
+    assert not viewer.display_montage_changed
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+
+    with patch("mnelab.widgets.stream_viewer.QMessageBox.warning") as warning:
+        viewer.close()
+
+    qtbot.waitUntil(lambda: not viewer.isVisible())
+    warning.assert_not_called()
+    assert viewer._closing
+
+
 def test_changed_montage_close_offers_save(qtbot, viewer):
     """Closing a changed display offers Save and honors a cancelled save."""
     viewer.show()
@@ -1139,17 +1175,63 @@ def test_activation_matrix_follows_source_order_and_highlights_activity(
 
 
 def test_activation_matrix_is_scale_independent_and_nan_safe(activation_data):
-    """Each row is normalized independently and invalid rows become zero."""
+    """Rows normalize independently while NaN bins remain distinguishable."""
     raw, streams = activation_data
 
     _times, matrix = activation_matrix(raw, streams, max_bins=100)
 
-    assert np.isfinite(matrix).all()
-    assert matrix.min() >= 0.0
-    assert matrix.max() <= 1.0
+    assert np.isfinite(matrix[:3]).all()
+    assert np.nanmin(matrix) >= 0.0
+    assert np.nanmax(matrix) <= 1.0
     np.testing.assert_allclose(matrix[1], matrix[2], atol=1e-12)
-    np.testing.assert_array_equal(matrix[3], 0.0)
+    assert np.isnan(matrix[3]).all()
     np.testing.assert_array_equal(matrix[4], 0.0)
+
+
+def test_activation_map_uses_dedicated_color_for_nan(qtbot, viewer):
+    """NaN cells use an opaque color outside the activation colormap."""
+    viewer.show_activation_map()
+    window = viewer.activation_map_window
+    qtbot.waitUntil(lambda: window.image_item is not None, timeout=5000)
+    matrix = np.array([[0.0, np.nan], [0.5, 1.0]])
+
+    window.set_activation_data(np.array([2.5, 7.5]), matrix)
+
+    overlay = window.nan_image_item.image
+    nan_color = QColor(ACTIVATION_NAN_COLOR)
+    expected_color = np.array(
+        [nan_color.red(), nan_color.green(), nan_color.blue(), 255]
+    )
+    np.testing.assert_array_equal(overlay[1, 0], expected_color)
+    assert np.count_nonzero(overlay[..., 3]) == 1
+    assert window.nan_legend.isVisible()
+    viridis = pg.colormap.get("viridis").getLookupTable(nPts=256)
+    assert not np.any(np.all(viridis[:, :3] == expected_color[:3], axis=1))
+
+    window.close()
+    qtbot.waitUntil(lambda: viewer.activation_map_window is None)
+
+
+def test_activation_map_fits_and_preserves_stream_labels(qtbot, raw, streams):
+    """The Y axis expands for names and elides only beyond its safe maximum."""
+    named_streams = deepcopy(streams)
+    named_streams[0]["name"] = "A descriptive source stream label"
+    named_streams[1]["name"] = "Extremely " + "long " * 100 + "stream label"
+    window = ActivationMapWindow(raw, named_streams)
+    qtbot.addWidget(window)
+
+    left_axis = window.plot.getAxis("left")
+    labels = [label for _position, label in left_axis._tickLevels[0]]
+
+    assert (
+        ACTIVATION_AXIS_MIN_WIDTH
+        < left_axis.fixedWidth
+        <= ACTIVATION_AXIS_MAX_WIDTH
+    )
+    assert labels[0] == named_streams[0]["name"]
+    assert labels[1]
+    assert labels[1] != named_streams[1]["name"]
+    assert window.stream_names == [stream["name"] for stream in named_streams]
 
 
 def test_activation_matrix_preserves_sparse_activity_but_not_constants():

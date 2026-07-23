@@ -7,7 +7,7 @@
 
 ### 🔧 Fixed
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
-- Support PSD plotting and filtering for auxiliary-only recordings and limit frequency controls to the Nyquist frequency (by [NitzanLux](https://github.com/NitzanLux))
+- Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
 - Add main-window stream splitting and property editing, and show source-stream properties in the dataset information view (by [NitzanLux](https://github.com/NitzanLux))

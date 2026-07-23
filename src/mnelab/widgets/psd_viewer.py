@@ -33,6 +33,19 @@ PSD_LANE_STEP = 2.0
 PSD_LANE_HALF_HEIGHT = 0.82
 
 
+def _stream_frequency_mask(frequencies, source):
+    """Return bins at or below a source stream's original Nyquist limit."""
+    frequencies = np.asarray(frequencies)
+    try:
+        sampling_rate = float(source.get("nominal_srate"))
+    except (TypeError, ValueError):
+        sampling_rate = 0
+    if not np.isfinite(sampling_rate) or sampling_rate <= 0:
+        return np.ones(frequencies.shape, dtype=bool)
+    nyquist = sampling_rate / 2
+    return frequencies <= np.nextafter(nyquist, np.inf)
+
+
 def _channel_frequency_data(spectrum):
     """Return finite-aware channel-by-frequency data from any MNE Spectrum."""
     values = spectrum.get_data(picks="all", exclude=())
@@ -93,6 +106,8 @@ class PSDPanel(QFrame):
         self.source = source
         self.channel_data = channel_data
         self.colors = colors
+        self.frequency_mask = _stream_frequency_mask(spectrum.freqs, source)
+        self.frequencies = spectrum.freqs[self.frequency_mask]
         self.channel_names = list(source["channel_names"])
         self.channels_per_page = max(1, int(channels_per_page))
         self._visible = dict.fromkeys(self.channel_names, True)
@@ -264,9 +279,10 @@ class PSDPanel(QFrame):
 
     def reset_view(self):
         """Restore the complete frequency range."""
-        self.plot.setXRange(
-            float(self.spectrum.freqs[0]), float(self.spectrum.freqs[-1]), padding=0
-        )
+        frequencies = self.frequencies
+        if not frequencies.size:
+            frequencies = self.spectrum.freqs
+        self.plot.setXRange(float(frequencies[0]), float(frequencies[-1]), padding=0)
 
     def refresh(self):
         """Redraw the current channel page in the selected display mode."""
@@ -294,8 +310,8 @@ class PSDPanel(QFrame):
 
         finite_values = []
         for curve, name in zip(self._curves, names, strict=True):
-            values = self._display_values(name)
-            curve.setData(self.spectrum.freqs, values)
+            values = self._display_values(name)[self.frequency_mask]
+            curve.setData(self.frequencies, values)
             curve.setPen(pg.mkPen(self._channel_color(name), width=1))
             finite = values[np.isfinite(values)]
             if finite.size:
@@ -329,7 +345,7 @@ class PSDPanel(QFrame):
         )
 
         for curve, name, offset in zip(self._curves, names, offsets, strict=True):
-            values = self._display_values(name)
+            values = self._display_values(name)[self.frequency_mask]
             finite = values[np.isfinite(values)]
             if finite.size:
                 low = float(np.min(finite))
@@ -339,7 +355,7 @@ class PSDPanel(QFrame):
                 fitted = (values - center) / scale * 2 * PSD_LANE_HALF_HEIGHT
             else:
                 fitted = np.zeros_like(values)
-            curve.setData(self.spectrum.freqs, fitted + offset)
+            curve.setData(self.frequencies, fitted + offset)
             curve.setPen(pg.mkPen(self._channel_color(name), width=1))
 
         margin = PSD_LANE_STEP / 2

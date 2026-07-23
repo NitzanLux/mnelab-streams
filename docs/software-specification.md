@@ -762,6 +762,8 @@ leave the current layout usable. Validation shall require:
 
 - A new viewer shall establish its initial layout as a clean baseline.
 - A successfully loaded or saved display montage shall become the new clean baseline.
+- Restoring the viewer's initial default montage shall also be considered clean, even
+  when the last loaded or saved montage was different.
 - Loading a montage and making no captured change shall not produce a save question on
   close.
 - Closing a visible viewer with captured changes shall offer **Save**, **Discard**, and

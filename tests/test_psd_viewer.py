@@ -130,3 +130,42 @@ def test_psd_viewer_averages_epochs_for_display(qtbot):
         values.shape == spectrum.freqs.shape for values in viewer.channel_data.values()
     )
     assert np.isfinite(np.vstack(list(viewer.channel_data.values()))).all()
+
+
+def test_psd_panels_clip_to_each_streams_original_nyquist(qtbot):
+    """Upsampled streams do not display PSD bins above their original Nyquist."""
+    rng = np.random.default_rng(12)
+    raw = mne.io.RawArray(
+        rng.normal(size=(2, 1000)),
+        mne.create_info(["Slow", "Fast"], 200, ["misc", "misc"]),
+        verbose=False,
+    )
+    spectrum = raw.compute_psd(picks="all", fmax=100, verbose=False)
+    streams = [
+        {
+            "id": 1,
+            "name": "Slow source",
+            "type": "Aux",
+            "channel_names": ["Slow"],
+            "nominal_srate": 80,
+        },
+        {
+            "id": 2,
+            "name": "Fast source",
+            "type": "Aux",
+            "channel_names": ["Fast"],
+            "nominal_srate": 200,
+        },
+    ]
+
+    viewer = PSDViewerWindow(spectrum, streams=streams)
+    qtbot.addWidget(viewer)
+    slow_panel, fast_panel = viewer.panels
+
+    slow_frequencies, _slow_values = slow_panel._curves[0].getData()
+    fast_frequencies, _fast_values = fast_panel._curves[0].getData()
+
+    assert slow_frequencies[-1] <= 40
+    assert fast_frequencies[-1] == spectrum.freqs[-1]
+    assert len(slow_frequencies) < len(fast_frequencies)
+    assert slow_panel.plot.viewRange()[0][1] <= 40

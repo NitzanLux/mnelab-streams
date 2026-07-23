@@ -120,6 +120,9 @@ PANEL_BODY_SPACING = 2
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
+ACTIVATION_NAN_COLOR = "#9aa0a6"
+ACTIVATION_AXIS_MIN_WIDTH = 150
+ACTIVATION_AXIS_MAX_WIDTH = 360
 
 
 def peak_envelope(times, values, max_points):
@@ -261,6 +264,7 @@ def activation_matrix(
 
     squared_sum = np.zeros((len(streams), n_bins), dtype=float)
     finite_count = np.zeros((len(streams), n_bins), dtype=np.int64)
+    has_nan = np.zeros((len(streams), n_bins), dtype=bool)
     # Batch both axes so every Raw read contains at most ``max_elements``
     # values, including the case where there are more channels than the limit.
     for channel_start in range(0, len(channel_names), max_elements):
@@ -294,6 +298,8 @@ def activation_matrix(
                     continue
                 for stream_index, rows in stream_rows:
                     segment = data[rows, local_start:local_stop]
+                    if np.isnan(segment).any():
+                        has_nan[stream_index, bin_index] = True
                     finite = np.isfinite(segment)
                     if not finite.any():
                         continue
@@ -318,6 +324,7 @@ def activation_matrix(
                 continue
         normalized[stream_index] = np.clip((row - low) / (high - low), 0, 1)
         normalized[stream_index, ~np.isfinite(normalized[stream_index])] = 0
+    normalized[has_nan] = np.nan
     return times, normalized
 
 
@@ -827,10 +834,6 @@ class StreamPanel(QFrame):
         self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
-        self.plot.setToolTip(
-            "Drag to zoom; Shift+drag or middle-drag to pan; "
-            "wheel to move; Ctrl+wheel to zoom; double-click to zoom in"
-        )
         self.plot.showAxis("left")
         # AxisItem otherwise grows to fit each panel's longest channel name,
         # shifting equal time values to different horizontal positions.
@@ -2194,6 +2197,7 @@ class ActivationMapWindow(QMainWindow):
         self.times = np.empty(0)
         self.matrix = np.empty((len(self.streams), 0))
         self.image_item = None
+        self.nan_image_item = None
         self.color_bar = None
         self.total_duration = raw.n_times / float(raw.info["sfreq"])
         self.setWindowTitle(title or "Stream Activation Map")
@@ -2205,6 +2209,12 @@ class ActivationMapWindow(QMainWindow):
         self.state_label = QLabel("Computing activation overview…")
         self.state_label.setWordWrap(True)
         layout.addWidget(self.state_label)
+        self.nan_legend = QLabel(
+            f'<span style="color: {ACTIVATION_NAN_COLOR};">&#9632;</span> '
+            "NaN / missing data"
+        )
+        self.nan_legend.hide()
+        layout.addWidget(self.nan_legend)
 
         self.plot = pg.PlotWidget()
         self.plot.setMenuEnabled(False)
@@ -2213,10 +2223,32 @@ class ActivationMapWindow(QMainWindow):
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setTitle("Relative RMS activation per source stream")
         self.plot.getViewBox().invertY(True)
-        self.plot.getAxis("left").setTicks(
-            [[(float(index), name) for index, name in enumerate(self.stream_names)]]
+        font_metrics = self.fontMetrics()
+        longest_label = max(
+            (font_metrics.horizontalAdvance(name) for name in self.stream_names),
+            default=0,
         )
-        self.plot.getAxis("left").setWidth(150)
+        axis_width = int(
+            np.clip(
+                longest_label + 24,
+                ACTIVATION_AXIS_MIN_WIDTH,
+                ACTIVATION_AXIS_MAX_WIDTH,
+            )
+        )
+        label_width = axis_width - 24
+        axis_labels = [
+            font_metrics.elidedText(
+                name,
+                Qt.TextElideMode.ElideRight,
+                label_width,
+            )
+            for name in self.stream_names
+        ]
+        left_axis = self.plot.getAxis("left")
+        left_axis.setTicks(
+            [[(float(index), name) for index, name in enumerate(axis_labels)]]
+        )
+        left_axis.setWidth(axis_width)
         self.current_region = pg.LinearRegionItem(
             values=(0, 0),
             orientation="vertical",
@@ -2269,18 +2301,33 @@ class ActivationMapWindow(QMainWindow):
         self.matrix = matrix
         if self.image_item is not None:
             self.plot.removeItem(self.image_item)
+        if self.nan_image_item is not None:
+            self.plot.removeItem(self.nan_image_item)
         self.image_item = pg.ImageItem(self.matrix.T, axisOrder="col-major")
         self.image_item.setLevels((0, 1))
-        self.image_item.setRect(
-            QRectF(
-                0,
-                -0.5,
-                self.total_duration,
-                max(1, len(self.streams)),
-            )
+        image_rect = QRectF(
+            0,
+            -0.5,
+            self.total_duration,
+            max(1, len(self.streams)),
         )
+        self.image_item.setRect(image_rect)
         self.image_item.setZValue(0)
         self.plot.addItem(self.image_item)
+        nan_mask = np.isnan(self.matrix.T)
+        nan_overlay = np.zeros((*nan_mask.shape, 4), dtype=np.uint8)
+        nan_color = QColor(ACTIVATION_NAN_COLOR)
+        nan_overlay[nan_mask] = (
+            nan_color.red(),
+            nan_color.green(),
+            nan_color.blue(),
+            255,
+        )
+        self.nan_image_item = pg.ImageItem(nan_overlay, axisOrder="col-major")
+        self.nan_image_item.setRect(image_rect)
+        self.nan_image_item.setZValue(1)
+        self.plot.addItem(self.nan_image_item)
+        self.nan_legend.setVisible(bool(nan_mask.any()))
         if self.color_bar is None:
             self.color_bar = pg.ColorBarItem(
                 values=(0, 1),
@@ -2331,9 +2378,12 @@ class ActivationMapWindow(QMainWindow):
             return
         point, row, column = position
         activation = self.matrix[row, column]
+        if np.isnan(activation):
+            description = "NaN / missing data"
+        else:
+            description = f"{activation:.0%} relative activation"
         self.statusBar().showMessage(
-            f"t={point.x():.3f} s   {self.stream_names[row]}: "
-            f"{activation:.0%} relative activation"
+            f"t={point.x():.3f} s   {self.stream_names[row]}: {description}"
         )
 
     def _mouse_clicked(self, event):
@@ -2553,16 +2603,20 @@ class StreamViewerWindow(QMainWindow):
         navigation.addWidget(self.duration_spin)
         layout.addLayout(navigation)
         self.setCentralWidget(central)
-        self.statusBar().showMessage(
-            "Drag: zoom · Shift+drag/middle-drag: pan · Wheel: move · "
-            "Ctrl+wheel: zoom · Right-click: channel actions"
+        self.interaction_hint_label = QLabel(
+            "Hover trace: name + value · Drag: zoom · Shift/middle-drag: pan · "
+            "Wheel: move · Ctrl+wheel: zoom"
         )
+        self.interaction_hint_label.setToolTip("")
+        self.statusBar().addPermanentWidget(self.interaction_hint_label)
+        self.statusBar().showMessage("Right-click a trace panel for channel actions")
 
         self._rebuild_panels()
         self._sync_navigation()
         self.refresh()
         self._display_montage_path = None
         self._display_montage_baseline = self.display_montage_state()
+        self._default_display_montage = deepcopy(self._display_montage_baseline)
         self._create_display_montage_menu()
 
     @property
@@ -2624,9 +2678,13 @@ class StreamViewerWindow(QMainWindow):
 
     @property
     def display_montage_changed(self):
-        """Return whether the display differs from its last load/save baseline."""
+        """Return whether the display differs from every clean montage state."""
         baseline = getattr(self, "_display_montage_baseline", None)
-        return baseline is not None and self.display_montage_state() != baseline
+        if baseline is None:
+            return False
+        state = self.display_montage_state()
+        default = getattr(self, "_default_display_montage", None)
+        return state != baseline and (default is None or state != default)
 
     def _validated_display_montage(self, state):
         """Validate ``state`` and return its groups mapped to current streams."""
