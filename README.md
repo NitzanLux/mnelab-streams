@@ -133,6 +133,14 @@ Before contributing, read [CONTRIBUTING.md](CONTRIBUTING.md). Source and test fi
 must retain the repository's BSD license header, and every change should include
 tests and a changelog entry.
 
+## Design acknowledgements
+
+Some stream-viewer interaction concepts—including time-navigation gestures,
+current-window channel statistics, and zoom-history behavior—were inspired by
+[EDFbrowser](https://github.com/RTMilliken/EDFbrowser), a separate project
+distributed under the GNU General Public License version 2. This acknowledgment
+does not imply affiliation with or endorsement by the EDFbrowser project.
+
 ## License and attribution
 
 This fork remains licensed under the
