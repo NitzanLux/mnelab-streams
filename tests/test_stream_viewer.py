@@ -1223,11 +1223,7 @@ def test_activation_map_fits_and_preserves_stream_labels(qtbot, raw, streams):
     left_axis = window.plot.getAxis("left")
     labels = [label for _position, label in left_axis._tickLevels[0]]
 
-    assert (
-        ACTIVATION_AXIS_MIN_WIDTH
-        < left_axis.fixedWidth
-        <= ACTIVATION_AXIS_MAX_WIDTH
-    )
+    assert ACTIVATION_AXIS_MIN_WIDTH < left_axis.fixedWidth <= ACTIVATION_AXIS_MAX_WIDTH
     assert labels[0] == named_streams[0]["name"]
     assert labels[1]
     assert labels[1] != named_streams[1]["name"]

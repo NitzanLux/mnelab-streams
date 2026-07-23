@@ -204,9 +204,7 @@ def test_filter_preset_serializes_each_supported_filter(
     preset_filter = state["streams"][0]["filter"]
 
     assert preset_filter["channels"] == ["EEG 1", "EEG 2"]
-    details = {
-        key: value for key, value in preset_filter.items() if key != "channels"
-    }
+    details = {key: value for key, value in preset_filter.items() if key != "channels"}
     assert details == expected
 
     restored = FilterDialog(fmax=50, streams=[streams[0]])
@@ -330,9 +328,7 @@ def test_filter_preset_validation_is_transactional(qtbot):
             "upper cutoff",
         ),
         (
-            lambda state: [
-                stream.update(filter=None) for stream in state["streams"]
-            ],
+            lambda state: [stream.update(filter=None) for stream in state["streams"]],
             "does not contain any enabled",
         ),
     ],
@@ -351,9 +347,7 @@ def test_filter_preset_rejects_unsupported_or_incompatible_state(
         dialog.apply_filter_preset(state)
 
 
-def test_filter_dialog_saves_suffix_and_loads_without_processing(
-    qtbot, tmp_path
-):
+def test_filter_dialog_saves_suffix_and_loads_without_processing(qtbot, tmp_path):
     """Loading a preset changes controls only and appends a missing JSON suffix."""
     _raw, streams = _raw_and_streams()
     source = FilterDialog(fmax=50, streams=streams)
