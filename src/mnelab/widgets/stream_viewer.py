@@ -1010,6 +1010,7 @@ class StreamPanel(QFrame):
             self.channel_settings[name].pop("unit", None)
         else:
             self.channel_settings[name]["unit"] = unit
+        self._update_channel_list()
         self._settings_updated()
 
     def zero_channel_offset(self, name):
@@ -1924,7 +1925,7 @@ class StreamPanel(QFrame):
                 parts.append(f"{unit_prefix}{value:.3g} {unit}/div")
         visible_parts = parts[:2]
         if len(parts) > 2:
-            visible_parts.append(f"+{len(parts) - 2} streams")
+            visible_parts.append(f"+{len(parts) - 2} scales")
         full_scale = " · ".join(parts)
         fitted_count = sum(name in self.channel_fits for name in visible_names)
         fitted_suffix = f" · {fitted_count} lane-fit" if fitted_count else ""
@@ -2778,6 +2779,7 @@ class StreamViewerWindow(QMainWindow):
                 or (color is not None and not QColor(str(color)).isValid())
             ):
                 raise ValueError(f"Display settings for channel {name!r} are invalid.")
+            unit = unit.strip()
             validated_channel_settings[name] = {
                 "gain": gain,
                 "offset": offset,
@@ -2786,7 +2788,7 @@ class StreamViewerWindow(QMainWindow):
                 "visible": visible,
             }
             if unit != "Auto":
-                validated_channel_settings[name]["unit"] = unit.strip()
+                validated_channel_settings[name]["unit"] = unit
         channel_fits = state.get("channel_fits", {})
         if not isinstance(channel_fits, dict):
             raise ValueError("The display montage channel fits are invalid.")

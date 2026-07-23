@@ -35,6 +35,7 @@ _HOVER_BTN_STYLE = """
 # maps info row key → icon shown to the left of the key label
 _ICON_MAP = {
     "File Name": "file",
+    "Merged XDF": "append-data",
     "Streams": "plot-data",
     "Channels": "chan-props",
     "Events": "events",

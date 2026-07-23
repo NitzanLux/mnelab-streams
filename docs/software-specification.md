@@ -165,6 +165,7 @@ of its parent. A dataset contains at least the following logical fields:
 | `events`, `event_mapping` | Event array and optional numeric-to-text mapping |
 | `source_streams` | Ordered source descriptors, principally from XDF |
 | `source_files` | Ordered original paths when one dataset merges several files |
+| `is_xdf_merge` | Whether multiple XDF recordings formed the dataset |
 | `ica`, `iclabel` | Fitted ICA object and optional component-label probabilities |
 | `reference` | Current reference description |
 | `_cache_path` | Temporary FIFF path used by memory-saving mode |
@@ -325,6 +326,15 @@ streams shall be selectable in the same table.
 - Batch merging shall offer to skip files whose metadata inspection or full loading
   fails, list every omission and reason, and require at least two readable files before
   inserting the merged dataset. Compatibility and seam failures remain merge errors.
+- A dataset assembled from at least two XDF files shall show a merge icon and source
+  count in the sidebar and information panel. A time-split group containing only one
+  source file shall not be marked as merged.
+- A merged raw XDF dataset shall expose an XDF save action. The resulting XDF 1.0 file
+  shall retain every active, differently named source entity as a separate numeric
+  stream, use the current common sampling grid and double-precision values so `NaN`
+  padding remains representable, and store annotations as an irregular string marker
+  stream. The writer shall validate exhaustive channel ownership before touching the
+  destination and replace the destination atomically.
 - At least one numeric data stream is required.
 - Selected marker streams shall be converted to annotations.
 - Marker descriptions may be prefixed with stream IDs when more than one marker stream
@@ -349,7 +359,7 @@ streams shall be selectable in the same table.
 
 | Data type | Formats |
 | --- | --- |
-| Raw | BDF, EDF, BrainVision, FIFF/FIFF.GZ, EEGLAB |
+| Raw | BDF, EDF, BrainVision, FIFF/FIFF.GZ, EEGLAB; XDF for merged XDF datasets |
 | Epochs | FIFF/FIFF.GZ, EEGLAB |
 
 If the user omits an extension, MNELAB shall append the default extension. If the

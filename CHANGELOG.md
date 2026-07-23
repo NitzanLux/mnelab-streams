@@ -1,6 +1,7 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
 - Add file- and folder-based multi-XDF import with time-based dataset splitting, NaN-aligned channel unions, stream-qualified duplicate labels, same-name stream unification, and optional skipping of damaged files (by [NitzanLux](https://github.com/NitzanLux))
+- Mark merged XDF datasets in the sidebar and information panel, and allow them to be saved as a single XDF while retaining distinct source-stream entities (by [NitzanLux](https://github.com/NitzanLux))
 - Allow each stream-viewer channel to use its own display unit, including custom IMU
   and sensor unit labels, with persistence in display montages
 

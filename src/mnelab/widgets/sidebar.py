@@ -190,6 +190,15 @@ class SidebarTreeWidget(QTreeWidget):
         item.setText(1, dtype)
         item.setToolTip(1, f"Data Type: {dtype.capitalize()}" if dtype else "")
 
+    def set_xdf_merge(self, item, source_file_count):
+        """Mark an item assembled from multiple XDF recordings."""
+        if source_file_count > 1:
+            item.setIcon(0, QIcon.fromTheme("append-data"))
+            item.setToolTip(
+                0,
+                f"Merged XDF dataset assembled from {source_file_count} source files",
+            )
+
     def set_badges_visible(self, visible):
         """Show or hide the data type badge column."""
         self.setColumnHidden(1, not visible)

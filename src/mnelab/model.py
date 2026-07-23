@@ -23,6 +23,7 @@ from mnextend import (
 from mnextend.io.readers import raw_readers
 
 from mnelab.utils import Montage, count_locations
+from mnelab.xdf import write_xdf
 
 
 class LabelsNotFoundError(Exception):
@@ -294,7 +295,15 @@ class Model:
             self.index = len(self.data) - 1
 
     @data_changed(invalidate_cache=False)
-    def load_data(self, data, fname, name=None, source_streams=None, source_files=None):
+    def load_data(
+        self,
+        data,
+        fname,
+        name=None,
+        source_streams=None,
+        source_files=None,
+        is_xdf_merge=False,
+    ):
         """Load a Raw or Epochs object as a new dataset.
 
         Parameters
@@ -309,6 +318,8 @@ class Model:
             Ordered source-stream metadata used by the stream viewer.
         source_files : list of str | None
             All source paths when one data set was assembled from multiple files.
+        is_xdf_merge : bool
+            Whether the dataset was created by merging multiple XDF recordings.
         """
         fname = str(Path(fname).resolve().as_posix())
         if source_files is None:
@@ -351,6 +362,7 @@ class Model:
                 event_mapping=event_mapping,
                 source_streams=deepcopy(source_streams),
                 source_files=source_files,
+                is_xdf_merge=bool(is_xdf_merge),
                 _cache_path=None,
             )
         )
@@ -471,6 +483,17 @@ class Model:
             write_epochs(fname, self.current["data"])
         else:
             write_raw(fname, self.current["data"])
+
+    def export_xdf(self, fname):
+        """Export a merged raw XDF dataset while retaining stream entities."""
+        if not self.current["is_xdf_merge"]:
+            raise ValueError("Only a merged XDF dataset can use merged XDF export.")
+        write_xdf(
+            fname,
+            self.current["data"],
+            self.current["source_streams"],
+            source_file_count=len(self.current["source_files"]),
+        )
 
     def export_bads(self, fname):
         """Export bad channels info to a CSV file."""
@@ -749,6 +772,15 @@ class Model:
             "File Name": fname if fname else "–",
             "File Type": ftype.removesuffix(".GZ") if ftype else "–",
             "Data Type": dtype,
+            **(
+                {
+                    "Merged XDF": (
+                        f"Yes ({len(self.current['source_files'])} source files)"
+                    )
+                }
+                if self.current["is_xdf_merge"]
+                else {}
+            ),
             "Size on Disk": size_disk,
             "Size in Memory": f"{_data_nbytes(data) / 1024**2:.2f}\u2009MB",
             "Channels": f"{nchan} (" + chans + ")",

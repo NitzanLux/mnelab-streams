@@ -728,6 +728,10 @@ class MainWindow(QMainWindow):
                 f"{ext[1:].upper()} ({description[1]})...",
                 partial(self.export_file, model.export_data, "Export data", "*" + ext),
             )
+        self.all_actions["export_merged_xdf"] = self.export_menu.addAction(
+            "XDF (Merged Dataset)...",
+            self.save_merged_xdf,
+        )
         file_menu.addSeparator()
         self.all_actions["xdf_metadata"] = file_menu.addAction(
             QIcon.fromTheme("xdf-metadata"),
@@ -1186,6 +1190,8 @@ class MainWindow(QMainWindow):
             for dataset in self.model.data:
                 item = self.sidebar.make_item(dataset["name"], dataset["id"])
                 self.sidebar.set_dtype(item, dataset["dtype"] or "")
+                if dataset["is_xdf_merge"]:
+                    self.sidebar.set_xdf_merge(item, len(dataset["source_files"]))
                 parent_id = dataset["parent_id"]
                 if parent_id is not None and parent_id in id_to_item:
                     id_to_item[parent_id].addChild(item)
@@ -1301,6 +1307,11 @@ class MainWindow(QMainWindow):
             )
             self.all_actions["xdf_metadata"].setEnabled(
                 enabled and self.model.current["ftype"] in ["XDF", "XDFZ", "XDF.GZ"]
+            )
+            self.all_actions["export_merged_xdf"].setEnabled(
+                enabled
+                and self.model.current["dtype"] == "raw"
+                and bool(self.model.current["is_xdf_merge"])
             )
             # disable unsupported exporters for epochs (all must support raw)
             if self.model.current["dtype"] == "epochs":
@@ -1532,6 +1543,7 @@ class MainWindow(QMainWindow):
                 name=name,
                 source_streams=unified_streams,
                 source_files=group_fnames,
+                is_xdf_merge=len(group_fnames) > 1,
             )
             self.model.history.append("data = mne.concatenate_raws(raws, preload=True)")
 
@@ -1775,6 +1787,21 @@ class MainWindow(QMainWindow):
                 if answer != QMessageBox.StandardButton.Yes:
                     return
             return f(final_fname)
+
+    def save_merged_xdf(self):
+        """Choose a destination and save the current merged XDF dataset."""
+        try:
+            self.export_file(
+                self.model.export_xdf,
+                "Save Merged XDF",
+                "*.xdf",
+            )
+        except (OSError, TypeError, ValueError) as error:
+            QMessageBox.critical(
+                self,
+                "Could Not Save Merged XDF",
+                f"The merged XDF could not be saved:\n\n{error}",
+            )
 
     def import_file(self, f, text, ffilter="*"):
         """Import file."""

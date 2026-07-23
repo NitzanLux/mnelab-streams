@@ -629,8 +629,10 @@ def test_merge_creates_one_dataset_per_time_group(tmp_path):
         paths[0].resolve().as_posix(),
         paths[1].resolve().as_posix(),
     ]
+    assert window.model.data[0]["is_xdf_merge"] is True
     assert window.model.data[0]["data"].n_times == 20
     assert window.model.data[1]["source_files"] == [paths[2].resolve().as_posix()]
+    assert window.model.data[1]["is_xdf_merge"] is False
     assert window.model.data[1]["data"].n_times == 10
     assert "Created 2 data sets" in information.call_args.args[2]
 

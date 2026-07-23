@@ -274,6 +274,12 @@ def test_channels_can_override_units_for_mixed_imu_and_emg_stream(qtbot):
     assert state["channel_settings"]["Accel X"]["unit"] == "g"
     assert state["channel_settings"]["EMG"]["unit"] == "µV"
 
+    restored = StreamViewerWindow(raw, streams=streams, duration=0.5)
+    qtbot.addWidget(restored)
+    restored.apply_display_montage(state)
+    assert restored.panels[0].channel_settings["Accel X"]["unit"] == "g"
+    assert restored.panels[0].channel_settings["EMG"]["unit"] == "µV"
+
 
 def test_amplitude_controls_are_multiplicative_and_panel_local(qtbot, viewer):
     """Amplitude follows the EMG viewer's 1.25x model per stream panel."""
