@@ -6,6 +6,7 @@ binaries = []
 hiddenimports = []
 tmp_ret = collect_all('mne')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+datas += [('../LICENSE', '.'), ('../NOTICE', '.')]
 tmp_ret = collect_all('mnelab')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('sklearn')
@@ -43,7 +44,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name='MNELAB',
+    name='MNELAB-Streams',
     debug=False,
     bootloader_ignore_signals=False,
     strip=True,
@@ -63,14 +64,19 @@ coll = COLLECT(
     strip=True,
     upx=False,
     upx_exclude=[],
-    name='MNELAB',
+    name='MNELAB-Streams',
 )
 app = BUNDLE(
     coll,
-    name='MNELAB.app',
+    name='MNELAB-Streams.app',
     icon='../src/mnelab/icons/mnelab-logo.icns',
-    bundle_identifier=None,
+    bundle_identifier='io.github.nitzanlux.mnelab-streams',
     info_plist={
+        "CFBundleDisplayName": "MNELAB Streams",
+        "NSHumanReadableCopyright": (
+            "Original software © MNELAB developers and contributors; "
+            "fork modifications © 2026 NitzanLux and contributors"
+        ),
         "CFBundleDocumentTypes": [
             {
                 "CFBundleTypeName": "EDF File",

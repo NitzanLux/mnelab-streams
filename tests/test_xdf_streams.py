@@ -68,11 +68,11 @@ def test_ok_enabled_with_data_stream_selected(qtbot, rows):
     assert ok_button.isEnabled()
 
 
-def test_suggested_fs_ignores_marker_rows(qtbot, rows):
-    """Test that the suggested sampling rate is based on data streams only."""
+def test_suggested_fs_uses_maximum_data_rate(qtbot, rows):
+    """Test that the suggested rate is the maximum data-stream rate."""
     dialog = XDFStreamsDialog(None, rows, fname="x")
     qtbot.addWidget(dialog)
 
-    # data streams have sampling rates 256 (67 channels) and 44100 (2 channels); the
-    # marker stream at 5000 Hz (1 channel) must not skew the suggestion
-    assert dialog.fs_new.value() == 256.0
+    # The 5000 Hz string stream is ignored, while the highest data-stream rate wins
+    # regardless of its channel count.
+    assert dialog.fs_new.value() == 44100.0

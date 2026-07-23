@@ -35,6 +35,8 @@ _HOVER_BTN_STYLE = """
 # maps info row key → icon shown to the left of the key label
 _ICON_MAP = {
     "File Name": "file",
+    "Merged XDF": "append-data",
+    "Streams": "plot-data",
     "Channels": "chan-props",
     "Events": "events",
     "Annotations": "annotations",
@@ -100,6 +102,7 @@ class InfoWidget(QWidget):
         Each key/value pair in this dict is displayed in a row separated by a colon.
     """
 
+    streams_clicked = Signal()
     channels_clicked = Signal()
     events_clicked = Signal()
     annotations_clicked = Signal()
@@ -146,6 +149,9 @@ class InfoWidget(QWidget):
                 self.grid.addWidget(icon_label, row, 0)
                 left = QLabel(str(key) + ":")
                 right = QLabel(str(value))
+                if key == "Streams":
+                    right.setWordWrap(True)
+                    right.setToolTip(str(value))
                 right.setSizePolicy(
                     QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed
                 )
@@ -167,6 +173,14 @@ class InfoWidget(QWidget):
                         "edit",
                         "Channel Properties",
                         self.channels_clicked.emit,
+                    )
+                elif key == "Streams":
+                    self._add_hover_entry(
+                        row,
+                        right,
+                        "edit",
+                        "Stream Properties",
+                        self.streams_clicked.emit,
                     )
                 elif key == "Events":
                     self._add_hover_entry(

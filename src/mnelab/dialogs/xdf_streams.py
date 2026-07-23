@@ -2,7 +2,7 @@
 #
 # License: BSD (3-clause)
 
-from collections import defaultdict
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Slot
 from PySide6.QtGui import QPalette
@@ -29,7 +29,7 @@ from mnelab.widgets import FlatDoubleSpinBox
 class XDFStreamsDialog(QDialog):
     def __init__(self, parent, rows, fname):
         super().__init__(parent)
-        self.setWindowTitle("Select XDF Stream")
+        self.setWindowTitle(f"Select XDF Streams — {Path(fname).name}")
         self.fname = fname
 
         muted = self.palette().color(
@@ -188,24 +188,13 @@ class XDFStreamsDialog(QDialog):
             self.buttonbox.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
         else:
             self.buttonbox.button(QDialogButtonBox.StandardButton.Ok).setEnabled(True)
-            # suggest the most common sampling rate (with the most channels)
-            channel_counts = []
-            sampling_rates = []
+            # suggest the highest sampling rate among the selected data streams
             row_indices = {
                 r.row()
                 for r in self.view.selectedIndexes()
                 if not self._is_marker_row(r.row())
             }
-            for row in row_indices:
-                channel_counts.append(self.view.item(row, 3).value())
-                sampling_rates.append(self.view.item(row, 5).value())
-
-            counts = defaultdict(int)
-            for channel_count, sampling_rate in zip(channel_counts, sampling_rates):
-                if sampling_rate != 0:
-                    counts[sampling_rate] += channel_count
-
-            suggested_fs = max(counts, key=counts.get)
+            suggested_fs = max(self.view.item(row, 5).value() for row in row_indices)
             self.fs_new.setValue(suggested_fs)
 
     def _is_marker_row(self, row):

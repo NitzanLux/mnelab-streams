@@ -1,0 +1,22 @@
+MNELAB Streams is an independent derivative of MNELAB:
+https://github.com/cbrnr/mnelab
+
+Original software:
+Copyright © MNELAB developers and contributors.
+
+Fork-specific modifications:
+Copyright © 2026 NitzanLux and contributors.
+
+Design acknowledgements:
+Some stream-viewer interaction concepts, including time-navigation gestures,
+current-window channel statistics, and zoom-history behavior, were inspired by
+EDFbrowser:
+https://github.com/RTMilliken/EDFbrowser
+
+EDFbrowser is a separate project distributed under the GNU General Public
+License version 2. This acknowledgment does not imply affiliation with or
+endorsement by the EDFbrowser project.
+
+MNELAB Streams is distributed under the BSD 3-Clause License in LICENSE.
+The original copyright notice, license conditions, and disclaimer are retained.
+No endorsement by the upstream MNELAB project is implied.

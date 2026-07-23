@@ -45,7 +45,7 @@ with patch("PySide6.QtWidgets.QApplication.exec", return_value=0):
         f"main() subprocess exited with code {result.returncode}.\n"
         f"stdout: {result.stdout}\nstderr: {result.stderr}"
     )
-    assert result.stdout.strip() == "MNELAB", (
-        f"Expected window title 'MNELAB', got: {result.stdout.strip()!r}\n"
+    assert result.stdout.strip() == "MNELAB Streams", (
+        f"Expected window title 'MNELAB Streams', got: {result.stdout.strip()!r}\n"
         f"stderr: {result.stderr}"
     )

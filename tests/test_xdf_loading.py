@@ -2,12 +2,31 @@
 #
 # License: BSD (3-clause)
 
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock, call
+from unittest.mock import MagicMock, call, patch
+from xml.etree.ElementTree import ParseError
 
+import mne
+import numpy as np
 import pytest
 
-from mnelab.mainwindow import MainWindow, _xdf_stream_descriptors
+from mnelab.mainwindow import (
+    MainWindow,
+    XDFImportError,
+    _align_xdf_channel_union,
+    _chronological_xdf_groups,
+    _chronological_xdf_order,
+    _empty_xdf_stream_warning,
+    _merge_xdf_raws,
+    _qualify_xdf_duplicate_channels,
+    _resolve_xdf_rows,
+    _unify_xdf_streams,
+    _xdf_files_in_folder,
+    _xdf_stream_descriptors,
+)
+from mnelab.model import Model
 
 
 def _load_xdf(model, stream_ids=(30, 31), fs_new=256.0, gap_threshold=0.0):
@@ -79,6 +98,22 @@ def test_load_xdf_preserves_resampling_for_gap_detection():
     assert model.load.call_args_list[-1].kwargs["gap_threshold"] == 0.1
 
 
+def test_empty_xdf_stream_warning_explains_stream_ids_and_outcome():
+    """The warning identifies streams and distinguishes IDs from channel indexes."""
+    rows = [
+        [2, "EEG", "Signal", 8, "float32", 256.0],
+        [4, "Triggers", "Markers", 1, "string", 0.0],
+    ]
+
+    message = _empty_xdf_stream_warning(rows, [2, 4])
+
+    assert '- ID 2: "EEG" (type: Signal)' in message
+    assert '- ID 4: "Triggers" (type: Markers)' in message
+    assert "stream identifier stored in the XDF file" in message
+    assert "it is not a channel index" in message
+    assert "The other selected streams were loaded successfully" in message
+
+
 @pytest.mark.parametrize(
     ("stream_ids", "message"),
     [
@@ -114,10 +149,15 @@ def test_xdf_stream_descriptors_preserve_loaded_stream_boundaries():
         channel_names=["Fz", "Cz", "x", "y", "pupil"],
     )
 
-    assert [stream["id"] for stream in descriptors] == [30, 32]
+    assert [stream["id"] for stream in descriptors] == [30, 31, 32]
     assert descriptors[0]["channel_names"] == ["Fz", "Cz"]
-    assert descriptors[1]["channel_names"] == ["x", "y", "pupil"]
-    assert descriptors[1]["nominal_srate"] == 120.0
+    assert descriptors[0]["removed"] is False
+    assert descriptors[1]["channel_names"] == []
+    assert descriptors[1]["removed"] is True
+    assert descriptors[1]["removal_reason"] == "contains no samples"
+    assert descriptors[1]["declared_channel_count"] == 4
+    assert descriptors[2]["channel_names"] == ["x", "y", "pupil"]
+    assert descriptors[2]["nominal_srate"] == 120.0
 
 
 def test_xdf_stream_descriptors_reject_channel_mismatch():
@@ -126,3 +166,522 @@ def test_xdf_stream_descriptors_reject_channel_mismatch():
 
     with pytest.raises(RuntimeError, match="does not match"):
         _xdf_stream_descriptors(rows, [30], [], ["Fz"])
+
+
+def test_zero_channel_stream_id_is_marked_removed_in_metadata():
+    """A zero-channel source keeps its ID and an explicit removal reason."""
+    rows = [
+        [0, "Removed", "Aux", 0, "float32", 1000.0],
+        [30, "EEG", "EEG", 1, "float32", 256.0],
+    ]
+
+    descriptors = _xdf_stream_descriptors(rows, [0, 30], [], ["Fz"])
+
+    assert descriptors[0] == {
+        "id": 0,
+        "name": "Removed",
+        "type": "Aux",
+        "channel_names": [],
+        "channel_format": "float32",
+        "nominal_srate": 1000.0,
+        "declared_channel_count": 0,
+        "removed": True,
+        "removal_reason": "contains zero channels",
+    }
+    assert descriptors[1]["channel_names"] == ["Fz"]
+
+
+def test_resolve_xdf_rows_explains_malformed_xml(monkeypatch):
+    """A damaged XDF reports a file-specific error instead of an XML traceback."""
+    error = ParseError("no element found: line 30, column 1")
+    error.position = (30, 1)
+    monkeypatch.setattr(
+        "mnelab.mainwindow.resolve_streams", MagicMock(side_effect=error)
+    )
+
+    with pytest.raises(XDFImportError, match="damaged.xdf") as raised:
+        _resolve_xdf_rows("damaged.xdf")
+
+    assert "incomplete or malformed XML at line 30, column 1" in str(raised.value)
+    assert "truncated or damaged" in str(raised.value)
+
+
+def test_merge_xdf_raws_reorders_channels_and_marks_boundaries():
+    """Compatible recordings concatenate safely even if channel order differs."""
+    first = mne.io.RawArray(
+        np.ones((2, 10)),
+        mne.create_info(["Fz", "Cz"], 100, ["eeg", "eeg"]),
+        verbose=False,
+    )
+    second = mne.io.RawArray(
+        np.vstack((np.full(10, 2.0), np.full(10, 3.0))),
+        mne.create_info(["Cz", "Fz"], 100, ["eeg", "eeg"]),
+        verbose=False,
+    )
+
+    merged = _merge_xdf_raws([first, second], ["one.xdf", "two.xdf"])
+
+    assert merged.ch_names == ["Fz", "Cz"]
+    assert merged.n_times == 20
+    np.testing.assert_array_equal(merged.get_data()[:, 10:], [[3] * 10, [2] * 10])
+    assert set(merged.annotations.description) == {"BAD boundary", "EDGE boundary"}
+
+
+def test_merge_xdf_raws_rejects_different_channels():
+    """A merge error identifies the incompatible file and channel differences."""
+    first = mne.io.RawArray(
+        np.ones((2, 10)),
+        mne.create_info(["Fz", "Cz"], 100, ["eeg", "eeg"]),
+        verbose=False,
+    )
+    second = mne.io.RawArray(
+        np.ones((2, 10)),
+        mne.create_info(["Fz", "Pz"], 100, ["eeg", "eeg"]),
+        verbose=False,
+    )
+
+    with pytest.raises(XDFImportError, match="two.xdf") as raised:
+        _merge_xdf_raws([first, second], ["one.xdf", "two.xdf"])
+
+    assert "missing: Cz" in str(raised.value)
+    assert "additional: Pz" in str(raised.value)
+
+
+def test_align_xdf_channel_union_fills_absent_intervals_with_nan():
+    """Heterogeneous recordings retain the union without inventing measurements."""
+    first = mne.io.RawArray(
+        np.ones((1, 10)),
+        mne.create_info(["Fz"], 100, ["eeg"]),
+        verbose=False,
+    )
+    second = mne.io.RawArray(
+        np.vstack((np.full(10, 2.0), np.full(10, 3.0))),
+        mne.create_info(["Fz", "frame_index-0"], 100, ["eeg", "misc"]),
+        verbose=False,
+    )
+
+    filled = _align_xdf_channel_union([first, second], ["first.xdf", "second.xdf"])
+    merged = _merge_xdf_raws([first, second], ["first.xdf", "second.xdf"])
+
+    assert filled == [("first.xdf", ["frame_index-0"])]
+    assert merged.ch_names == ["Fz", "frame_index-0"]
+    assert np.isnan(merged.get_data(picks=["frame_index-0"])[:, :10]).all()
+    np.testing.assert_array_equal(
+        merged.get_data(picks=["frame_index-0"])[:, 10:], [[3.0] * 10]
+    )
+
+
+def test_merged_dataset_retains_all_source_files(tmp_path):
+    """Merged datasets account for and retain every original XDF path."""
+    first_path = tmp_path / "one.xdf"
+    second_path = tmp_path / "two.xdf"
+    first_path.write_bytes(b"123")
+    second_path.write_bytes(b"45678")
+    raw = mne.io.RawArray(
+        np.ones((1, 10)),
+        mne.create_info(["Fz"], 100, ["eeg"]),
+        verbose=False,
+    )
+    model = Model()
+
+    model.load_data(raw, first_path, source_files=[first_path, second_path])
+
+    assert model.current["source_files"] == [
+        first_path.resolve().as_posix(),
+        second_path.resolve().as_posix(),
+    ]
+    assert model.current["fsize"] == pytest.approx(8 / 1024**2)
+
+
+def _timed_raw(start, *, sfreq=10.0, n_times=10):
+    raw = mne.io.RawArray(
+        np.ones((1, n_times)),
+        mne.create_info(["Fz"], sfreq, ["eeg"]),
+        verbose=False,
+    )
+    raw.set_meas_date(start)
+    return raw
+
+
+def test_chronological_xdf_order_sorts_and_accepts_small_seam():
+    """Recording timestamps, rather than selected paths, determine merge order."""
+    first_start = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _timed_raw(first_start)
+    second = _timed_raw(first_start + timedelta(seconds=1.05))
+
+    order = _chronological_xdf_order([second, first], ["second.xdf", "first.xdf"], 0.1)
+
+    assert order == [1, 0]
+
+
+def test_chronological_xdf_order_rejects_large_gap_or_overlap():
+    """A seam outside the selected tolerance is not silently compressed."""
+    first_start = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _timed_raw(first_start)
+    second = _timed_raw(first_start + timedelta(seconds=1.2))
+
+    with pytest.raises(XDFImportError, match=r"gap is 0\.2 s"):
+        _chronological_xdf_order([first, second], ["first.xdf", "second.xdf"], 0.1)
+
+
+def test_chronological_xdf_order_requires_recording_datetime():
+    """Automatic order does not guess from filenames when XDF time is unavailable."""
+    raw = _timed_raw(None)
+
+    with pytest.raises(XDFImportError, match="no absolute recording datetime"):
+        _chronological_xdf_order([raw], ["recording.xdf"], 1.0)
+
+
+def _stream(stream_id, name, channels):
+    return {
+        "id": stream_id,
+        "name": name,
+        "type": "EEG",
+        "channel_names": channels,
+        "channel_format": "float32",
+        "nominal_srate": 100.0,
+        "declared_channel_count": len(channels),
+        "removed": False,
+    }
+
+
+def test_unify_xdf_streams_combines_same_name_across_files():
+    """Repeated source names become one stream with provenance from every file."""
+    unified = _unify_xdf_streams(
+        [
+            [_stream(7, "EEG", ["Fz", "Cz"])],
+            [_stream(42, "eeg", ["Fz", "Cz"])],
+        ],
+        ["first.xdf", "second.xdf"],
+        ["Fz", "Cz"],
+        100.0,
+    )
+
+    assert len(unified) == 1
+    assert unified[0]["name"] == "EEG"
+    assert unified[0]["channel_names"] == ["Fz", "Cz"]
+    assert unified[0]["source_stream_ids"] == [
+        {"file": "first.xdf", "id": 7},
+        {"file": "second.xdf", "id": 42},
+    ]
+
+
+def test_unify_xdf_streams_rejects_conflicting_names_for_channel():
+    """One channel cannot silently change source-stream identity between files."""
+    with pytest.raises(XDFImportError, match='both "EEG" and "Aux"'):
+        _unify_xdf_streams(
+            [[_stream(7, "EEG", ["Fz"])], [_stream(8, "Aux", ["Fz"])]],
+            ["first.xdf", "second.xdf"],
+            ["Fz"],
+            100.0,
+        )
+
+
+def test_duplicate_channel_suffixes_are_qualified_by_distinct_stream():
+    """Changing stream order cannot swap the identity of duplicate camera fields."""
+    first = mne.io.RawArray(
+        np.ones((2, 10)),
+        mne.create_info(["frame_index-0", "frame_index-1"], 100, ["misc", "misc"]),
+        verbose=False,
+    )
+    second = mne.io.RawArray(
+        np.ones((2, 10)),
+        mne.create_info(["frame_index-0", "frame_index-1"], 100, ["misc", "misc"]),
+        verbose=False,
+    )
+    stream_sets = [
+        [
+            _stream(10, "Camera 0", ["frame_index-0"]),
+            _stream(11, "Camera 1", ["frame_index-1"]),
+        ],
+        [
+            _stream(21, "Camera 1", ["frame_index-0"]),
+            _stream(20, "Camera 0", ["frame_index-1"]),
+        ],
+    ]
+
+    renames = _qualify_xdf_duplicate_channels(
+        [first, second], stream_sets, ["first.xdf", "second.xdf"]
+    )
+    _align_xdf_channel_union([first, second], ["first.xdf", "second.xdf"])
+    unified = _unify_xdf_streams(
+        stream_sets,
+        ["first.xdf", "second.xdf"],
+        first.ch_names,
+        100.0,
+    )
+
+    assert renames
+    assert first.ch_names == ["Camera 0/frame_index", "Camera 1/frame_index"]
+    assert second.ch_names == first.ch_names
+    assert [stream["name"] for stream in unified] == ["Camera 0", "Camera 1"]
+    assert unified[0]["channel_names"] == ["Camera 0/frame_index"]
+    assert unified[1]["channel_names"] == ["Camera 1/frame_index"]
+
+
+def test_identical_channel_label_in_different_streams_remains_distinct():
+    """The source-stream entity, not a shared label, defines channel identity."""
+    first = mne.io.RawArray(
+        np.ones((1, 10)),
+        mne.create_info(["frame_index"], 100, ["misc"]),
+        verbose=False,
+    )
+    second = first.copy()
+    stream_sets = [
+        [_stream(10, "Camera 0", ["frame_index"])],
+        [_stream(20, "Camera 1", ["frame_index"])],
+    ]
+
+    _qualify_xdf_duplicate_channels(
+        [first, second], stream_sets, ["first.xdf", "second.xdf"]
+    )
+    filled = _align_xdf_channel_union([first, second], ["first.xdf", "second.xdf"])
+
+    assert first.ch_names == ["Camera 0/frame_index", "Camera 1/frame_index"]
+    assert second.ch_names == first.ch_names
+    assert filled == [
+        ("first.xdf", ["Camera 1/frame_index"]),
+        ("second.xdf", ["Camera 0/frame_index"]),
+    ]
+
+
+def test_chronological_xdf_groups_split_at_large_gap():
+    """A seam outside the tolerance starts a new chronological group on request."""
+    first_start = datetime(2026, 1, 1, tzinfo=UTC)
+    first = _timed_raw(first_start)
+    second = _timed_raw(first_start + timedelta(seconds=1.05))
+    third = _timed_raw(first_start + timedelta(seconds=450))
+
+    groups = _chronological_xdf_groups(
+        [third, second, first],
+        ["third.xdf", "second.xdf", "first.xdf"],
+        0.1,
+        split_on_discontinuity=True,
+    )
+
+    assert groups == [[2, 1], [0]]
+
+
+def test_xdf_folder_discovery_is_recursive_and_case_insensitive(tmp_path):
+    """Folder import includes every supported XDF container below the folder."""
+    nested = tmp_path / "nested"
+    nested.mkdir()
+    first = tmp_path / "one.xdf"
+    second = nested / "two.XDFZ"
+    third = nested / "three.xdf.gz"
+    ignored = nested / "notes.txt"
+    for path in (first, second, third, ignored):
+        path.write_bytes(b"data")
+
+    found = _xdf_files_in_folder(tmp_path)
+
+    assert found == sorted([str(first), str(second), str(third)], key=str.casefold)
+
+
+def test_multiple_xdf_configuration_skips_damaged_file():
+    """A malformed header does not prevent valid batch files reaching the merge."""
+    damaged = XDFImportError("damaged header")
+    configurations = [{"fname": "one.xdf"}, {"fname": "two.xdf"}]
+    dialog = SimpleNamespace(
+        exec=lambda: True,
+        ordered_files=["damaged.xdf", "one.xdf", "two.xdf"],
+        merge_files=True,
+        auto_order_by_time=False,
+        maximum_seam_difference=1.0,
+        split_at_time_discontinuities=True,
+        merge_channel_union=True,
+        skip_unreadable_files=True,
+    )
+    window = SimpleNamespace(
+        _set_last_dir=MagicMock(),
+        _configure_xdf=MagicMock(
+            side_effect=[damaged, configurations[0], configurations[1]]
+        ),
+        _merge_xdfs=MagicMock(),
+        _show_xdf_error=MagicMock(),
+    )
+
+    with patch("mnelab.mainwindow.XDFImportDialog", return_value=dialog):
+        MainWindow._open_multiple_xdfs(window, dialog.ordered_files)
+
+    window._merge_xdfs.assert_called_once_with(
+        configurations,
+        auto_order_by_time=False,
+        maximum_seam_difference=1.0,
+        split_on_time_discontinuities=True,
+        allow_channel_union=True,
+        skip_unreadable=True,
+        unreadable_failures=[("damaged.xdf", damaged)],
+    )
+    window._show_xdf_error.assert_not_called()
+
+
+def test_merge_skips_file_that_fails_during_full_load(tmp_path):
+    """Damage discovered after stream selection is skipped before atomic insertion."""
+    paths = [tmp_path / name for name in ("one.xdf", "damaged.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+    raw_template = mne.io.RawArray(
+        np.ones((1, 10)),
+        mne.create_info(["Fz"], 100, ["eeg"]),
+        verbose=False,
+    )
+
+    def load_configuration(configuration, model):
+        if "damaged" in str(configuration["fname"]):
+            raise ParseError("incomplete stream header")
+        model.load_data(raw_template.copy(), configuration["fname"])
+        model.current["source_streams"] = [_stream(1, "EEG", ["Fz"])]
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+    configurations = [{"fname": str(path)} for path in paths]
+
+    with (
+        patch("mnelab.mainwindow.read_settings", return_value=False),
+        patch("mnelab.mainwindow.QMessageBox.warning") as warning,
+    ):
+        MainWindow._merge_xdfs(window, configurations, skip_unreadable=True)
+
+    assert len(window.model) == 1
+    assert window.model.current["source_files"] == [
+        paths[0].resolve().as_posix(),
+        paths[2].resolve().as_posix(),
+    ]
+    assert window.model.current["data"].n_times == 20
+    assert "damaged.xdf" in warning.call_args.args[2]
+
+
+def test_merge_requires_two_readable_files(tmp_path):
+    """Skipping damage never turns a requested merge into a silent single import."""
+    valid = tmp_path / "valid.xdf"
+    damaged = tmp_path / "damaged.xdf"
+    valid.write_bytes(b"xdf")
+    damaged.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        if "damaged" in str(configuration["fname"]):
+            raise ParseError("incomplete stream header")
+        raw = mne.io.RawArray(
+            np.ones((1, 10)),
+            mne.create_info(["Fz"], 100, ["eeg"]),
+            verbose=False,
+        )
+        model.load_data(raw, configuration["fname"])
+        model.current["source_streams"] = [_stream(1, "EEG", ["Fz"])]
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with pytest.raises(XDFImportError, match="one readable file remains"):
+        MainWindow._merge_xdfs(
+            window,
+            [{"fname": str(valid)}, {"fname": str(damaged)}],
+            skip_unreadable=True,
+        )
+
+    assert len(window.model) == 0
+
+
+def test_merge_creates_one_dataset_per_time_group(tmp_path):
+    """Large chronological discontinuities produce independent merged datasets."""
+    paths = [tmp_path / name for name in ("first.xdf", "second.xdf", "third.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+    first_start = datetime(2026, 1, 1, tzinfo=UTC)
+    starts = {
+        str(paths[0]): first_start,
+        str(paths[1]): first_start + timedelta(seconds=1.05),
+        str(paths[2]): first_start + timedelta(seconds=450),
+    }
+
+    def load_configuration(configuration, model):
+        raw = _timed_raw(starts[str(configuration["fname"])])
+        model.load_data(raw, configuration["fname"])
+        model.current["source_streams"] = [_stream(1, "EEG", ["Fz"])]
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with (
+        patch("mnelab.mainwindow.read_settings", return_value=False),
+        patch("mnelab.mainwindow.QMessageBox.information") as information,
+    ):
+        MainWindow._merge_xdfs(
+            window,
+            [{"fname": str(path)} for path in reversed(paths)],
+            auto_order_by_time=True,
+            maximum_seam_difference=0.1,
+            split_on_time_discontinuities=True,
+        )
+
+    assert len(window.model) == 2
+    assert window.model.data[0]["source_files"] == [
+        paths[0].resolve().as_posix(),
+        paths[1].resolve().as_posix(),
+    ]
+    assert window.model.data[0]["is_xdf_merge"] is True
+    assert window.model.data[0]["data"].n_times == 20
+    assert window.model.data[1]["source_files"] == [paths[2].resolve().as_posix()]
+    assert window.model.data[1]["is_xdf_merge"] is False
+    assert window.model.data[1]["data"].n_times == 10
+    assert "Created 2 data sets" in information.call_args.args[2]
+
+
+def test_merge_unifies_same_stream_name_across_channel_union(tmp_path):
+    """Additional channels join their named stream and are NaN before they appear."""
+    first_path = tmp_path / "first.xdf"
+    second_path = tmp_path / "second.xdf"
+    first_path.write_bytes(b"xdf")
+    second_path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        if Path(configuration["fname"]) == first_path:
+            channels = ["Fz"]
+            values = np.ones((1, 10))
+        else:
+            channels = ["Fz", "frame_index-0"]
+            values = np.vstack((np.full(10, 2.0), np.full(10, 3.0)))
+        raw = mne.io.RawArray(
+            values,
+            mne.create_info(channels, 100, ["eeg", "misc"][: len(channels)]),
+            verbose=False,
+        )
+        model.load_data(raw, configuration["fname"])
+        model.current["source_streams"] = [_stream(1, "Capture", channels)]
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with (
+        patch("mnelab.mainwindow.read_settings", return_value=False),
+        patch("mnelab.mainwindow.QMessageBox.warning") as warning,
+    ):
+        MainWindow._merge_xdfs(
+            window,
+            [{"fname": str(first_path)}, {"fname": str(second_path)}],
+            allow_channel_union=True,
+        )
+
+    merged = window.model.current
+    assert merged["data"].ch_names == ["Fz", "frame_index-0"]
+    assert np.isnan(merged["data"].get_data(picks=["frame_index-0"])[:, :10]).all()
+    assert len(merged["source_streams"]) == 1
+    assert merged["source_streams"][0]["name"] == "Capture"
+    assert merged["source_streams"][0]["channel_names"] == [
+        "Fz",
+        "frame_index-0",
+    ]
+    assert "frame_index-0" in warning.call_args.args[2]

@@ -4,7 +4,7 @@
 
 import math
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import mne
 import numpy as np
@@ -38,6 +38,60 @@ def test_source_streams_follow_channel_edits(tmp_path):
 
     assert model.current["source_streams"][0]["channel_names"] == ["A1"]
     assert model.current["source_streams"][1]["channel_names"] == ["C"]
+
+
+def test_source_with_zero_remaining_channels_is_retained_as_removed(tmp_path):
+    """Picking all of a source's channels retains its identity in metadata."""
+    raw = mne.io.RawArray(
+        np.zeros((2, 20)),
+        mne.create_info(["A", "B"], 100, ["eeg", "misc"]),
+    )
+    path = tmp_path / "streams.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(
+        raw,
+        path,
+        source_streams=[
+            {"id": 1, "name": "EEG", "channel_names": ["A"]},
+            {"id": 2, "name": "Aux", "channel_names": ["B"]},
+        ],
+    )
+
+    model.pick_channels(["B"])
+
+    removed, active = model.current["source_streams"]
+    assert removed["id"] == 1
+    assert removed["channel_names"] == []
+    assert removed["removed_channel_names"] == ["A"]
+    assert removed["removed"] is True
+    assert removed["removal_reason"] == "all channels were removed"
+    assert active["channel_names"] == ["B"]
+
+
+def test_filter_falls_back_to_all_auxiliary_channels(tmp_path):
+    """Filtering retries with explicit picks for an auxiliary-only recording."""
+    raw = mne.io.RawArray(
+        np.zeros((1, 100)),
+        mne.create_info(["Aux"], 100, ["misc"]),
+        verbose=False,
+    )
+    path = tmp_path / "auxiliary.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    with patch.object(
+        raw,
+        "filter",
+        side_effect=[ValueError("picks (NoneNone) yielded no channels"), None],
+    ) as filter_mock:
+        model.filter(upper=30)
+
+    assert filter_mock.call_args_list == [
+        call(None, 30),
+        call(None, 30, picks="all"),
+    ]
 
 
 def test_memory_size_does_not_copy_data(model_with_data):

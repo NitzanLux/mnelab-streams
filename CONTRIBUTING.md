@@ -1,6 +1,11 @@
-## Contributing to MNELAB
+## Contributing to MNELAB Streams
 
-If you want to implement a new feature, fix an existing bug, or help improve MNELAB in any other way (such as adding or improving documentation), please consider submitting a [pull request](https://github.com/cbrnr/mnelab/pulls). It might be a good idea to open an [issue](https://github.com/cbrnr/mnelab/issues) first to discuss your planned contributions with the developers.
+If you want to implement a new feature, fix an existing bug, or improve the fork's
+documentation, submit a
+[pull request](https://github.com/NitzanLux/mnelab-streams/pulls). Consider opening an
+[issue](https://github.com/NitzanLux/mnelab-streams/issues) first for larger changes.
+Changes intended for the original project should instead go to
+[upstream MNELAB](https://github.com/cbrnr/mnelab).
 
 Before you start working on your contribution, please make sure to follow the guidelines described in this document.
 
@@ -12,22 +17,25 @@ We recommend using [uv](https://docs.astral.sh/uv/) to install and manage your P
 In addition to uv, you will also need a working [Git](https://git-scm.com/) installation. If you are on Windows, you can install [Git for Windows](https://gitforwindows.org/). If you are on macOS, you can install the XCode command line tools with `xcode-select --install`, which contain Git. On Linux, use your package manager to install Git.
 
 
-### Forking and cloning MNELAB
+### Forking and cloning MNELAB Streams
 
-On the [repository website](https://github.com/cbrnr/mnelab), click on the "Fork" button in the top right corner to create your own fork of MNELAB (you need to be logged in with your GitHub account). Next, from the main page of your fork, click on the green "Clone or download" button. Copy the URL to the clipboard – you will need this URL to create your local MNELAB repository.
+On the [repository website](https://github.com/NitzanLux/mnelab-streams), click the
+"Fork" button to create your own fork. Copy its clone URL.
 
-Open a terminal and change into the folder where you would like your MNELAB fork to live. Then, type `git clone <URL>` (replace `<URL>` with the repository URL you copied to the clipboard earlier). Your fork of MNELAB is now available in the `mnelab` folder.
+Open a terminal in the parent folder and run `git clone <URL>`. The project will be
+available in the `mnelab-streams` folder by default.
 
 
 ### Installing the project
 
-In a terminal, change to the `mnelab` folder containing your MNELAB fork and run the following command:
+In a terminal, change to the `mnelab-streams` folder and run:
 
 ```
 uv sync --locked --all-extras
 ```
 
-You can then run MNELAB with `uv run mnelab`, or run the tests with `uv run pytest`.
+You can then run the application with `uv run mnelab-streams`, or run the tests with
+`uv run pytest`.
 
 
 ### Creating a new branch
@@ -78,7 +86,8 @@ MNELAB uses [Ruff](https://docs.astral.sh/ruff/formatter/) for formatting. Becau
 
 ## Making a PyPI release
 
-Follow these steps to make a new [PyPI](https://pypi.org/project/mnelab/) release (requires write permissions for GitHub and PyPI project sites):
+Follow these steps to make a new `mnelab-streams` PyPI release (requires write
+permissions for the fork's GitHub repository and PyPI project):
 
 1. Run `uv run tools/release.py prepare X.Y.Z` (with the version to be released). This removes the `.dev0` suffix from the `version` field in `pyproject.toml`, updates the `## [UNRELEASED]` heading in `CHANGELOG.md` with the version and today's date, updates the standalone installer URLs in `README.md` and `docs/quickstart/index.md`, and runs `uv lock`.
 2. Review the resulting changes, then commit and push them.
@@ -117,7 +126,10 @@ To create the app bundle, run the following command in the `standalone` folder:
 ./create-standalone-macos.py build-app
 ```
 
-This creates the app bundle in the `standalone/dist` folder, which can then be signed and notarized. Once the notarization ticket is stapled to the app bundle, you can create a DMG file (which is named `MNELAB-<VERSION>.dmg`) as follows:
+This creates `MNELAB-Streams.app` in `standalone/dist`. The checked-in workflow creates
+an unsigned build; configure and use the fork maintainer's own Apple signing and
+notarization credentials before distributing a notarized release. Create the
+`MNELAB-Streams-<VERSION>.dmg` file as follows:
 
 ```
 ./create-standalone-macos.py build-dmg
@@ -152,7 +164,7 @@ On Windows, download and install [Inno Setup](https://jrsoftware.org/isinfo.php)
 .\create-standalone-windows.ps1
 ```
 
-This will produce a single `mnelab-<VERSION>.exe` installer in the `standalone` folder, which can be distributed to Windows users.
+This produces `MNELAB-Streams-<VERSION>.exe` in the `standalone` folder.
 
 
 #### Creating the app icon

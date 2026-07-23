@@ -1,5 +1,7 @@
-# MNELAB
+# MNELAB Streams
 
-![MNELAB screenshots](https://raw.githubusercontent.com/cbrnr/mnelab/main/mnelab.png)
+![MNELAB Streams screenshot](../mnelab.png)
 
-MNELAB is a graphical user interface for [MNE-Python](https://mne.tools/stable/index.html) (the most popular Python package for EEG/MEG analysis).
+MNELAB Streams is an independent, source-aware XDF and signal review fork of
+[MNELAB](https://github.com/cbrnr/mnelab), a graphical user interface for
+[MNE-Python](https://mne.tools/stable/index.html).

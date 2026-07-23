@@ -72,7 +72,11 @@ def test_multiple_viewers_share_bad_channel_state(qtbot, tmp_path):
     window.plot_data()
     first, second = window._stream_viewers
 
-    first.panels[0].channel_list.itemClicked.emit(first.panels[0].channel_list.item(0))
+    menu = first.panels[0].create_channel_context_menu("EEG")
+    mark_bad = next(
+        action for action in menu.actions() if action.text() == "Mark as Bad"
+    )
+    mark_bad.trigger()
 
     assert raw.info["bads"] == ["EEG"]
     assert second.panels[0].channel_list.item(0).font().strikeOut()

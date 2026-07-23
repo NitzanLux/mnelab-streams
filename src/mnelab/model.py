@@ -23,6 +23,7 @@ from mnextend import (
 from mnextend.io.readers import raw_readers
 
 from mnelab.utils import Montage, count_locations
+from mnelab.xdf import write_xdf
 
 
 class LabelsNotFoundError(Exception):
@@ -45,6 +46,72 @@ def _data_nbytes(data):
     """Return in-memory data size without copying preloaded arrays."""
     array = getattr(data, "_data", None)
     return array.nbytes if array is not None else data.get_data().nbytes
+
+
+def _effective_streams(data, streams):
+    """Return stored streams or the channel-type decomposition used by the viewer."""
+    if streams:
+        return deepcopy(streams), False
+
+    grouped = {}
+    for index, name in enumerate(data.ch_names):
+        kind = mne.channel_type(data.info, index)
+        grouped.setdefault(kind, []).append(name)
+    inferred = [
+        {
+            "id": f"type:{kind}",
+            "name": kind.upper(),
+            "type": kind,
+            "channel_names": names,
+            "channel_format": None,
+            "nominal_srate": data.info["sfreq"],
+        }
+        for kind, names in grouped.items()
+    ]
+    return inferred, True
+
+
+def _format_stream_info(data, streams):
+    """Format stream properties for the main information view."""
+    streams, inferred = _effective_streams(data, streams)
+    if not streams:
+        return "–"
+
+    active = sum(not stream.get("removed", False) for stream in streams)
+    removed = len(streams) - active
+    summary = f"{active}"
+    if inferred:
+        summary += " (automatic by channel type)"
+    elif removed:
+        summary += f" active, {removed} removed"
+
+    details = []
+    for stream in streams:
+        name = str(stream.get("name") or "Unnamed")
+        stream_type = str(stream.get("type") or "Data")
+        count = len(stream.get("channel_names", []))
+        channel_word = "channel" if count == 1 else "channels"
+        count_text = f"{count} {channel_word}"
+        declared = stream.get("declared_channel_count")
+        if declared is not None and declared != count:
+            count_text += f" ({declared} declared)"
+        properties = [stream_type, count_text]
+        rate = stream.get("nominal_srate")
+        if rate is not None:
+            try:
+                rate_text = f"{float(rate):.6g}"
+            except (TypeError, ValueError):
+                rate_text = str(rate)
+            properties.append(f"{rate_text} Hz")
+        channel_format = stream.get("channel_format")
+        if channel_format:
+            properties.append(str(channel_format))
+        if not inferred and stream.get("id") is not None:
+            properties.append(f"ID {stream['id']}")
+        if stream.get("removed"):
+            properties.append(f"removed: {stream.get('removal_reason', 'unavailable')}")
+        details.append(f"{name} — " + " · ".join(properties))
+    return "\n".join([summary, *details])
 
 
 def data_changed(_func=None, *, invalidate_cache=True):
@@ -228,7 +295,15 @@ class Model:
             self.index = len(self.data) - 1
 
     @data_changed(invalidate_cache=False)
-    def load_data(self, data, fname, name=None, source_streams=None):
+    def load_data(
+        self,
+        data,
+        fname,
+        name=None,
+        source_streams=None,
+        source_files=None,
+        is_xdf_merge=False,
+    ):
         """Load a Raw or Epochs object as a new dataset.
 
         Parameters
@@ -241,9 +316,19 @@ class Model:
             Custom name for the dataset. If None, uses the filename.
         source_streams : list of dict | None
             Ordered source-stream metadata used by the stream viewer.
+        source_files : list of str | None
+            All source paths when one data set was assembled from multiple files.
+        is_xdf_merge : bool
+            Whether the dataset was created by merging multiple XDF recordings.
         """
         fname = str(Path(fname).resolve().as_posix())
-        fsize = getsize(fname) / 1024**2  # convert to MB
+        if source_files is None:
+            source_files = [fname]
+        else:
+            source_files = [
+                str(Path(path).resolve().as_posix()) for path in source_files
+            ]
+        fsize = sum(getsize(path) for path in source_files) / 1024**2
         if name is None:
             name, ext = split_name_ext(fname, raw_readers)
         else:
@@ -276,6 +361,8 @@ class Model:
                 events=events,
                 event_mapping=event_mapping,
                 source_streams=deepcopy(source_streams),
+                source_files=source_files,
+                is_xdf_merge=bool(is_xdf_merge),
                 _cache_path=None,
             )
         )
@@ -396,6 +483,17 @@ class Model:
             write_epochs(fname, self.current["data"])
         else:
             write_raw(fname, self.current["data"])
+
+    def export_xdf(self, fname):
+        """Export a merged raw XDF dataset while retaining stream entities."""
+        if not self.current["is_xdf_merge"]:
+            raise ValueError("Only a merged XDF dataset can use merged XDF export.")
+        write_xdf(
+            fname,
+            self.current["data"],
+            self.current["source_streams"],
+            source_file_count=len(self.current["source_files"]),
+        )
 
     def export_bads(self, fname):
         """Export bad channels info to a CSV file."""
@@ -674,9 +772,19 @@ class Model:
             "File Name": fname if fname else "–",
             "File Type": ftype.removesuffix(".GZ") if ftype else "–",
             "Data Type": dtype,
+            **(
+                {
+                    "Merged XDF": (
+                        f"Yes ({len(self.current['source_files'])} source files)"
+                    )
+                }
+                if self.current["is_xdf_merge"]
+                else {}
+            ),
             "Size on Disk": size_disk,
             "Size in Memory": f"{_data_nbytes(data) / 1024**2:.2f}\u2009MB",
             "Channels": f"{nchan} (" + chans + ")",
+            "Streams": _format_stream_info(data, self.current["source_streams"]),
             "Samples": samples,
             "Sampling Frequency": f"{fs:.6g}\u2009Hz",
             "Length": length,
@@ -687,6 +795,40 @@ class Model:
             "ICA": ica,
         }
 
+    @data_changed(invalidate_cache=False)
+    def set_streams(self, streams):
+        """Set an ordered, exhaustive channel-to-stream decomposition."""
+        descriptors = deepcopy(list(streams))
+        active_channels = []
+        ids = []
+        for index, stream in enumerate(descriptors):
+            name = str(stream.get("name") or "").strip()
+            stream_id = stream.get("id", f"manual:{index + 1}")
+            channels = list(stream.get("channel_names", []))
+            if not name:
+                raise ValueError("Every stream must have a name.")
+            stream["id"] = stream_id
+            stream["name"] = name
+            stream["type"] = str(stream.get("type") or "Data")
+            stream["channel_names"] = channels
+            ids.append(stream_id)
+            if not stream.get("removed"):
+                if not channels:
+                    raise ValueError(f'Stream "{name}" has no channels.')
+                active_channels.extend(channels)
+
+        if not descriptors:
+            raise ValueError("At least one stream is required.")
+        if len(set(ids)) != len(ids):
+            raise ValueError("Stream identifiers must be unique.")
+        if len(active_channels) != len(set(active_channels)):
+            raise ValueError("A channel cannot belong to more than one stream.")
+        if set(active_channels) != set(self.current["data"].ch_names):
+            raise ValueError("Every current channel must belong to exactly one stream.")
+
+        self.current["source_streams"] = descriptors
+        self.history.append(f"source_streams = {descriptors!r}")
+
     @data_changed
     def pick_channels(self, picks):
         self.current["data"] = self.current["data"].pick(picks)
@@ -694,12 +836,21 @@ class Model:
         if source_streams:
             live_channels = set(self.current["data"].ch_names)
             for stream in source_streams:
+                previous_channels = list(stream["channel_names"])
                 stream["channel_names"] = [
-                    name for name in stream["channel_names"] if name in live_channels
+                    name for name in previous_channels if name in live_channels
                 ]
-            self.current["source_streams"] = [
-                stream for stream in source_streams if stream["channel_names"]
-            ]
+                removed_channels = [
+                    name for name in previous_channels if name not in live_channels
+                ]
+                if removed_channels:
+                    known_removed = list(stream.get("removed_channel_names", []))
+                    stream["removed_channel_names"] = list(
+                        dict.fromkeys(known_removed + removed_channels)
+                    )
+                if not stream["channel_names"]:
+                    stream["removed"] = True
+                    stream.setdefault("removal_reason", "all channels were removed")
         self.current["name"] += " (channels picked)"
         self.history.append(f"data.pick({picks})")
 
@@ -775,24 +926,66 @@ class Model:
             self.current["iclabel"] = None
 
     @data_changed
-    def filter(self, lower=None, upper=None, notch=None):
+    def filter(self, lower=None, upper=None, notch=None, stream_filters=None):
         """Apply filters to the current data based on provided parameters."""
-        if lower is not None and upper is not None:  # bandpass filter
-            self.current["data"].filter(lower, upper)
-            self.current["name"] += f" ({lower}-{upper}\u2009Hz)"
-            self.history.append(f"data.filter({lower}, {upper})")
-        elif lower is not None:  # highpass filter
-            self.current["data"].filter(lower, None)
-            self.current["name"] += f" (>{lower}\u2009Hz)"
-            self.history.append(f"data.filter({lower}, None)")
-        elif upper is not None:  # lowpass filter
-            self.current["data"].filter(None, upper)
-            self.current["name"] += f" (<{upper}\u2009Hz)"
-            self.history.append(f"data.filter(None, {upper})")
-        elif notch is not None:  # notch filter
-            self.current["data"].notch_filter(notch)
-            self.current["name"] += f" (notch {notch}\u2009Hz)"
-            self.history.append(f"data.notch_filter({notch})")
+        data = self.current["data"]
+
+        def apply_filter(method, *args, picks=None):
+            kwargs = {} if picks is None else {"picks": picks}
+            try:
+                method(*args, **kwargs)
+            except ValueError as error:
+                if picks is not None or "yielded no channels" not in str(error):
+                    raise
+                # MNE's default picks omit auxiliary types such as ``misc``.
+                # Explicitly include them when the recording has no standard
+                # physiological data channels.
+                method(*args, picks="all")
+
+        def filter_one(lower, upper, notch, picks=None):
+            picks_kwarg = "" if picks is None else f", picks={picks!r}"
+            if lower is not None and upper is not None:  # bandpass filter
+                apply_filter(data.filter, lower, upper, picks=picks)
+                self.history.append(f"data.filter({lower}, {upper}{picks_kwarg})")
+                return f"{lower}-{upper}\u2009Hz"
+            if lower is not None:  # highpass filter
+                apply_filter(data.filter, lower, None, picks=picks)
+                self.history.append(f"data.filter({lower}, None{picks_kwarg})")
+                return f">{lower}\u2009Hz"
+            if upper is not None:  # lowpass filter
+                apply_filter(data.filter, None, upper, picks=picks)
+                self.history.append(f"data.filter(None, {upper}{picks_kwarg})")
+                return f"<{upper}\u2009Hz"
+            if notch is not None:  # notch filter
+                apply_filter(data.notch_filter, notch, picks=picks)
+                self.history.append(f"data.notch_filter({notch}{picks_kwarg})")
+                if isinstance(notch, (list, tuple, np.ndarray)):
+                    notch_text = ", ".join(str(frequency) for frequency in notch)
+                else:
+                    notch_text = str(notch)
+                return f"notch {notch_text}\u2009Hz"
+            return None
+
+        if stream_filters is None:
+            description = filter_one(lower, upper, notch)
+            if description is not None:
+                self.current["name"] += f" ({description})"
+            return
+
+        applied = []
+        for stream_filter in stream_filters:
+            description = filter_one(
+                stream_filter.get("lower"),
+                stream_filter.get("upper"),
+                stream_filter.get("notch"),
+                picks=list(stream_filter["picks"]),
+            )
+            if description is not None:
+                applied.append(
+                    f"{stream_filter.get('stream_name', 'Data')}: {description}"
+                )
+        if applied:
+            self.current["name"] += " (filtered per stream)"
 
     @data_changed
     def resample(self, sfreq):

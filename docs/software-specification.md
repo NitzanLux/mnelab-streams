@@ -1,9 +1,9 @@
-# MNELAB Current Software Specification
+# MNELAB Streams Current Software Specification
 
 | Field | Value |
 | --- | --- |
-| Product | MNELAB |
-| Repository version | `1.6.0.dev0` |
+| Product | MNELAB Streams |
+| Repository version | `0.1.0` |
 | Specification status | Current implementation baseline |
 | Baseline date | 2026-07-21 |
 | License | BSD 3-Clause |
@@ -22,10 +22,10 @@ an intentional boundary or current limitation.
 
 ## 2. Product definition
 
-MNELAB is a local, cross-platform desktop GUI for loading, inspecting, transforming,
-visualizing, and exporting MNE-Python-compatible neurophysiology data. It exposes
-common analysis operations without requiring users to write Python, while recording
-the corresponding Python/MNE operations in an executable command history.
+MNELAB Streams is a local, cross-platform desktop GUI for loading, inspecting,
+transforming, visualizing, and exporting MNE-Python-compatible neurophysiology data.
+It exposes common analysis operations without requiring users to write Python, while
+recording the corresponding Python/MNE operations in an executable command history.
 
 The primary user is a researcher or analyst working interactively with continuous
 recordings (`Raw`) or epoched recordings (`Epochs`). The software is not a data
@@ -59,7 +59,7 @@ acquisition system, a cloud service, or a clinical diagnostic device.
 | GUI toolkit | PySide6 / Qt 6 |
 | Core scientific layer | MNE-Python, MNExtend, NumPy, and SciPy |
 | Plotting | PyQtGraph and Matplotlib; MNE Qt Browser is optional |
-| Packaging | `uv_build`; GUI entry point is `mnelab = mnelab:main` |
+| Packaging | `uv_build`; distribution and GUI command are `mnelab-streams`; the import package remains `mnelab` |
 
 Required package floors are declared in `pyproject.toml`: MNE 1.12.1, MNExtend 0.2.2,
 NumPy 2.4.4, SciPy 1.17.1, Matplotlib 3.10.8, PyQtGraph 0.13.7, PySide6 6.11.0,
@@ -74,7 +74,7 @@ From the repository root:
 
 ```powershell
 uv sync --locked --all-extras
-uv run mnelab
+uv run mnelab-streams
 ```
 
 The equivalent module entry point is:
@@ -86,19 +86,20 @@ uv run python -m mnelab
 One or more file paths may be supplied as command-line arguments. The application
 shall attempt to open each argument after the main window is created.
 
-`uvx mnelab` runs an isolated packaged copy from uv's tool cache; it does not guarantee
+`uvx mnelab-streams` runs an isolated packaged copy from uv's tool cache; it does not
+guarantee
 that the current checkout is being executed. Development and verification of local
-changes shall therefore use `uv run mnelab` or `uv run python -m mnelab`.
+changes shall therefore use `uv run mnelab-streams` or `uv run python -m mnelab`.
 
-At startup, MNELAB selects Matplotlib's Qt backend, enables multiprocessing support,
-creates one `QApplication`, and uses Qt's Fusion style on Windows. Frozen builds also
-configure a reusable Matplotlib cache. Development runs install a SIGINT handler so
-terminal interruption can stop the application.
+At startup, MNELAB Streams selects Matplotlib's Qt backend, enables multiprocessing
+support, creates one `QApplication`, and uses Qt's Fusion style on Windows. Frozen
+builds also configure a reusable Matplotlib cache. Development runs install a SIGINT
+handler so terminal interruption can stop the application.
 
 ## 4. System architecture
 
-MNELAB is a single-process desktop application, with bounded background work or a
-single worker process used for selected expensive calculations.
+MNELAB Streams is a single-process desktop application, with bounded background work
+or a single worker process used for selected expensive calculations.
 
 ```text
 Application entry point
@@ -115,7 +116,9 @@ MainWindow (menus, dialogs, dataset tree, information panel)
         |        +---- annotation browser and annotation lane
         |        +---- asynchronous activation overview
         |
-        +---- MNE/Matplotlib or MNE Qt Browser for Epochs and scientific plots
+        +---- PSDViewerWindow for source-oriented PyQtGraph spectra
+        |
+        +---- MNE/Matplotlib or MNE Qt Browser for Epochs and other scientific plots
 ```
 
 ### 4.1 Main application components
@@ -128,6 +131,7 @@ MainWindow (menus, dialogs, dataset tree, information panel)
 | Dialog modules | Validated user input for individual workflows |
 | `StreamViewerWindow` | Responsive synchronized raw-data display and display-montage lifecycle |
 | `StreamPanel` | One or more source streams, channel paging, scale, overlays, and per-channel display state |
+| `PSDViewerWindow` | Source-oriented, paged, interactive power spectral density display |
 | `AnnotationSidebar` | Whole-recording annotation list, text/regex filtering, and navigation |
 | `ActivationMapWindow` | Whole-recording, per-source relative RMS overview |
 | `settings` | Typed persistent application preferences in an INI file |
@@ -161,6 +165,8 @@ of its parent. A dataset contains at least the following logical fields:
 | `montage` | Sensor/channel-location montage metadata |
 | `events`, `event_mapping` | Event array and optional numeric-to-text mapping |
 | `source_streams` | Ordered source descriptors, principally from XDF |
+| `source_files` | Ordered original paths when one dataset merges several files |
+| `is_xdf_merge` | Whether multiple XDF recordings formed the dataset |
 | `ica`, `iclabel` | Fitted ICA object and optional component-label probabilities |
 | `reference` | Current reference description |
 | `_cache_path` | Temporary FIFF path used by memory-saving mode |
@@ -229,7 +235,7 @@ remembered.
 
 | Menu | Current commands |
 | --- | --- |
-| File | Open; Open Recent; Close; Close All; format-specific Export; Show XDF Metadata; Inspect XDF Chunks; Settings; Quit |
+| File | Open; Open XDF Folder; Open Recent; Close; Close All; format-specific Export; Show XDF Metadata; Inspect XDF Chunks; Settings; Quit |
 | Channels | Pick Channels; Rename Channels; Channel Properties; Set Montage; Change Reference; Import/Export Bad Channels; Interpolate Bad Channels; Channel Statistics |
 | Markers | Edit Annotations; Annotation Colors; Import/Export Annotations; Edit Events; Import/Export Events; Find Events; Events from Annotations; Annotations from Events |
 | Plot | Data; Power Spectral Density; Channel Locations; ERDS Maps; ERDS Topomaps; Evoked; Evoked Comparison; Evoked Topomaps; ICA Components; ICA Sources |
@@ -298,6 +304,38 @@ The XDF selection dialog shall show every stream's ID, name, type, channel count
 channel format, and nominal sampling rate. Numeric data streams and string marker
 streams shall be selectable in the same table.
 
+- Selecting multiple XDF files shall open an ordering dialog offering either separate
+  datasets or sequential concatenation into one dataset. Concatenation requires equal
+  channel identities, channel types, and sampling frequencies, reorders identical
+  channel sets safely, and inserts boundary annotations between recordings.
+- Folder import shall recursively include all `.xdf`, `.xdfz`, and `.xdf.gz` files.
+- Automatic ordering shall use absolute recording datetimes from the XDF headers. The
+  user shall configure a maximum allowed gap or overlap at each seam. A recording with
+  no absolute datetime shall stop the atomic import. A seam outside the tolerance shall
+  either stop the import or begin a separately inserted time-contiguous dataset,
+  according to the selected policy.
+- Streams whose names match case-insensitively across source files shall become one
+  source-stream descriptor containing their shared channels and per-file stream IDs.
+- When heterogeneous-channel merging is enabled, each time group shall use the ordered
+  union of its channel names. A channel absent from a source recording shall contain
+  `NaN` over that recording's interval, and the application shall report every such
+  file/channel addition. Shared channel names must retain the same channel type.
+- Duplicate channel-label families belonging to differently named XDF streams shall be
+  qualified with their stream name before alignment. This stream-qualified identity
+  shall remain stable if stream order and PyXDF's numeric duplicate suffixes differ
+  between files; differently named streams remain separate entities.
+- Batch merging shall offer to skip files whose metadata inspection or full loading
+  fails, list every omission and reason, and require at least two readable files before
+  inserting the merged dataset. Compatibility and seam failures remain merge errors.
+- A dataset assembled from at least two XDF files shall show a merge icon and source
+  count in the sidebar and information panel. A time-split group containing only one
+  source file shall not be marked as merged.
+- A merged raw XDF dataset shall expose an XDF save action. The resulting XDF 1.0 file
+  shall retain every active, differently named source entity as a separate numeric
+  stream, use the current common sampling grid and double-precision values so `NaN`
+  padding remains representable, and store annotations as an irregular string marker
+  stream. The writer shall validate exhaustive channel ownership before touching the
+  destination and replace the destination atomically.
 - At least one numeric data stream is required.
 - Selected marker streams shall be converted to annotations.
 - Marker descriptions may be prefixed with stream IDs when more than one marker stream
@@ -315,12 +353,14 @@ streams shall be selectable in the same table.
   names.
 - The application shall provide separate dialogs for full XDF XML metadata and physical
   chunk inspection.
+- Malformed or incomplete XDF XML shall produce a file-specific error dialog rather
+  than an uncaught parser traceback.
 
 ### 7.3 Data export formats
 
 | Data type | Formats |
 | --- | --- |
-| Raw | BDF, EDF, BrainVision, FIFF/FIFF.GZ, EEGLAB |
+| Raw | BDF, EDF, BrainVision, FIFF/FIFF.GZ, EEGLAB; XDF for merged XDF datasets |
 | Epochs | FIFF/FIFF.GZ, EEGLAB |
 
 If the user omits an extension, MNELAB shall append the default extension. If the
@@ -361,6 +401,13 @@ Channel selection and renaming shall update stored XDF/source-stream membership 
 raw viewer retains correct source grouping. Added reference channels shall be placed in
 a synthetic `Derived` source when source descriptors exist.
 
+The main menu shall place **Streams** between **File** and **Channels**. It shall let
+users split channels into individual streams and edit each stream's name, type, channel
+membership, sample format, and nominal sampling rate. An accepted decomposition must
+assign every current channel to exactly one active stream. The main information view
+shall summarize all streams and expose these properties, including retained removed
+sources.
+
 ### 8.2 Sensor montage
 
 **Channels > Set Montage** controls scientific channel locations. It shall offer MNE's
@@ -400,6 +447,15 @@ annotations rather than silently replace them.
 ### 10.1 Filtering and time operations
 
 - Low-pass, high-pass, band-pass, and notch filters shall be available.
+- Filtering shall use the same ordered source-stream groups as the raw-data viewer.
+  Each stream can be filtered independently or left unchanged. Within an enabled
+  stream, checkable channel targets and a current-target summary shall make the exact
+  filter scope visible before processing. Cutoff controls shall not exceed half of
+  that stream's nominal sampling rate.
+- Notch filters shall optionally include every integer harmonic of the selected
+  fundamental frequency that remains strictly below the target stream's Nyquist
+  frequency. The expanded frequency list and selected channel picks shall be retained
+  in processing history.
 - Cutoff values must be positive; a band-pass upper cutoff must exceed its lower
   cutoff. The UI steps in 0.5 Hz increments.
 - Resampling shall accept 0.1-1,000,000 Hz and rely on MNE's anti-alias filtering.
@@ -409,7 +465,33 @@ annotations rather than silently replace them.
   sampling rate, high/low-pass metadata, and relevant calibration/epoch geometry are
   compatible. Epoch compatibility also requires identical `tmin`, `tmax`, and baseline.
 
-### 10.2 ICA
+### 10.2 Filter presets
+
+The **Filter Data** dialog shall provide **Load Preset** and **Save Preset** actions for
+reusable scientific filter settings. Filter presets are separate from display montages:
+loading one only populates the dialog for review and shall never process data until the
+user accepts the dialog.
+
+A filter preset is a UTF-8 JSON object with the format marker
+`mnelab-filter-preset`, version `1`, and one entry per source stream. Each stream entry
+contains its name, type, complete channel-name membership, and either `null` for a
+disabled stream or one semantic low-pass, high-pass, band-pass, or notch specification.
+Enabled filters store their targeted channel names; notch filters store the fundamental
+frequency and whether harmonics up to Nyquist are requested rather than storing an
+expanded frequency list. Dialog layout details such as the panel column count are not
+part of the preset.
+
+Loading shall be transactional and require an exact one-to-one match of stream name,
+type, and channel membership. Stream and channel order may differ. Missing, additional,
+or ambiguous streams and channels shall reject the complete preset rather than apply a
+partial match. Frequencies shall be finite, positive, and compatible with the target
+stream's current Nyquist limit; notch harmonics are recalculated for that target stream.
+Malformed, unsupported, or incompatible presets shall leave the dialog unchanged.
+
+Saving shall require at least one enabled valid filter, use an atomic file replacement,
+and append `.json` when the chosen filename has no suffix.
+
+### 10.3 ICA
 
 Infomax shall always be available. Picard and FastICA shall appear only when their
 optional dependencies are installed. The run dialog shall expose method-specific
@@ -425,7 +507,7 @@ Current implementation note: the ICA dialog displays a number-of-components cont
 but the run path currently creates `mne.preprocessing.ICA` without passing that value.
 The fitted component count is therefore determined by MNE's current defaults.
 
-### 10.3 Epochs and artifacts
+### 10.4 Epochs and artifacts
 
 - Creating epochs requires raw events and at least one selected event type.
 - The default interval is -0.2 to 0.5 s, with optional baseline correction defaulting
@@ -444,6 +526,11 @@ The fitted component count is therefore determined by MNE's current defaults.
 MNELAB shall provide power spectral density, channel-location, ICA-component,
 ICA-source, ERDS, ERDS topomap, evoked-channel, evoked-comparison, and evoked-topomap
 views when their data prerequisites are met.
+
+The power spectral density viewer shall preserve the ordered source-stream panel
+model used for raw data. It shall offer fitted stacked channel lanes and a per-stream
+channel overlay; overlay mode shall use a numeric PSD-amplitude y-axis in the selected
+dB or linear power scale.
 
 Epoch browsing uses MNE's configured Matplotlib or optional Qt browser backend. The
 settings determine the default number of displayed epochs and channels and whether
@@ -511,7 +598,7 @@ Keyboard commands are:
 
 ### 12.4 Units and amplitude
 
-Each panel shall provide a unit family appropriate to its channels:
+Each panel shall provide a default unit family appropriate to its channels:
 
 - voltage: Auto, V, mV, µV, nV, Raw;
 - magnetic field: Auto, T, mT, µT, nT, pT, fT, Raw;
@@ -520,6 +607,12 @@ Each panel shall provide a unit family appropriate to its channels:
 - conductance: Auto, S, mS, µS, Raw;
 - temperature: Auto, °C, Raw; and
 - unknown/raw: Auto or Raw.
+
+Each channel may override the panel default from its **Edit Channel Display** dialog.
+Known physical families provide scaled unit choices. Raw/unknown channels additionally
+offer common IMU and sensor labels, and accept a custom unit label without applying an
+unknown conversion. Per-channel units shall be used in cursor values, statistics,
+scale readouts, and saved display montages.
 
 Panel amplitude is a display-only multiplier from 0.001x through 1000x. Step buttons
 and keyboard changes use a factor of 1.25. The scale readout shall report the signal
@@ -536,8 +629,13 @@ panel amplitude setting.
 
 Right-clicking a channel row shall expose:
 
+- view channel information, including its type, source, sampling rate, status, and
+  current trace visibility;
+- view EDFbrowser-style statistics for the current time window: sample count, sum,
+  mean, RMS, mean rectified signal, zero crossings, and estimated frequency;
 - show/hide trace;
 - increase/decrease, fit, or enter its amplitude multiplier;
+- select an individual display unit or inherit the panel default;
 - enter a vertical visual offset from -1 to +1 channel lanes;
 - enable **Zero Offset (Remove DC)**;
 - select a trace color or return to automatic color;
@@ -561,8 +659,9 @@ modifies, filters, or writes the underlying MNE data.
 - Annotations shall appear as colored regions in every signal panel and in a dedicated
   150-pixel-high annotation lane below the panel area.
 - Zero-duration annotations shall receive a minimum visible width of one sample.
-- Annotation descriptions shall remain horizontal, wrap to the available plot/region
-  width, and be clipped within the plot rather than extending the window width.
+- Annotation descriptions shall appear only in the dedicated annotation lane. They
+  shall remain horizontal, wrap to the available region width, and be clipped within
+  the plot rather than extending the window width.
 - Global annotation colors from application settings shall be honored; otherwise the
   viewer uses its default annotation color.
 
@@ -571,7 +670,8 @@ modifies, filters, or writes the underlying MNE data.
 The right-side **Annotations** dock shall be closable/collapsible, movable between the
 left and right dock areas, and floatable. It shall list all recording annotations in
 chronological order with onset, description, optional duration, and a count of visible
-versus total records. Selecting an item shall center its onset in the shared viewer.
+versus total records. Selecting an item shall center its onset in the shared viewer;
+clicking an annotation in the dedicated lane shall highlight and reveal its list item.
 
 Filtering shall support:
 
@@ -580,7 +680,7 @@ Filtering shall support:
 - a **Regex** mode using a case-insensitive Python regular expression;
 - **Invert** to negate valid type/text matches; and
 - **Apply filter to plots** to choose whether the same filter hides annotation regions
-  and labels in signal/annotation plots.
+  in signal plots and annotation regions and labels in the dedicated lane.
 
 An invalid regular expression shall not crash or propagate an exception. The list
 shall become empty, the UI shall show `Invalid regex: <reason>`, and the text field
@@ -604,6 +704,22 @@ source stream and no merging caused by the current panel layout.
   shall center the raw viewer there.
 - Worker errors shall be shown in the child window, and pressing **Activation Map**
   again shall retry after a failure.
+
+### 12.9 Power spectral density viewer
+
+Power spectral density shall open in an MNELAB-native PyQtGraph window rather than a
+Matplotlib figure. It shall reuse the raw viewer's visual organization where applicable:
+
+- one panel per XDF source, or per MNE channel type when source metadata is unavailable;
+- a clickable channel list, configured channel-page size, colored fitted lanes, and red
+  strikeout styling for included bad channels;
+- adjustable panel columns, per-panel and global frequency-range reset controls, and
+  interactive frequency zooming and panning; and
+- a shared choice between decibel and linear power display.
+
+NaN-padded streams shall be estimated independently over their finite spans without
+interpolating across gaps. Channels with no finite samples shall be omitted. Timeline,
+event, and annotation controls do not apply in frequency space and shall not be shown.
 
 ## 13. Display montage lifecycle
 
@@ -673,6 +789,8 @@ leave the current layout usable. Validation shall require:
 
 - A new viewer shall establish its initial layout as a clean baseline.
 - A successfully loaded or saved display montage shall become the new clean baseline.
+- Restoring the viewer's initial default montage shall also be considered clean, even
+  when the last loaded or saved montage was different.
 - Loading a montage and making no captured change shall not produce a save question on
   close.
 - Closing a visible viewer with captured changes shall offer **Save**, **Discard**, and
@@ -688,7 +806,8 @@ the display montage dirty.
 
 ## 14. Preferences and persistence
 
-Preferences shall be stored through `QSettings` in `mnelab.ini` beneath Qt's per-user
+Preferences shall be stored through `QSettings` in `mnelab-streams.ini` beneath Qt's
+per-user
 application configuration location.
 
 | Setting | Default | User-facing range or behavior |

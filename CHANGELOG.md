@@ -1,8 +1,23 @@
 ## [UNRELEASED] · YYYY-MM-DD
+### ✨ Added
+- Add file- and folder-based multi-XDF import with time-based dataset splitting, NaN-aligned channel unions, stream-qualified duplicate labels, same-name stream unification, and optional skipping of damaged files (by [NitzanLux](https://github.com/NitzanLux))
+- Mark merged XDF datasets in the sidebar and information panel, and allow them to be saved as a single XDF while retaining distinct source-stream entities (by [NitzanLux](https://github.com/NitzanLux))
+- Allow each stream-viewer channel to use its own display unit, including custom IMU
+  and sensor unit labels, with persistence in display montages
+- Add reusable JSON filter presets for per-stream filter operations and channel targets
+
 ### 🔧 Fixed
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
+- Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Rename the independent distribution and application to MNELAB Streams, retain the
+  upstream BSD license and import namespace, and separate fork metadata and release
+  identity from upstream (by [NitzanLux](https://github.com/NitzanLux))
+- Add main-window stream splitting and property editing, and show source-stream properties in the dataset information view (by [NitzanLux](https://github.com/NitzanLux))
+- Improve the stream viewer with independent lane fitting, per-channel information and current-window statistics, labeled trace annotations, drag-to-swap panels, and retained metadata for removed sources (by [NitzanLux](https://github.com/NitzanLux))
+- Display power spectral density in a native source-oriented PyQtGraph viewer with stacked-lane and numeric-amplitude overlay modes (by [NitzanLux](https://github.com/NitzanLux))
+- Configure filters independently per source stream and selected channels, show each filter's current targets, support Nyquist-bounded notch harmonics, and limit each stream to its own Nyquist frequency (by [NitzanLux](https://github.com/NitzanLux))
 - Use MNEXTEND's `resolve_streams()` and `read_bvrf_header()` instead of depending on PyXDF and PyBVRF directly ([#679](https://github.com/cbrnr/mnelab/pull/679) by [Clemens Brunner](https://github.com/cbrnr))
 
 ### 🗑️ Removed

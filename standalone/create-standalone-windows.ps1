@@ -4,7 +4,9 @@ pyinstaller `
     --collect-all sklearn `
     --collect-all mne_qt_browser `
     --collect-all pybvrf `
-    --name MNELAB `
+    --add-data "..\LICENSE;." `
+    --add-data "..\NOTICE;." `
+    --name MNELAB-Streams `
     --windowed `
     --noupx `
     --clean `
