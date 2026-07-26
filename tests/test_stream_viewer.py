@@ -9,9 +9,9 @@ import mne
 import numpy as np
 import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QPointF, Qt
+from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QMessageBox
+from PySide6.QtWidgets import QDockWidget, QMessageBox
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
@@ -165,6 +165,103 @@ def test_default_panels_follow_source_stream_order(viewer):
     ] == [["EEG A", "EEG B"], ["Audio L"]]
 
 
+def test_viewer_controls_and_overlays_are_on_but_smart_labels_are_opt_in(viewer):
+    """The full viewer stays visible while smart marker packing starts off."""
+    assert tuple(viewer.view_actions) == ("smart_marker_labels",)
+    assert not viewer.view_actions["smart_marker_labels"].isChecked()
+    assert not viewer.annotation_stream.smart_label_layout
+    assert not viewer.crosshair_action.isChecked()
+    assert not viewer.layout_controls.isHidden()
+    assert not viewer.navigation_controls.isHidden()
+    assert not viewer.annotation_stream.isHidden()
+    assert not viewer.annotation_dock.isHidden()
+    assert not viewer.statusBar().isHidden()
+    assert all(not panel.header_widget.isHidden() for panel in viewer.panels)
+    assert all(not panel.channel_list.isHidden() for panel in viewer.panels)
+    assert all(panel.event_overlays_visible for panel in viewer.panels)
+    assert all(panel.annotation_overlays_visible for panel in viewer.panels)
+
+    viewer.view_actions["smart_marker_labels"].setChecked(True)
+
+    assert viewer.annotation_stream.smart_label_layout
+
+
+def test_crosshair_is_an_optional_view_overlay(viewer):
+    """The crosshair is added only while its View option is enabled."""
+    panel = viewer.panels[0]
+    original_lines = sum(
+        isinstance(item, pg.InfiniteLine) for item in panel.plot.getPlotItem().items
+    )
+
+    viewer.crosshair_action.setChecked(True)
+
+    assert panel.plot._crosshair_enabled
+    assert (
+        sum(
+            isinstance(item, pg.InfiniteLine) for item in panel.plot.getPlotItem().items
+        )
+        == original_lines + 2
+    )
+
+    viewer.crosshair_action.setChecked(False)
+    assert not panel.plot._crosshair_enabled
+
+
+def test_shift_drag_measurement_reports_segment_statistics(viewer):
+    """A two-point measurement exposes time and physical-value statistics."""
+    panel = viewer.panels[0]
+    panel._measurement_changed(0.0, panel._lane_step, 0.25, 0.0, True)
+    text = panel.plot._measurement_label.text()
+
+    assert "EEG A" in text
+    assert "Δt: 0.25 s" in text
+    assert "range:" in text
+    assert "slope:" in text
+    assert "samples:" in text
+
+
+def test_imu_raw_scale_and_units_are_grouped_by_sensor_family(qtbot):
+    """ACC and gyro axes retain useful independent raw scales in one IMU source."""
+    times = np.arange(100) / 100.0
+    raw = mne.io.RawArray(
+        np.vstack(
+            (
+                np.sin(2 * np.pi * times),
+                1000 * np.sin(2 * np.pi * times),
+            )
+        ),
+        mne.create_info(["ACC X", "Gyro X"], 100.0, ["misc", "misc"]),
+        verbose=False,
+    )
+    streams = [
+        {
+            "id": "imu",
+            "name": "IMU",
+            "type": "IMU",
+            "channel_names": ["ACC X", "Gyro X"],
+        }
+    ]
+    window = StreamViewerWindow(raw, streams=streams, duration=1.0)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    assert panel._display_units == {"ACC X": "g", "Gyro X": "°/s"}
+    assert panel._automatic_group_scales[("imu", "acceleration")] == pytest.approx(
+        panel._automatic_group_scales[("imu", "angular_velocity")] / 1000
+    )
+    assert "g/div" in panel.scale_label.toolTip()
+    assert "°/s/div" in panel.scale_label.toolTip()
+
+
+def test_annotation_dock_cannot_float(viewer):
+    """The annotations menu does not offer a separate floating window."""
+    features = viewer.annotation_dock.features()
+
+    assert features & QDockWidget.DockWidgetFeature.DockWidgetClosable
+    assert features & QDockWidget.DockWidgetFeature.DockWidgetMovable
+    assert not features & QDockWidget.DockWidgetFeature.DockWidgetFloatable
+
+
 def test_grid_defaults_to_one_column_and_reflows_in_place(viewer):
     """Column changes rearrange existing stream panels in source order."""
     panels = tuple(viewer.panels)
@@ -196,13 +293,57 @@ def test_channel_axes_use_same_width_for_aligned_time_axes(viewer):
     ]
 
 
-def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(viewer):
+def test_long_channel_axis_labels_are_elided_instead_of_dropped(qtbot):
+    """Every lane retains a compact Y label when its full name is too wide."""
+    channel_names = [
+        "A very long channel name 00",
+        "A very long channel name 01",
+        "A very long channel name 02",
+    ]
+    raw = mne.io.RawArray(
+        np.zeros((len(channel_names), 100)),
+        mne.create_info(channel_names, 100.0, ["misc"] * len(channel_names)),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=1.0)
+    qtbot.addWidget(window)
+    axis = window.panels[0].plot.getAxis("left")
+    displayed_labels = [label for _position, label in axis._tickLevels[0]]
+
+    assert len(displayed_labels) == len(channel_names)
+    assert all(displayed_labels)
+    assert all(label != name for label, name in zip(displayed_labels, channel_names))
+    assert all("…" in label for label in displayed_labels)
+    assert [label[-1] for label in displayed_labels] == ["0", "1", "2"]
+    assert axis._tick_label_names == channel_names
+
+
+def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(qtbot, viewer):
     """The duplicate channel-name columns use a compact, shared width budget."""
+    viewer.show()
+    qtbot.waitUntil(
+        lambda: viewer.annotation_stream.width() == viewer.panel_container.width()
+    )
+
     assert all(
         panel.channel_list.width() == CHANNEL_LIST_WIDTH for panel in viewer.panels
     )
     assert viewer.annotation_stream.title_label.width() == CHANNEL_LIST_WIDTH
+    assert viewer.annotation_stream.width() == viewer.panel_container.width()
+    assert (
+        viewer.annotation_stream.mapToGlobal(QPoint(0, 0)).x()
+        == viewer.panel_container.mapToGlobal(QPoint(0, 0)).x()
+    )
     assert CHANNEL_LIST_WIDTH + CHANNEL_LABEL_WIDTH < 200
+
+    viewer.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+    qtbot.waitUntil(
+        lambda: viewer.annotation_stream.width() == viewer.panel_container.width()
+    )
+    assert (
+        viewer.annotation_stream.mapToGlobal(QPoint(0, 0)).x()
+        == viewer.panel_container.mapToGlobal(QPoint(0, 0)).x()
+    )
 
 
 def test_panels_have_independent_units_and_gain(viewer):
@@ -311,6 +452,76 @@ def test_amplitude_controls_are_multiplicative_and_panel_local(qtbot, viewer):
     assert eeg.amplitude.value() == pytest.approx(1.0)
 
 
+def test_stream_absolute_amplitude_clears_lane_fit_and_is_source_local(viewer):
+    """An exact physical scale reverses lane fitting for only its source."""
+    eeg, audio = viewer.panels
+    eeg.fit_to_pane()
+    assert {"EEG A", "EEG B"} <= set(viewer._channel_fits)
+    audio_scale = viewer._display_scales[22]
+
+    eeg.set_source_absolute_amplitude(0, 100.0, "µV")
+
+    assert viewer._display_scales[11] == pytest.approx(100e-6)
+    assert viewer._display_scales[22] == audio_scale
+    assert "EEG A" not in viewer._channel_fits
+    assert "EEG B" not in viewer._channel_fits
+    amplitude, unit = eeg.source_absolute_amplitude(0)
+    assert amplitude == pytest.approx(100.0)
+    assert unit == "µV"
+    assert "100 µV/div" in eeg.scale_label.text()
+
+
+def test_stream_properties_dialog_updates_absolute_scale_and_unit(qtbot, viewer):
+    """Right-click stream properties expose a live absolute-scale editor."""
+    panel = viewer.panels[0]
+    dialog = panel.create_stream_display_dialog(0)
+    qtbot.addWidget(dialog)
+
+    assert dialog.name_label.text() == "BrainAmp"
+    assert dialog.type_label.text() == "EEG"
+    assert dialog.channel_count_label.text() == "2"
+
+    dialog.unit_combo.setCurrentText("mV")
+    dialog.amplitude_spin.setValue(0.25)
+
+    assert viewer._display_scales[11] == pytest.approx(0.25e-3)
+    assert panel.channel_settings["EEG A"]["unit"] == "mV"
+    assert panel.channel_settings["EEG B"]["unit"] == "mV"
+    assert "0.25 mV/div" in panel.scale_label.text()
+
+    dialog.fit_button.click()
+    assert panel.source_has_lane_fits(0)
+    dialog.automatic_button.click()
+    assert not panel.source_has_lane_fits(0)
+
+    menu = panel.create_stream_context_menu()
+    assert [action.text() for action in menu.actions()] == [
+        "Display Properties…",
+        "Fit Stream to Pane",
+        "Use Automatic Scale",
+    ]
+
+
+def test_joined_panel_stream_properties_keep_absolute_scales_independent(qtbot, viewer):
+    """A joined panel provides one properties submenu and scale per source."""
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+    panel = viewer.panels[0]
+
+    panel.set_source_absolute_amplitude(0, 50.0, "µV")
+    panel.set_source_absolute_amplitude(1, 0.2, "Raw")
+
+    assert viewer._display_scales[11] == pytest.approx(50e-6)
+    assert viewer._display_scales[22] == pytest.approx(0.2)
+    menu = panel.create_stream_context_menu()
+    assert [action.text() for action in menu.actions()[:2]] == [
+        "BrainAmp",
+        "Audio",
+    ]
+    assert all(action.menu() is not None for action in menu.actions()[:2])
+
+
 def test_time_navigation_fetches_one_shared_visible_window(viewer, raw):
     """One shared read supplies the same visible interval to all panels."""
     with patch.object(raw, "get_data", wraps=raw.get_data) as get_data:
@@ -412,13 +623,26 @@ def test_join_split_round_trip_does_not_mutate_raw(viewer, raw, streams):
 
 
 def test_signal_panels_draw_annotation_regions_without_text(viewer):
-    """Trace panels show annotation intervals without duplicating lane text."""
+    """Always-on signal overlays do not duplicate annotation lane text."""
     for panel in viewer.panels:
         items = panel.plot.getPlotItem().items
         assert sum(isinstance(item, pg.InfiniteLine) for item in items) == 1
         assert sum(isinstance(item, pg.LinearRegionItem) for item in items) == 1
         assert not any(isinstance(item, pg.TextItem) for item in items)
         assert panel._annotation_regions[0].zValue() < panel._curves[0].zValue()
+
+
+def test_zero_duration_annotations_are_vertical_lines(qtbot, raw, streams):
+    """Point annotations retain zero width instead of becoming small squares."""
+    raw.set_annotations(
+        mne.Annotations(onset=[1.0], duration=[0.0], description=["Point"])
+    )
+    window = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    qtbot.addWidget(window)
+
+    assert window.annotation_stream._regions[0].getRegion() == pytest.approx((1.0, 1.0))
+    for panel in window.panels:
+        assert panel._annotation_regions[0].getRegion() == pytest.approx((1.0, 1.0))
 
 
 def test_trace_hover_shows_channel_name_and_value(qtbot, viewer):
@@ -455,7 +679,7 @@ def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
     """The synchronized bottom lane clips regions and wraps horizontal labels."""
     layout = viewer.centralWidget().layout()
 
-    assert layout.indexOf(viewer.annotation_stream) > layout.indexOf(viewer.scroll)
+    assert layout.indexOf(viewer.annotation_container) > layout.indexOf(viewer.scroll)
     assert len(viewer.annotation_stream.labels) == 1
     label = viewer.annotation_stream.labels[0]
     assert label.textItem.toPlainText() == "Visible"
@@ -471,6 +695,96 @@ def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
     label = viewer.annotation_stream.labels[0]
     assert label.textItem.toPlainText() == "Outside"
     assert label.pos().x() == pytest.approx(8.0)
+
+
+def test_multiple_xdf_marker_streams_use_separate_named_lanes(qtbot, raw, streams):
+    """Marker provenance controls lane labels, text, and vertical placement."""
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[1.0, 1.1],
+            duration=[0, 0],
+            description=[
+                "Keyboard — a marker description that needs readable wrapping",
+                "Foot Pedal — pressed",
+            ],
+        )
+    )
+    marker_streams = [
+        {
+            "id": 2,
+            "name": "Keyboard",
+            "annotation_prefix": "Keyboard — ",
+        },
+        {
+            "id": 8,
+            "name": "Foot Pedal",
+            "annotation_prefix": "Foot Pedal — ",
+        },
+    ]
+    window = StreamViewerWindow(
+        raw,
+        streams=streams,
+        marker_streams=marker_streams,
+        duration=2.0,
+    )
+    qtbot.addWidget(window)
+    lane = window.annotation_stream
+
+    assert lane.lane_names == ("Keyboard", "Foot Pedal")
+    assert [label.text() for label in lane.lane_labels] == [
+        "Keyboard",
+        "Foot Pedal",
+    ]
+    assert [label.textItem.toPlainText() for label in lane.labels] == [
+        "a marker description that needs readable wrapping",
+        "pressed",
+    ]
+    assert lane.labels[0].pos().y() == pytest.approx(1.5)
+    assert lane.labels[1].pos().y() == pytest.approx(0.5)
+    assert lane.labels[0].textItem.textWidth() >= 210
+
+
+def test_overlapping_marker_text_is_packed_into_chronological_rows(qtbot, raw, streams):
+    """Close labels in one marker stream use stable, non-overlapping rows."""
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[1.0, 1.05, 1.1],
+            duration=[0, 0, 0],
+            description=[
+                "Keyboard — first marker with a long description",
+                "Keyboard — second marker with a long description",
+                "Foot Pedal — separate lane",
+            ],
+        )
+    )
+    marker_streams = [
+        {
+            "id": 2,
+            "name": "Keyboard",
+            "annotation_prefix": "Keyboard — ",
+        },
+        {
+            "id": 8,
+            "name": "Foot Pedal",
+            "annotation_prefix": "Foot Pedal — ",
+        },
+    ]
+    window = StreamViewerWindow(
+        raw,
+        streams=streams,
+        marker_streams=marker_streams,
+        duration=2.0,
+    )
+    qtbot.addWidget(window)
+    lane = window.annotation_stream
+    window.view_actions["smart_marker_labels"].setChecked(True)
+
+    assert lane.labels[0].pos().y() > lane.labels[1].pos().y()
+    assert lane.labels[1].pos().y() > lane.labels[2].pos().y()
+    first = lane._visible_annotations[0]
+    second = lane._visible_annotations[1]
+    assert first[7] > second[6]
+    assert first[9] != second[9]
 
 
 def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
@@ -504,6 +818,40 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     )
 
 
+def test_annotation_browser_suppresses_and_restores_individual_annotations(viewer, raw):
+    """Per-annotation visibility is display-only and synchronized across plots."""
+    annotations_before = raw.annotations.copy()
+    sidebar = viewer.annotation_sidebar
+    menu = sidebar.create_annotation_context_menu(0)
+
+    next(
+        action for action in menu.actions() if action.text() == "Suppress Annotation"
+    ).trigger()
+
+    assert sidebar.suppressed_indices == (0,)
+    assert sidebar.list.item(0).font().strikeOut()
+    assert sidebar.count_label.text() == "Showing 2 of 2 · 1 suppressed"
+    assert all(not panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert not viewer.annotation_stream.labels[0].isVisible()
+
+    restore_menu = sidebar.create_annotation_context_menu(0)
+    next(
+        action
+        for action in restore_menu.actions()
+        if action.text() == "Show Annotation"
+    ).trigger()
+
+    assert sidebar.suppressed_indices == ()
+    assert not sidebar.list.item(0).font().strikeOut()
+    assert sidebar.count_label.text() == "Showing 2 of 2"
+    assert all(panel._annotation_regions[0].isVisible() for panel in viewer.panels)
+    assert viewer.annotation_stream.labels[0].isVisible()
+    np.testing.assert_array_equal(raw.annotations.onset, annotations_before.onset)
+    np.testing.assert_array_equal(
+        raw.annotations.description, annotations_before.description
+    )
+
+
 def test_annotation_stream_click_highlights_matching_sidebar_item(qtbot, viewer):
     """Clicking a lane annotation reveals its corresponding browser row."""
     viewer.show()
@@ -525,6 +873,39 @@ def test_annotation_stream_click_highlights_matching_sidebar_item(qtbot, viewer)
     assert sidebar.list.currentRow() == 0
     assert "Visible" in sidebar.list.currentItem().text()
     assert not viewer.annotation_dock.isHidden()
+
+
+def test_signal_annotation_click_highlights_matching_sidebar_item(qtbot, viewer):
+    """Clicking an annotation region in a signal panel reveals its browser row."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    sidebar = viewer.annotation_sidebar
+    sidebar.list.setCurrentRow(-1)
+    viewer.annotations_button.setChecked(False)
+    qtbot.waitUntil(viewer.annotation_dock.isHidden)
+    panel = viewer.panels[0]
+    view_box = panel.plot.getViewBox()
+    scene_position = view_box.mapViewToScene(QPointF(1.3, 0.0))
+    plot_position = panel.plot.mapFromScene(scene_position)
+
+    qtbot.mouseClick(
+        panel.plot.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=plot_position,
+    )
+
+    assert sidebar.list.currentRow() == 0
+    assert "Visible" in sidebar.list.currentItem().text()
+    assert not viewer.annotation_dock.isHidden()
+
+
+def test_navigation_shows_relative_hms_time(viewer):
+    """The bottom navigation shows the visible start in hours:minutes:seconds."""
+    assert viewer.relative_time_label.text() == "Relative: 00:00:00"
+
+    viewer.set_start_time(7.5)
+
+    assert viewer.relative_time_label.text() == "Relative: 00:00:07"
 
 
 def test_annotation_regex_filter_is_case_insensitive_and_handles_errors(viewer):
@@ -617,6 +998,33 @@ def test_subplot_labels_match_automatic_trace_colors(viewer):
     for index, name in enumerate(panel.visible_channel_names):
         trace_color = panel._curves[index].opts["pen"].color().name()
         assert axis.label_colors[name].name() == trace_color
+
+
+def test_automatic_trace_palette_tracks_current_visible_order(viewer):
+    """Hiding or swapping channels remaps distinct automatic lane colors."""
+    panel = viewer.panels[0]
+    initial_colors = {
+        name: panel._curves[index].opts["pen"].color()
+        for index, name in enumerate(panel.visible_channel_names)
+    }
+    hue_distance = abs(
+        initial_colors["EEG A"].hsvHueF() - initial_colors["EEG B"].hsvHueF()
+    )
+    hue_distance = min(hue_distance, 1.0 - hue_distance)
+    assert hue_distance > 0.35
+
+    panel.set_channel_visible("EEG A", False)
+
+    assert panel.visible_channel_names == ["EEG B"]
+    assert panel._curves[0].opts["pen"].color() == initial_colors["EEG A"]
+    assert panel._curves[0].opts["pen"].color() != initial_colors["EEG B"]
+
+    panel.set_channel_visible("EEG A", True)
+    panel.reorder_channels(["EEG B", "EEG A"])
+
+    assert panel.visible_channel_names == ["EEG B", "EEG A"]
+    assert panel._curves[0].opts["pen"].color() == initial_colors["EEG A"]
+    assert panel._curves[1].opts["pen"].color() == initial_colors["EEG B"]
 
 
 def test_combined_channel_display_dialog_updates_upstream_settings(qtbot, viewer):
@@ -810,6 +1218,49 @@ def test_mouse_time_navigation_is_shared_and_has_zoom_history(qtbot, viewer):
     viewer.zoom_forward()
     assert viewer.start_time == pytest.approx(2.0)
     assert viewer.duration == pytest.approx(1.0)
+
+
+def test_time_window_history_has_standard_undo_redo_shortcuts(qtbot, viewer):
+    """Standard undo and redo keys navigate the time-window history."""
+    viewer.set_time_window(1.0, 1.0)
+
+    qtbot.keyClick(viewer, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert viewer.start_time == pytest.approx(0.0)
+    assert viewer.duration == pytest.approx(2.0)
+
+    qtbot.keyClick(
+        viewer,
+        Qt.Key.Key_Z,
+        Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.ShiftModifier,
+    )
+    assert viewer.start_time == pytest.approx(1.0)
+    assert viewer.duration == pytest.approx(1.0)
+
+    qtbot.keyClick(viewer, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    qtbot.keyClick(viewer, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert viewer.start_time == pytest.approx(1.0)
+    assert viewer.duration == pytest.approx(1.0)
+
+
+def test_unassigned_keys_and_escape_do_not_close_viewer(qtbot, viewer):
+    """Typing in the viewer is safe; Escape only clears measurements."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    panel = viewer.panels[0]
+    panel.plot._rubber_band.show()
+    panel.plot._measurement_label.setText("measurement")
+    panel.plot._measurement_label.show()
+
+    qtbot.keyClick(viewer, Qt.Key.Key_A)
+
+    assert viewer.isVisible()
+    assert panel.plot._measurement_label.isVisible()
+
+    qtbot.keyClick(viewer, Qt.Key.Key_Escape)
+
+    assert viewer.isVisible()
+    assert not panel.plot._rubber_band.isVisible()
+    assert not panel.plot._measurement_label.isVisible()
 
 
 def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
@@ -1520,6 +1971,60 @@ def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
     assert np.nanmax(np.abs(plotted)) == pytest.approx(
         FIT_HALF_LANE_FRACTION * panel._lane_step
     )
+
+
+def test_raw_and_fit_buttons_switch_and_show_scale_mode(qtbot):
+    """The panel can return from lane fitting to its shared raw scale."""
+    values = np.vstack(
+        (
+            np.linspace(-1.0, 1.0, 100),
+            np.linspace(-100.0, 100.0, 100),
+        )
+    )
+    raw = mne.io.RawArray(
+        values,
+        mne.create_info(["Small", "Large"], 100.0, ["misc", "misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=0.5)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    assert panel.raw_scale_button.isChecked()
+    assert not panel.fit_to_pane_button.isChecked()
+    assert panel.scale_mode_label.text() == "Mode: Raw"
+
+    panel.fit_to_pane_button.click()
+
+    assert not panel.raw_scale_button.isChecked()
+    assert panel.fit_to_pane_button.isChecked()
+    assert panel.scale_mode_label.text() == "Mode: Fit"
+    assert set(panel.visible_channel_names) <= set(window._channel_fits)
+
+    panel.raw_scale_button.click()
+
+    assert panel.raw_scale_button.isChecked()
+    assert not panel.fit_to_pane_button.isChecked()
+    assert panel.scale_mode_label.text() == "Mode: Raw"
+    assert not set(panel.visible_channel_names) & set(window._channel_fits)
+
+
+def test_scale_mode_shows_mixed_after_single_channel_fit(qtbot):
+    """Per-channel fitting is visibly distinguished from both panel modes."""
+    raw = mne.io.RawArray(
+        np.ones((2, 100)),
+        mne.create_info(["One", "Two"], 100.0, ["misc", "misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=0.5)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    panel.fit_channel_to_pane("One")
+
+    assert not panel.raw_scale_button.isChecked()
+    assert not panel.fit_to_pane_button.isChecked()
+    assert panel.scale_mode_label.text() == "Mode: Mixed"
 
 
 def test_meg_panel_uses_magnetic_units(qtbot):

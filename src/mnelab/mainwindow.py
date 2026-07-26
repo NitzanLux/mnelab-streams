@@ -559,6 +559,63 @@ def _xdf_stream_descriptors(rows, stream_ids, skipped_stream_ids, channel_names)
     return descriptors
 
 
+def _apply_xdf_stream_channel_types(data, streams):
+    """Apply a valid stream type to channels lacking their own XDF type."""
+    valid_types = set(mne.io.get_channel_type_constants())
+    current_types = dict(zip(data.ch_names, data.get_channel_types(), strict=True))
+    updates = {}
+    for stream in streams:
+        stream_type = str(stream.get("type") or "").strip().lower()
+        if stream_type not in valid_types:
+            continue
+        for name in stream.get("channel_names", []):
+            if current_types.get(name) == "misc":
+                updates[name] = stream_type
+    if updates:
+        data.set_channel_types(updates, on_unit_change="ignore")
+
+
+def _xdf_marker_stream_descriptors(rows, marker_ids, include_ids=False):
+    """Build named marker lanes and their annotation-description prefixes."""
+    rows_by_id = {row[0]: row for row in rows}
+    selected = [rows_by_id[stream_id] for stream_id in marker_ids]
+    names = [str(row[1] or f"Marker Stream {row[0]}").strip() for row in selected]
+    duplicate_names = {name for name in names if names.count(name) > 1}
+    descriptors = []
+    for row, name in zip(selected, names, strict=True):
+        stream_id = row[0]
+        if include_ids or name in duplicate_names:
+            display_name = f"{name} (ID {stream_id})"
+        else:
+            display_name = name
+        descriptors.append(
+            {
+                "id": stream_id,
+                "name": display_name,
+                "annotation_prefix": f"{display_name} — ",
+            }
+        )
+    return descriptors
+
+
+def _name_xdf_marker_annotations(data, marker_streams):
+    """Replace MNEXTEND's internal marker-ID prefixes with stream names."""
+    if len(marker_streams) < 2 or not len(data.annotations):
+        return
+    replacements = {
+        f"{stream['id']}-": stream["annotation_prefix"] for stream in marker_streams
+    }
+    renamed = {}
+    for description in data.annotations.description:
+        description = str(description)
+        for id_prefix, name_prefix in replacements.items():
+            if description.startswith(id_prefix):
+                renamed[description] = name_prefix + description[len(id_prefix) :]
+                break
+    if renamed:
+        data.annotations.rename(renamed)
+
+
 def _empty_xdf_stream_warning(rows, skipped_stream_ids):
     """Explain which empty XDF streams were skipped and what their IDs mean."""
     rows_by_id = {row[0]: row for row in rows}
@@ -1390,21 +1447,34 @@ class MainWindow(QMainWindow):
 
     def _load_xdf_configuration(self, configuration, model=None):
         """Load one configured XDF and attach its source-stream metadata."""
+        marker_streams = _xdf_marker_stream_descriptors(
+            configuration["rows"],
+            configuration["marker_ids"],
+            include_ids=configuration["prefix_markers"],
+        )
         skipped_stream_ids = self._load_xdf(
             configuration["fname"],
             stream_ids=configuration["stream_ids"],
             marker_ids=configuration["marker_ids"],
-            prefix_markers=configuration["prefix_markers"],
+            # MNEXTEND's ID prefix is used internally to retain marker provenance.
+            # It is replaced with the human-readable stream name immediately below.
+            prefix_markers=len(marker_streams) > 1 or configuration["prefix_markers"],
             fs_new=configuration["fs_new"],
             gap_threshold=configuration["gap_threshold"],
             model=model,
         )
         target_model = self.model if model is None else model
-        target_model.current["source_streams"] = _xdf_stream_descriptors(
+        streams = _xdf_stream_descriptors(
             configuration["rows"],
             configuration["stream_ids"],
             skipped_stream_ids,
             target_model.current["data"].ch_names,
+        )
+        target_model.current["source_streams"] = streams
+        _apply_xdf_stream_channel_types(target_model.current["data"], streams)
+        _name_xdf_marker_annotations(target_model.current["data"], marker_streams)
+        target_model.current["marker_streams"] = (
+            marker_streams if len(marker_streams) > 1 else []
         )
         return skipped_stream_ids
 
@@ -1449,6 +1519,7 @@ class MainWindow(QMainWindow):
         """Load configured XDFs atomically and concatenate them into one data set."""
         raws = []
         source_streams = []
+        marker_streams = []
         skipped_streams = []
         failures = list(unreadable_failures or [])
         fnames = []
@@ -1467,6 +1538,7 @@ class MainWindow(QMainWindow):
             fnames.append(configuration["fname"])
             raws.append(temporary_model.current["data"])
             source_streams.append(temporary_model.current["source_streams"])
+            marker_streams.append(temporary_model.current["marker_streams"] or [])
             if skipped_stream_ids:
                 skipped_streams.append(
                     (configuration["rows"], skipped_stream_ids, configuration["fname"])
@@ -1500,6 +1572,7 @@ class MainWindow(QMainWindow):
         for group_number, indices in enumerate(groups, start=1):
             group_raws = [raws[index] for index in indices]
             group_streams = [source_streams[index] for index in indices]
+            group_marker_streams = [marker_streams[index] for index in indices]
             group_fnames = [fnames[index] for index in indices]
             qualified_channels.extend(
                 _qualify_xdf_duplicate_channels(group_raws, group_streams, group_fnames)
@@ -1514,6 +1587,13 @@ class MainWindow(QMainWindow):
                 group_fnames,
                 merged.ch_names,
                 merged.info["sfreq"],
+            )
+            unified_marker_streams = list(
+                {
+                    stream["annotation_prefix"]: stream
+                    for streams in group_marker_streams
+                    for stream in streams
+                }.values()
             )
             if len(groups) == 1:
                 name = (
@@ -1531,10 +1611,18 @@ class MainWindow(QMainWindow):
                     f"({len(group_fnames)} XDF files merged, time group "
                     f"{group_number} of {len(groups)})"
                 )
-            prepared.append((merged, group_fnames, unified_streams, name))
+            prepared.append(
+                (merged, group_fnames, unified_streams, unified_marker_streams, name)
+            )
 
         memory_saving = read_settings("memory_saving")
-        for merged, group_fnames, unified_streams, name in prepared:
+        for (
+            merged,
+            group_fnames,
+            unified_streams,
+            unified_marker_streams,
+            name,
+        ) in prepared:
             if memory_saving and self.model.data:
                 self.model.evict_dataset(self.model.index)
             self.model.load_data(
@@ -1542,6 +1630,7 @@ class MainWindow(QMainWindow):
                 group_fnames[0],
                 name=name,
                 source_streams=unified_streams,
+                marker_streams=unified_marker_streams,
                 source_files=group_fnames,
                 is_xdf_merge=len(group_fnames) > 1,
             )
@@ -2153,6 +2242,7 @@ class MainWindow(QMainWindow):
             viewer = StreamViewerWindow(
                 data,
                 streams=self.model.current["source_streams"],
+                marker_streams=self.model.current["marker_streams"],
                 events=events,
                 annotation_colors=annotation_colors,
                 duration=read_settings("duration"),

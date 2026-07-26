@@ -2,20 +2,24 @@
 #
 # License: BSD (3-clause)
 
-"""Write MNELAB Raw datasets as XDF 1.0 files."""
+"""Read and write MNELAB XDF data."""
 
 import os
 import struct
 import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
+from threading import RLock
 from xml.etree.ElementTree import Element, SubElement, tostring
 
 import mne
 import numpy as np
+import scipy.signal
 from mne.io.constants import FIFF
 
 _SAMPLES_PER_CHUNK = 256
+_RESAMPLER_LOCK = RLock()
 _UNIT_NAMES = {
     FIFF.FIFF_UNIT_NONE: "NA",
     FIFF.FIFF_UNIT_UNITLESS: "NA",
@@ -52,6 +56,127 @@ _UNIT_NAMES = {
     FIFF.FIFF_UNIT_AM_M3: "A/m^3",
     FIFF.FIFF_UNIT_PX: "pixel",
 }
+
+
+def _nearest_sample_indices(source_times, target_times):
+    """Map target times to their nearest source-sample indices."""
+    right = np.searchsorted(source_times, target_times, side="left")
+    right = np.clip(right, 0, len(source_times) - 1)
+    left = np.maximum(right - 1, 0)
+    use_right = np.abs(source_times[right] - target_times) < np.abs(
+        target_times - source_times[left]
+    )
+    return np.where(use_right, right, left)
+
+
+def _fill_nonfinite_samples(values, timestamps):
+    """Interpolate non-finite samples for filtering while retaining a validity mask."""
+    validity = np.isfinite(values)
+    if validity.all():
+        return values, validity
+
+    filled = np.asarray(values, dtype=float).copy()
+    for column in range(filled.shape[1]):
+        valid = validity[:, column]
+        if not valid.any():
+            filled[:, column] = 0.0
+        elif not valid.all():
+            filled[:, column] = np.interp(
+                timestamps,
+                timestamps[valid],
+                filled[valid, column],
+            )
+    return filled, validity
+
+
+def _resample_xdf_streams(streams, stream_ids, fs_new, use_interpolation=False):
+    """Resample XDF streams without spreading isolated NaNs across entire channels.
+
+    MNEXTEND's Fourier resampling and anti-aliasing filter operate directly on the
+    stream arrays. One explicit NaN-coded missing sample therefore makes the complete
+    resampled channel NaN. This implementation temporarily fills missing samples for
+    the numerical operation, then projects the original validity mask onto the output
+    grid so missing regions remain missing without silencing otherwise valid data.
+    """
+    from scipy.interpolate import interp1d
+
+    start_times = []
+    end_times = []
+    channel_count = 0
+    for stream_id in stream_ids:
+        stream = streams[stream_id]
+        if len(stream["time_stamps"]) == 0:
+            raise ValueError(f"Stream {stream_id} contains no samples.")
+        start_times.append(stream["time_stamps"][0])
+        end_times.append(stream["time_stamps"][-1])
+        channel_count += int(stream["info"]["channel_count"][0])
+
+    first_time = min(start_times)
+    last_time = max(end_times)
+    sample_count = int(np.ceil((last_time - first_time) * fs_new))
+    data = np.full((sample_count, channel_count), np.nan)
+    time_grid = first_time + np.arange(sample_count) / fs_new
+
+    column_start = 0
+    for stream_id in stream_ids:
+        stream = streams[stream_id]
+        timestamps = np.asarray(stream["time_stamps"])
+        sort_indices = np.argsort(timestamps)
+        timestamps = timestamps[sort_indices]
+        timestamps, unique_indices = np.unique(timestamps, return_index=True)
+        values = np.asarray(stream["time_series"])[sort_indices[unique_indices], :]
+        values, validity = _fill_nonfinite_samples(values, timestamps)
+
+        effective_srate = float(np.asarray(stream["info"]["effective_srate"]).item())
+        if fs_new < effective_srate:
+            sos = scipy.signal.butter(
+                8,
+                0.95 * fs_new / 2,
+                btype="low",
+                fs=effective_srate,
+                output="sos",
+            )
+            values = scipy.signal.sosfiltfilt(sos, values, axis=0)
+
+        row_start = int(np.floor((timestamps[0] - first_time) * fs_new))
+        row_end = int(np.ceil((timestamps[-1] - first_time) * fs_new))
+        target_times = time_grid[row_start:row_end]
+        if use_interpolation:
+            resampled = interp1d(
+                timestamps,
+                values,
+                axis=0,
+                kind="linear",
+                bounds_error=False,
+                fill_value=np.nan,
+            )(target_times)
+        else:
+            resampled = scipy.signal.resample(values, len(target_times), axis=0)
+
+        if not validity.all():
+            nearest = _nearest_sample_indices(timestamps, target_times)
+            for column in range(resampled.shape[1]):
+                resampled[~validity[nearest, column], column] = np.nan
+
+        column_end = column_start + resampled.shape[1]
+        data[row_start:row_end, column_start:column_end] = resampled
+        column_start = column_end
+
+    return data, first_time
+
+
+@contextmanager
+def finite_aware_xdf_resampling():
+    """Use MNELAB's NaN-safe resampler while MNEXTEND constructs a RawXDF."""
+    from mnextend.io import xdf as mnextend_xdf
+
+    with _RESAMPLER_LOCK:
+        original = mnextend_xdf._resample_streams
+        mnextend_xdf._resample_streams = _resample_xdf_streams
+        try:
+            yield
+        finally:
+            mnextend_xdf._resample_streams = original
 
 
 def _encode_varlen_int(value):

@@ -127,6 +127,12 @@ Fitting is lane-specific and finite-value aware. One high-amplitude channel ther
 does not compress every other trace in the panel, and a NaN-padded channel remains
 displayable over its finite intervals.
 
+Right-clicking a stream header opens source-specific display properties. The editor
+shows source metadata and accepts an absolute physical scale per vertical division.
+Setting an absolute scale clears that source's independent lane fits, while **Fit
+Stream to Pane** and **Use Automatic Scale** provide the corresponding fitted and
+group-scaled modes. Joined panels retain independent settings for every source stream.
+
 ### Annotations and activation
 
 - Events appear as synchronized vertical markers.
@@ -180,12 +186,15 @@ The sidebar and information panel expose merged-dataset identity and source coun
 
 ## 4. Stream-aware filtering
 
-The filter dialog is organized with the same source decomposition as the viewer.
+The filter workflow is organized with the same source decomposition as the viewer.
 
-- Each stream can be enabled or left untouched independently.
-- Users select the exact channels targeted inside an enabled stream.
+- A first page selects the relevant streams and then the exact channels within them.
+- A second page configures every selected stream independently.
 - The dialog continuously summarizes filter targets.
-- Low-pass, high-pass, band-pass, and notch filters are supported.
+- High-pass, low-pass, notch, band-pass, and band-stop filters are supported.
+- EDFbrowser-inspired Butterworth, Chebyshev, Bessel, moving-average, order,
+  passband-ripple, resonator Q-factor, and bandwidth controls are available where
+  applicable.
 - Frequency controls are bounded by each source's nominal Nyquist frequency.
 - Notch filtering can expand a fundamental into all valid integer harmonics strictly
   below that source's Nyquist frequency.

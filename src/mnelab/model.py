@@ -12,6 +12,7 @@ from pathlib import Path
 
 import mne
 import numpy as np
+import scipy.signal
 from mnextend import (
     read_epochs,
     read_raw,
@@ -23,7 +24,7 @@ from mnextend import (
 from mnextend.io.readers import raw_readers
 
 from mnelab.utils import Montage, count_locations
-from mnelab.xdf import write_xdf
+from mnelab.xdf import finite_aware_xdf_resampling, write_xdf
 
 
 class LabelsNotFoundError(Exception):
@@ -40,6 +41,39 @@ class InvalidAnnotationsError(Exception):
 
 class AddReferenceError(Exception):
     pass
+
+
+def _moving_average_filter(values, *, samples, highpass):
+    """Apply an EDFbrowser-style causal moving average to finite spans."""
+    values = np.asarray(values)
+    if values.ndim > 1:
+        return np.apply_along_axis(
+            _moving_average_filter,
+            -1,
+            values,
+            samples=samples,
+            highpass=highpass,
+        )
+    result = values.copy()
+    finite = np.isfinite(values)
+    changes = np.diff(np.pad(finite.astype(np.int8), (1, 1)))
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    kernel = np.full(int(samples), 1.0 / int(samples))
+    for start, stop in zip(starts, stops, strict=True):
+        span = values[start:stop]
+        padded = np.pad(span, (int(samples) - 1, 0), mode="edge")
+        average = np.convolve(padded, kernel, mode="valid")
+        result[start:stop] = span - average if highpass else average
+    return result
+
+
+def _read_raw_data(fname, *args, **kwargs):
+    """Read Raw data, protecting XDF resampling from explicit missing samples."""
+    if fname.lower().endswith((".xdf", ".xdfz", ".xdf.gz")):
+        with finite_aware_xdf_resampling():
+            return read_raw(fname, *args, **kwargs)
+    return read_raw(fname, *args, **kwargs)
 
 
 def _data_nbytes(data):
@@ -152,6 +186,8 @@ class Model:
             "from mnextend import read_raw, run_iclabel",
             "from mnelab.utils import annotations_between_events",
             "import numpy as np",
+            "import scipy.signal",
+            "from mnelab.model import _moving_average_filter",
             "from mnelab.utils import ("
             "detect_extreme_values,"
             "detect_kurtosis,"
@@ -301,6 +337,7 @@ class Model:
         fname,
         name=None,
         source_streams=None,
+        marker_streams=None,
         source_files=None,
         is_xdf_merge=False,
     ):
@@ -316,6 +353,8 @@ class Model:
             Custom name for the dataset. If None, uses the filename.
         source_streams : list of dict | None
             Ordered source-stream metadata used by the stream viewer.
+        marker_streams : list of dict | None
+            Ordered XDF marker-stream metadata used by the annotation timeline.
         source_files : list of str | None
             All source paths when one data set was assembled from multiple files.
         is_xdf_merge : bool
@@ -361,6 +400,7 @@ class Model:
                 events=events,
                 event_mapping=event_mapping,
                 source_streams=deepcopy(source_streams),
+                marker_streams=deepcopy(marker_streams),
                 source_files=source_files,
                 is_xdf_merge=bool(is_xdf_merge),
                 _cache_path=None,
@@ -372,7 +412,7 @@ class Model:
         """Load data set from file."""
         fname = str(Path(fname).resolve().as_posix())
         try:
-            data = read_raw(fname, *args, **kwargs, preload=True)
+            data = _read_raw_data(fname, *args, **kwargs, preload=True)
         except ValueError as e:
             try:
                 data = read_epochs(fname, *args, **kwargs, preload=True)
@@ -930,17 +970,19 @@ class Model:
         """Apply filters to the current data based on provided parameters."""
         data = self.current["data"]
 
-        def apply_filter(method, *args, picks=None):
-            kwargs = {} if picks is None else {"picks": picks}
+        def apply_filter(filter_method, *args, picks=None, **method_kwargs):
+            kwargs = dict(method_kwargs)
+            if picks is not None:
+                kwargs["picks"] = picks
             try:
-                method(*args, **kwargs)
+                filter_method(*args, **kwargs)
             except ValueError as error:
                 if picks is not None or "yielded no channels" not in str(error):
                     raise
                 # MNE's default picks omit auxiliary types such as ``misc``.
                 # Explicitly include them when the recording has no standard
                 # physiological data channels.
-                method(*args, picks="all")
+                filter_method(*args, picks="all", **method_kwargs)
 
         def filter_one(lower, upper, notch, picks=None):
             picks_kwarg = "" if picks is None else f", picks={picks!r}"
@@ -966,6 +1008,99 @@ class Model:
                 return f"notch {notch_text}\u2009Hz"
             return None
 
+        def filter_one_edfbrowser(stream_filter):
+            """Apply one model-explicit EDFbrowser-style filter specification."""
+            kind = stream_filter["kind"]
+            model = stream_filter["model"]
+            picks = list(stream_filter["picks"])
+            picks_kwarg = f", picks={picks!r}"
+
+            if model == "moving_average":
+                samples = int(stream_filter["samples"])
+                highpass = kind == "highpass"
+                data.apply_function(
+                    _moving_average_filter,
+                    picks=picks,
+                    samples=samples,
+                    highpass=highpass,
+                )
+                self.history.append(
+                    "data.apply_function(_moving_average_filter"
+                    f"{picks_kwarg}, samples={samples}, highpass={highpass})"
+                )
+                return f"{kind} moving average ({samples} samples)"
+
+            if kind == "notch":
+                frequencies = stream_filter["notch"]
+                if not isinstance(frequencies, (list, tuple, np.ndarray)):
+                    frequencies = [frequencies]
+                q_factor = int(stream_filter["q_factor"])
+                for frequency in frequencies:
+                    b, a = scipy.signal.iirnotch(
+                        float(frequency),
+                        q_factor,
+                        fs=float(data.info["sfreq"]),
+                    )
+                    iir_params = {"b": b, "a": a}
+                    apply_filter(
+                        data.notch_filter,
+                        float(frequency),
+                        picks=picks,
+                        method="iir",
+                        iir_params=iir_params,
+                        phase="forward",
+                    )
+                    self.history.append(
+                        "b, a = scipy.signal.iirnotch("
+                        f"{float(frequency)}, {q_factor}, "
+                        f"fs={float(data.info['sfreq'])})"
+                    )
+                    self.history.append(
+                        f"data.notch_filter({float(frequency)}{picks_kwarg}, "
+                        "method='iir', "
+                        "iir_params={'b': b, 'a': a}, phase='forward')"
+                    )
+                frequency_text = ", ".join(f"{float(value):g}" for value in frequencies)
+                return f"notch {frequency_text}\u2009Hz (Q {q_factor})"
+
+            low = stream_filter.get("lower")
+            high = stream_filter.get("upper")
+            if kind == "bandstop":
+                low, high = high, low
+            model_names = {
+                "butterworth": "butter",
+                "chebyshev": "cheby1",
+                "bessel": "bessel",
+            }
+            order = int(stream_filter["order"])
+            design_order = order // 2 if kind in {"bandpass", "bandstop"} else order
+            iir_params = {
+                "order": design_order,
+                "ftype": model_names[model],
+                "output": "sos",
+            }
+            if model == "chebyshev":
+                iir_params["rp"] = float(stream_filter["ripple"])
+            apply_filter(
+                data.filter,
+                low,
+                high,
+                picks=picks,
+                method="iir",
+                iir_params=iir_params,
+                phase="forward",
+            )
+            self.history.append(
+                f"data.filter({low}, {high}{picks_kwarg}, method='iir', "
+                f"iir_params={iir_params!r}, phase='forward')"
+            )
+            if kind in {"bandpass", "bandstop"}:
+                return (
+                    f"{kind} {stream_filter['lower']}-{stream_filter['upper']}\u2009Hz"
+                )
+            cutoff = low if kind == "highpass" else high
+            return f"{kind} {cutoff}\u2009Hz"
+
         if stream_filters is None:
             description = filter_one(lower, upper, notch)
             if description is not None:
@@ -974,12 +1109,15 @@ class Model:
 
         applied = []
         for stream_filter in stream_filters:
-            description = filter_one(
-                stream_filter.get("lower"),
-                stream_filter.get("upper"),
-                stream_filter.get("notch"),
-                picks=list(stream_filter["picks"]),
-            )
+            if "kind" in stream_filter:
+                description = filter_one_edfbrowser(stream_filter)
+            else:
+                description = filter_one(
+                    stream_filter.get("lower"),
+                    stream_filter.get("upper"),
+                    stream_filter.get("notch"),
+                    picks=list(stream_filter["picks"]),
+                )
             if description is not None:
                 applied.append(
                     f"{stream_filter.get('stream_name', 'Data')}: {description}"

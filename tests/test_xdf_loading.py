@@ -16,14 +16,17 @@ from mnelab.mainwindow import (
     MainWindow,
     XDFImportError,
     _align_xdf_channel_union,
+    _apply_xdf_stream_channel_types,
     _chronological_xdf_groups,
     _chronological_xdf_order,
     _empty_xdf_stream_warning,
     _merge_xdf_raws,
+    _name_xdf_marker_annotations,
     _qualify_xdf_duplicate_channels,
     _resolve_xdf_rows,
     _unify_xdf_streams,
     _xdf_files_in_folder,
+    _xdf_marker_stream_descriptors,
     _xdf_stream_descriptors,
 )
 from mnelab.model import Model
@@ -114,6 +117,54 @@ def test_empty_xdf_stream_warning_explains_stream_ids_and_outcome():
     assert "The other selected streams were loaded successfully" in message
 
 
+def test_multiple_marker_streams_receive_distinct_human_readable_names():
+    """Marker lanes use XDF names and disambiguate duplicate names with IDs."""
+    rows = [
+        [2, "Keyboard", "Markers", 1, "string", 0.0],
+        [4, "Keyboard", "Markers", 1, "string", 0.0],
+        [8, "Foot Pedal", "Markers", 1, "string", 0.0],
+    ]
+
+    descriptors = _xdf_marker_stream_descriptors(rows, [2, 4, 8])
+
+    assert [stream["name"] for stream in descriptors] == [
+        "Keyboard (ID 2)",
+        "Keyboard (ID 4)",
+        "Foot Pedal",
+    ]
+    assert descriptors[2]["annotation_prefix"] == "Foot Pedal — "
+
+
+def test_marker_annotation_ids_are_replaced_by_stream_names():
+    """The internal provenance prefix never leaks into displayed marker text."""
+    raw = mne.io.RawArray(
+        np.ones((1, 100)),
+        mne.create_info(["EMG"], 100, ["emg"]),
+        verbose=False,
+    )
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[0.1, 0.2],
+            duration=[0, 0],
+            description=["2-space", "8-pressed"],
+        )
+    )
+    streams = _xdf_marker_stream_descriptors(
+        [
+            [2, "Keyboard", "Markers", 1, "string", 0.0],
+            [8, "Foot Pedal", "Markers", 1, "string", 0.0],
+        ],
+        [2, 8],
+    )
+
+    _name_xdf_marker_annotations(raw, streams)
+
+    assert list(raw.annotations.description) == [
+        "Keyboard — space",
+        "Foot Pedal — pressed",
+    ]
+
+
 @pytest.mark.parametrize(
     ("stream_ids", "message"),
     [
@@ -158,6 +209,25 @@ def test_xdf_stream_descriptors_preserve_loaded_stream_boundaries():
     assert descriptors[1]["declared_channel_count"] == 4
     assert descriptors[2]["channel_names"] == ["x", "y", "pupil"]
     assert descriptors[2]["nominal_srate"] == 120.0
+
+
+def test_xdf_stream_type_promotes_untyped_emg_channels():
+    """A stream-level EMG type repairs XDF channels imported as MISC."""
+    raw = mne.io.RawArray(
+        np.zeros((3, 10)),
+        mne.create_info(["EMG 1", "EMG 2", "Typed EEG"], 100, ["misc", "misc", "eeg"]),
+    )
+    streams = [
+        {
+            "name": "XtrodesEMG",
+            "type": "EMG",
+            "channel_names": ["EMG 1", "EMG 2", "Typed EEG"],
+        }
+    ]
+
+    _apply_xdf_stream_channel_types(raw, streams)
+
+    assert raw.get_channel_types() == ["emg", "emg", "eeg"]
 
 
 def test_xdf_stream_descriptors_reject_channel_mismatch():
