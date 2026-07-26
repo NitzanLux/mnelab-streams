@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QPoint,
     QRectF,
     QRunnable,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -1120,6 +1121,17 @@ class StreamPanel(QFrame):
         self._update_channel_list()
         self._update_page_controls()
         self._update_scale_mode_controls()
+        self._size_hint_chrome_height = max(
+            0, super().sizeHint().height() - self._plot_height
+        )
+
+    def sizeHint(self):
+        """Return a panel height that follows its independently resized plot."""
+        hint = super().sizeHint()
+        chrome_height = getattr(self, "_size_hint_chrome_height", None)
+        if chrome_height is None:
+            return hint
+        return QSize(hint.width(), chrome_height + self._plot_height)
 
     @property
     def title(self):
