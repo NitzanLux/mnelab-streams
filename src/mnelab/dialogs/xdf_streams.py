@@ -96,11 +96,12 @@ class XDFStreamsDialog(QDialog):
         self.gap_threshold.setSuffix(" s")
         self.gap_threshold.setEnabled(False)
 
-        self._prefix_markers = QCheckBox("Prefix Markers with Stream ID")
+        self._prefix_markers = QCheckBox("Include Stream IDs in Marker Names")
         self._prefix_markers.setChecked(False)
 
         self.marker_note = QLabel(
-            "Selected marker streams are automatically converted to annotations."
+            "Selected marker streams are converted to annotations. When more than one "
+            "is selected, the viewer shows a separate lane named after each stream."
         )
         self.marker_note.setWordWrap(True)
         self.marker_note.setStyleSheet(f"color: {muted.name()}; font-style: italic;")

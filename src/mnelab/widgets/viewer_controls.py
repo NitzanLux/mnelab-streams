@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -30,6 +31,7 @@ class AnnotationSidebar(QWidget):
     def __init__(self, raw, parent=None):
         super().__init__(parent)
         self.raw = raw
+        self._suppressed_indices = set()
         self._regex_pattern = None
         self._regex_error = None
         self.setMinimumWidth(100)
@@ -71,7 +73,10 @@ class AnnotationSidebar(QWidget):
         self.list.setAlternatingRowColors(True)
         self.list.setWordWrap(True)
         self.list.setUniformItemSizes(False)
-        self.list.setToolTip("Click an annotation to center it in the viewer")
+        self.list.setToolTip(
+            "Click an annotation to center it; right-click to suppress or restore it"
+        )
+        self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         layout.addWidget(self.list, 1)
 
         self.count_label = QLabel()
@@ -93,6 +98,9 @@ class AnnotationSidebar(QWidget):
         self.apply_to_plots.toggled.connect(self.filter_changed)
         self.list.itemClicked.connect(self._item_selected)
         self.list.itemActivated.connect(self._item_selected)
+        self.list.customContextMenuRequested.connect(
+            self._show_annotation_context_menu
+        )
         self.refresh_list()
 
     @property
@@ -148,9 +156,90 @@ class AnnotationSidebar(QWidget):
         )
         return not matches if self.invert_checkbox.isChecked() else matches
 
-    def plot_accepts(self, description):
+    def plot_accepts(self, annotation_index, description):
         """Return whether an annotation should be rendered on plots."""
+        if int(annotation_index) in self._suppressed_indices:
+            return False
         return not self.apply_to_plots.isChecked() or self.accepts(description)
+
+    @property
+    def suppressed_indices(self):
+        """Return the source indices hidden from all viewer plots."""
+        return tuple(sorted(self._suppressed_indices))
+
+    def annotation_visible(self, annotation_index):
+        """Return whether one source annotation is enabled for display."""
+        return int(annotation_index) not in self._suppressed_indices
+
+    def set_annotation_visible(self, annotation_index, visible):
+        """Show or suppress one annotation without modifying the Raw object."""
+        annotation_index = int(annotation_index)
+        annotation_count = (
+            len(self.raw.annotations)
+            if hasattr(self.raw, "annotations")
+            else 0
+        )
+        if annotation_index < 0 or annotation_index >= annotation_count:
+            raise IndexError("Unknown annotation index.")
+        changed = False
+        if visible:
+            if annotation_index in self._suppressed_indices:
+                self._suppressed_indices.remove(annotation_index)
+                changed = True
+        elif annotation_index not in self._suppressed_indices:
+            self._suppressed_indices.add(annotation_index)
+            changed = True
+        if changed:
+            self.refresh_list()
+            self.filter_changed.emit()
+
+    def show_all_annotations(self):
+        """Restore every annotation suppressed in this viewer."""
+        if not self._suppressed_indices:
+            return
+        self._suppressed_indices.clear()
+        self.refresh_list()
+        self.filter_changed.emit()
+
+    def create_annotation_context_menu(self, annotation_index=None):
+        """Create visibility actions for one annotation or the browser."""
+        menu = QMenu(self)
+        if annotation_index is not None:
+            annotation_index = int(annotation_index)
+            visible = self.annotation_visible(annotation_index)
+            menu.addAction(
+                "Suppress Annotation" if visible else "Show Annotation",
+                lambda _checked=False, index=annotation_index, show=not visible: (
+                    self.set_annotation_visible(index, show)
+                ),
+            )
+        if self._suppressed_indices:
+            if annotation_index is not None:
+                menu.addSeparator()
+            show_menu = menu.addMenu("Show Suppressed Annotation")
+            for index in sorted(self._suppressed_indices):
+                description = str(self.raw.annotations.description[index])
+                onset = float(
+                    self.raw.annotations.onset[index] - self.raw.first_time
+                )
+                show_menu.addAction(
+                    f"{onset:.3f} s  {description}",
+                    lambda _checked=False, index=index: (
+                        self.set_annotation_visible(index, True)
+                    ),
+                )
+            menu.addAction("Show All Annotations", self.show_all_annotations)
+        return menu
+
+    def _show_annotation_context_menu(self, position):
+        """Open visibility actions for the annotation under ``position``."""
+        item = self.list.itemAt(position)
+        annotation_index = (
+            None if item is None else item.data(ANNOTATION_INDEX_ROLE)
+        )
+        menu = self.create_annotation_context_menu(annotation_index)
+        if menu.actions():
+            menu.exec(self.list.viewport().mapToGlobal(position))
 
     def refresh_list(self):
         """Rebuild the chronological whole-recording annotation list."""
@@ -180,14 +269,29 @@ class AnnotationSidebar(QWidget):
             item = QListWidgetItem(f"{start:10.3f} s  {description}{duration_text}")
             item.setData(Qt.ItemDataRole.UserRole, start)
             item.setData(ANNOTATION_INDEX_ROLE, annotation_index)
+            suppressed = annotation_index in self._suppressed_indices
+            font = item.font()
+            font.setStrikeOut(suppressed)
+            item.setFont(font)
             item.setToolTip(
                 f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
-                f"Description: {description}"
+                f"Description: {description}\n"
+                f"Display: {'Suppressed' if suppressed else 'Shown'}"
             )
             self.list.addItem(item)
             visible_count += 1
         if self._regex_error is None:
-            self.count_label.setText(f"Showing {visible_count} of {len(records)}")
+            suppressed_count = sum(
+                record[0] in self._suppressed_indices for record in records
+            )
+            suffix = (
+                f" · {suppressed_count} suppressed"
+                if suppressed_count
+                else ""
+            )
+            self.count_label.setText(
+                f"Showing {visible_count} of {len(records)}{suffix}"
+            )
         else:
             self.count_label.setText(f"Invalid regex: {self._regex_error}")
 

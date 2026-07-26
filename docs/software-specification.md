@@ -446,18 +446,25 @@ annotations rather than silently replace them.
 
 ### 10.1 Filtering and time operations
 
-- Low-pass, high-pass, band-pass, and notch filters shall be available.
+- High-pass, low-pass, notch, band-pass, and band-stop filters shall be available.
 - Filtering shall use the same ordered source-stream groups as the raw-data viewer.
-  Each stream can be filtered independently or left unchanged. Within an enabled
-  stream, checkable channel targets and a current-target summary shall make the exact
-  filter scope visible before processing. Cutoff controls shall not exceed half of
-  that stream's nominal sampling rate.
+  A target-selection page shall first choose relevant streams and then their exact
+  channels. A following options page shall configure each selected stream
+  independently. A current-target summary shall make the exact filter scope visible
+  before processing. Cutoff controls shall not exceed half of that stream's nominal
+  sampling rate.
+- Filter options shall follow EDFbrowser's applicable controls: Butterworth,
+  Chebyshev, and Bessel models; order and Butterworth slope; Chebyshev passband
+  ripple; moving-average sample count for high- and low-pass filters; and a resonator
+  Q-factor with displayed -3 dB bandwidth for notch filters. Band filter order shall
+  be even.
 - Notch filters shall optionally include every integer harmonic of the selected
   fundamental frequency that remains strictly below the target stream's Nyquist
   frequency. The expanded frequency list and selected channel picks shall be retained
   in processing history.
-- Cutoff values must be positive; a band-pass upper cutoff must exceed its lower
-  cutoff. The UI steps in 0.5 Hz increments.
+- Cutoff values must be positive; a band-pass or band-stop upper cutoff must remain
+  at least 12% above its lower cutoff, matching EDFbrowser's paired-frequency
+  controls. The UI steps in 0.5 Hz increments.
 - Resampling shall accept 0.1-1,000,000 Hz and rely on MNE's anti-alias filtering.
 - Raw cropping shall allow either endpoint to be omitted and shall clamp selected
   endpoints to the recording bounds.
@@ -475,11 +482,12 @@ user accepts the dialog.
 A filter preset is a UTF-8 JSON object with the format marker
 `mnelab-filter-preset`, version `1`, and one entry per source stream. Each stream entry
 contains its name, type, complete channel-name membership, and either `null` for a
-disabled stream or one semantic low-pass, high-pass, band-pass, or notch specification.
-Enabled filters store their targeted channel names; notch filters store the fundamental
-frequency and whether harmonics up to Nyquist are requested rather than storing an
-expanded frequency list. Dialog layout details such as the panel column count are not
-part of the preset.
+disabled stream or one semantic high-pass, low-pass, notch, band-pass, or band-stop
+specification. Enabled filters store their targeted channel names, model, and
+model-specific order, sample-count, ripple, or Q-factor values. Notch filters store the
+fundamental frequency and whether harmonics up to Nyquist are requested rather than
+storing an expanded frequency list. Dialog layout details such as the panel column
+count are not part of the preset.
 
 Loading shall be transactional and require an exact one-to-one match of stream name,
 type, and channel membership. Stream and channel order may differ. Missing, additional,
@@ -638,7 +646,8 @@ Right-clicking a channel row shall expose:
 - select an individual display unit or inherit the panel default;
 - enter a vertical visual offset from -1 to +1 channel lanes;
 - enable **Zero Offset (Remove DC)**;
-- select a trace color or return to automatic color;
+- select a trace color or return to an automatic high-contrast palette that follows
+  the current visible channel order;
 - mark/unmark the scientific channel as bad; and
 - reset all display-only properties for that channel.
 
@@ -655,9 +664,15 @@ modifies, filters, or writes the underlying MNE data.
 
 ### 12.6 Events and annotation overlays
 
+- Layout controls, stream controls, channel lists, event markers, annotation regions,
+  the marker timeline, and the annotation browser shall be visible by default.
 - Events shall appear as vertical lines in every signal panel at shared event times.
-- Annotations shall appear as colored regions in every signal panel and in a dedicated
-  150-pixel-high annotation lane below the panel area.
+- Annotations shall appear as colored regions in every signal panel and in a
+  dedicated annotation lane below the panel area.
+- The **View > Smart Marker Label Layout** option shall be disabled by default. When
+  enabled, it shall measure label widths, pack nearby labels into the minimum number
+  of chronological sub-rows per marker stream, make label text clickable, and adjust
+  the timeline height to the rows in use.
 - Zero-duration annotations shall receive a minimum visible width of one sample.
 - Annotation descriptions shall appear only in the dedicated annotation lane. They
   shall remain horizontal, wrap to the available region width, and be clipped within
@@ -667,11 +682,18 @@ modifies, filters, or writes the underlying MNE data.
 
 ### 12.7 Annotation browser and regex filter
 
-The right-side **Annotations** dock shall be closable/collapsible, movable between the
-left and right dock areas, and floatable. It shall list all recording annotations in
-chronological order with onset, description, optional duration, and a count of visible
-versus total records. Selecting an item shall center its onset in the shared viewer;
-clicking an annotation in the dedicated lane shall highlight and reveal its list item.
+Individual annotations may be suppressed from the signal panels and marker timeline
+through the annotation browser. Suppression shall be display-only: the browser shall
+retain suppressed entries with struck-through text so they can be restored
+individually or all at once, and the underlying MNE annotations shall remain
+unchanged.
+
+The right-side **Annotations** dock shall be closable/collapsible and movable between
+the left and right dock areas, but it shall not be floatable. It shall list all
+recording annotations in chronological order with onset, description, optional
+duration, and a count of visible versus total records. Selecting an item shall center
+its onset in the shared viewer; clicking an annotation in the dedicated lane shall
+highlight and reveal its list item.
 
 Filtering shall support:
 

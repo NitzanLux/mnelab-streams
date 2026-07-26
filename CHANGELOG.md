@@ -1,9 +1,15 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Select filter target streams and channels before configuration, add band-stop
+  filtering, and expose EDFbrowser-inspired Butterworth, Chebyshev, Bessel,
+  moving-average, order, ripple, resonator Q-factor, bandwidth, and notch-harmonic
+  controls (by [NitzanLux](https://github.com/NitzanLux))
 - Add file- and folder-based multi-XDF import with time-based dataset splitting, NaN-aligned channel unions, stream-qualified duplicate labels, same-name stream unification, and optional skipping of damaged files (by [NitzanLux](https://github.com/NitzanLux))
 - Mark merged XDF datasets in the sidebar and information panel, and allow them to be saved as a single XDF while retaining distinct source-stream entities (by [NitzanLux](https://github.com/NitzanLux))
 - Allow each stream-viewer channel to use its own display unit, including custom IMU
   and sensor unit labels, with persistence in display montages
+- Add right-click stream display properties with exact per-stream physical amplitude
+  scales and reversible lane fitting
 - Add reusable JSON filter presets for per-stream filter operations and channel targets
 
 ### 🔧 Fixed

@@ -87,7 +87,8 @@ uv run ruff format --check
 
 1. Choose **File > Open** and select a supported file.
 2. Choose **Plot > Data** to open the synchronized raw stream viewer.
-3. Use a stream header to fit, rearrange, join, split, dock, or float panels.
+3. Use a stream header to fit, rearrange, join, split, dock, or float panels; right-click
+   it to set an exact per-stream amplitude such as `100 µV/div`.
 4. Right-click a channel for display controls, metadata, statistics, or bad-channel
    status.
 5. Use **Display Montage** in the viewer to save or restore the presentation layout.
@@ -106,8 +107,11 @@ uv run ruff format --check
 
 ### Filter or inspect spectra by source
 
-- Choose **Process > Filter** to enable a filter independently for each stream and
-  select its target channels.
+- Choose **Process > Filter**, select source streams and channels on the first page,
+  then configure each selected stream independently. Available designs mirror
+  EDFbrowser's high-pass, low-pass, notch, band-pass, and band-stop controls,
+  including Butterworth, Chebyshev, Bessel, moving-average, notch Q-factor, and
+  optional harmonic-notch settings.
 - Choose **Plot > Power Spectral Density** for source-oriented stacked or overlay
   spectra. Each source is clipped to its own valid Nyquist range.
 

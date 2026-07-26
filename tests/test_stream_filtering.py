@@ -65,6 +65,9 @@ def test_filter_dialog_has_independent_source_stream_panels(qtbot):
         {
             "stream_name": "Amplifier",
             "picks": ["EEG 1", "EEG 2"],
+            "kind": "bandpass",
+            "model": "butterworth",
+            "order": 2,
             "lower": 2.0,
             "upper": 25.0,
             "notch": None,
@@ -72,9 +75,13 @@ def test_filter_dialog_has_independent_source_stream_panels(qtbot):
         {
             "stream_name": "Accessory",
             "picks": ["Aux"],
+            "kind": "notch",
+            "model": "resonator",
+            "order": 20,
             "lower": None,
             "upper": None,
             "notch": 40.0,
+            "q_factor": 20,
         },
     ]
 
@@ -83,6 +90,96 @@ def test_filter_dialog_has_independent_source_stream_panels(qtbot):
 
     dialog.column_spin.setValue(2)
     assert dialog.panel_layout.getItemPosition(1)[:2] == (0, 1)
+
+
+def test_filter_target_page_selects_streams_then_channels(qtbot):
+    """The first page defines exact targets before filter options are shown."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(dialog)
+    amplifier_item = dialog.targets_page.tree.topLevelItem(0)
+    accessory_item = dialog.targets_page.tree.topLevelItem(1)
+
+    amplifier_item.child(1).setCheckState(0, Qt.CheckState.Unchecked)
+    accessory_item.setCheckState(0, Qt.CheckState.Unchecked)
+
+    assert dialog.targets_page.selected_targets == {0: ["EEG 1"]}
+    assert dialog.next_button.isEnabled()
+    dialog._show_filter_options()
+
+    assert dialog.pages.currentWidget() is dialog.filter_page
+    assert dialog.panels[0].selected_channels == ["EEG 1"]
+    assert dialog.panels[0].apply_edit.isChecked()
+    assert not dialog.panels[1].apply_edit.isChecked()
+    assert dialog.filters[0]["picks"] == ["EEG 1"]
+    assert dialog.panels[1].isHidden()
+
+
+def test_filter_options_match_edfbrowser_models_and_ranges(qtbot):
+    """EDFbrowser types expose only their applicable model-specific controls."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(dialog)
+    panel = dialog.panels[0]
+
+    assert [
+        panel.filter_type_edit.itemText(index)
+        for index in range(panel.filter_type_edit.count())
+    ] == ["Highpass", "Lowpass", "Notch", "Bandpass", "Bandstop"]
+    assert [
+        panel.model_edit.itemText(index) for index in range(panel.model_edit.count())
+    ] == ["Butterworth", "Chebyshev", "Bessel", "Moving Average"]
+    assert (panel.order_edit.minimum(), panel.order_edit.maximum()) == (1, 8)
+
+    panel.filter_type_edit.setCurrentText("Bandstop")
+    assert [
+        panel.model_edit.itemText(index) for index in range(panel.model_edit.count())
+    ] == ["Butterworth", "Chebyshev", "Bessel"]
+    assert (
+        panel.order_edit.minimum(),
+        panel.order_edit.maximum(),
+        panel.order_edit.singleStep(),
+    ) == (2, 16, 2)
+    panel.model_edit.setCurrentText("Chebyshev")
+    panel.order_edit.setValue(6)
+    panel.ripple_edit.setValue(1.5)
+    panel.lower_edit.setValue(10)
+    panel.upper_edit.setValue(20)
+    assert panel.filter_spec["kind"] == "bandstop"
+    assert panel.filter_spec["model"] == "chebyshev"
+    assert panel.filter_spec["ripple"] == 1.5
+
+    panel.filter_type_edit.setCurrentText("Notch")
+    assert panel.model_edit.currentText() == "Resonator"
+    assert (panel.order_edit.minimum(), panel.order_edit.maximum()) == (3, 100)
+    assert panel.order_edit.value() == 20
+    panel.notch_edit.setValue(25)
+    panel.order_edit.setValue(10)
+    assert panel.order_detail_label.text() == "-3 dB bandwidth: 2.5 Hz"
+
+    panel.filter_type_edit.setCurrentText("Lowpass")
+    panel.model_edit.setCurrentText("Moving Average")
+    assert (panel.order_edit.minimum(), panel.order_edit.maximum()) == (2, 10000)
+    assert panel.order_edit.value() == 16
+    assert panel.filter_spec["samples"] == 16
+
+
+def test_band_frequencies_do_not_rewrite_each_other(qtbot):
+    """Band frequency controls remain independent even for an invalid pair."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(dialog)
+    panel = dialog.panels[0]
+    panel.filter_type_edit.setCurrentText("Bandpass")
+
+    panel.upper_edit.setValue(25)
+    panel.lower_edit.setValue(24)
+    assert panel.upper_edit.value() == 25
+
+    panel.lower_edit.setValue(10)
+    panel.upper_edit.setValue(10.5)
+    assert panel.lower_edit.value() == 10
+    assert not panel.is_valid
 
 
 def test_model_applies_each_filter_only_to_its_stream(tmp_path):
@@ -122,6 +219,160 @@ def test_model_applies_each_filter_only_to_its_stream(tmp_path):
         "data.notch_filter(40.0, picks=['Aux'])",
     ]
     assert model.current["name"].endswith("(filtered per stream)")
+
+
+def test_model_applies_edfbrowser_chebyshev_bandstop(tmp_path):
+    """Band-stop order and ripple map to a causal Chebyshev IIR design."""
+    raw, streams = _raw_and_streams()
+    path = tmp_path / "bandstop.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path, source_streams=streams)
+    stream_filter = {
+        "stream_name": "Amplifier",
+        "picks": ["EEG 1"],
+        "kind": "bandstop",
+        "model": "chebyshev",
+        "order": 6,
+        "ripple": 1.5,
+        "lower": 10.0,
+        "upper": 20.0,
+        "notch": None,
+    }
+
+    with patch.object(raw, "filter") as filter_mock:
+        model.filter(stream_filters=[stream_filter])
+
+    filter_mock.assert_called_once_with(
+        20.0,
+        10.0,
+        picks=["EEG 1"],
+        method="iir",
+        iir_params={
+            "order": 3,
+            "ftype": "cheby1",
+            "output": "sos",
+            "rp": 1.5,
+        },
+        phase="forward",
+    )
+
+
+def test_model_applies_resonator_notch_to_each_harmonic(tmp_path):
+    """Notch harmonics retain the chosen Q-factor in separate IIR sections."""
+    raw, streams = _raw_and_streams()
+    path = tmp_path / "resonator.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path, source_streams=streams)
+    stream_filter = {
+        "stream_name": "Amplifier",
+        "picks": ["EEG 2"],
+        "kind": "notch",
+        "model": "resonator",
+        "order": 10,
+        "q_factor": 10,
+        "lower": None,
+        "upper": None,
+        "notch": [20.0, 40.0],
+    }
+    coefficients = (np.array([1.0, 0.0]), np.array([1.0, 0.0]))
+
+    with (
+        patch(
+            "mnelab.model.scipy.signal.iirnotch",
+            return_value=coefficients,
+        ) as design_mock,
+        patch.object(raw, "notch_filter") as notch_mock,
+    ):
+        model.filter(stream_filters=[stream_filter])
+
+    assert design_mock.call_args_list == [
+        call(20.0, 10, fs=100.0),
+        call(40.0, 10, fs=100.0),
+    ]
+    assert notch_mock.call_count == 2
+    assert [item.args[0] for item in notch_mock.call_args_list] == [20.0, 40.0]
+    assert all(item.kwargs["method"] == "iir" for item in notch_mock.call_args_list)
+    assert all(item.kwargs["phase"] == "forward" for item in notch_mock.call_args_list)
+
+
+def test_model_applies_moving_average_only_to_selected_channels(tmp_path):
+    """Moving-average filtering is causal, finite-span aware, and pick-scoped."""
+    raw = mne.io.RawArray(
+        np.array([[0.0, 1.0, 2.0, 3.0], [10.0, 11.0, 12.0, 13.0]]),
+        mne.create_info(["A", "B"], 100, ["misc", "misc"]),
+        verbose=False,
+    )
+    path = tmp_path / "moving-average.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    model.filter(
+        stream_filters=[
+            {
+                "stream_name": "Data",
+                "picks": ["A"],
+                "kind": "lowpass",
+                "model": "moving_average",
+                "order": 3,
+                "samples": 3,
+                "lower": None,
+                "upper": None,
+                "notch": None,
+            }
+        ]
+    )
+
+    np.testing.assert_allclose(raw.get_data(picks=["A"])[0], [0, 1 / 3, 1, 2])
+    np.testing.assert_allclose(raw.get_data(picks=["B"])[0], [10, 11, 12, 13])
+
+
+def test_model_explicit_iir_and_resonator_filters_execute_with_mne(tmp_path):
+    """The generated IIR parameters are accepted by the installed MNE version."""
+    rng = np.random.default_rng(42)
+    raw = mne.io.RawArray(
+        rng.standard_normal((2, 2000)),
+        mne.create_info(["A", "B"], 200, ["eeg", "eeg"]),
+        verbose=False,
+    )
+    before = raw.get_data().copy()
+    path = tmp_path / "iir.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    model.filter(
+        stream_filters=[
+            {
+                "stream_name": "Data",
+                "picks": ["A"],
+                "kind": "lowpass",
+                "model": "butterworth",
+                "order": 4,
+                "lower": None,
+                "upper": 30.0,
+                "notch": None,
+            },
+            {
+                "stream_name": "Data",
+                "picks": ["B"],
+                "kind": "notch",
+                "model": "resonator",
+                "order": 20,
+                "q_factor": 20,
+                "lower": None,
+                "upper": None,
+                "notch": 50.0,
+            },
+        ]
+    )
+
+    assert np.isfinite(raw.get_data()).all()
+    assert not np.array_equal(raw.get_data(picks=["A"])[0], before[0])
+    assert not np.array_equal(raw.get_data(picks=["B"])[0], before[1])
+    compile("\n".join(model.history), "<MNELAB history>", "exec")
 
 
 def test_filter_panel_marks_current_channel_targets(qtbot):
@@ -169,17 +420,48 @@ def test_notch_filter_can_include_nyquist_bounded_harmonics(qtbot):
 @pytest.mark.parametrize(
     ("filter_type", "values", "expected"),
     [
-        ("Lowpass", {"upper": 20}, {"kind": "lowpass", "cutoff": 20.0}),
-        ("Highpass", {"lower": 2}, {"kind": "highpass", "cutoff": 2.0}),
+        (
+            "Lowpass",
+            {"upper": 20},
+            {
+                "kind": "lowpass",
+                "model": "butterworth",
+                "order": 1,
+                "cutoff": 20.0,
+            },
+        ),
+        (
+            "Highpass",
+            {"lower": 2},
+            {
+                "kind": "highpass",
+                "model": "butterworth",
+                "order": 1,
+                "cutoff": 2.0,
+            },
+        ),
         (
             "Bandpass",
             {"lower": 2, "upper": 20},
-            {"kind": "bandpass", "low": 2.0, "high": 20.0},
+            {
+                "kind": "bandpass",
+                "model": "butterworth",
+                "order": 2,
+                "low": 2.0,
+                "high": 20.0,
+            },
         ),
         (
             "Notch",
             {"notch": 20, "harmonics": True},
-            {"kind": "notch", "frequency": 20.0, "harmonics": True},
+            {
+                "kind": "notch",
+                "model": "resonator",
+                "order": 20,
+                "frequency": 20.0,
+                "harmonics": True,
+                "q_factor": 20,
+            },
         ),
     ],
 )
@@ -244,19 +526,50 @@ def test_filter_preset_round_trip_matches_reordered_streams_and_channels(qtbot):
     assert accessory_filter == {
         "stream_name": "Accessory",
         "picks": ["Aux"],
+        "kind": "notch",
+        "model": "resonator",
+        "order": 20,
         "lower": None,
         "upper": None,
         "notch": [20.0],
+        "q_factor": 20,
     }
     assert amplifier_filter == {
         "stream_name": "Amplifier",
         "picks": ["EEG 1"],
+        "kind": "bandpass",
+        "model": "butterworth",
+        "order": 2,
         "lower": 2.0,
         "upper": 25.0,
         "notch": None,
     }
     assert restored.ok_button.isEnabled()
     assert restored.save_preset_button.isEnabled()
+
+
+def test_filter_preset_loads_legacy_version_one_design_defaults(qtbot):
+    """Version-one presets without model fields retain their former meaning."""
+    _raw, streams = _raw_and_streams()
+    source = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(source)
+    source.panels[0].filter_type_edit.setCurrentText("Bandpass")
+    source.panels[0].lower_edit.setValue(2)
+    source.panels[0].upper_edit.setValue(20)
+    source.panels[1].apply_edit.setChecked(False)
+    state = source.preset_state
+    legacy_filter = state["streams"][0]["filter"]
+    legacy_filter.pop("model")
+    legacy_filter.pop("order")
+
+    restored = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(restored)
+    restored.apply_filter_preset(state)
+
+    assert restored.filters[0]["model"] == "butterworth"
+    assert restored.filters[0]["order"] == 2
+    assert restored.filters[0]["lower"] == 2
+    assert restored.filters[0]["upper"] == 20
 
 
 def test_filter_preset_restores_disabled_streams(qtbot):
@@ -371,6 +684,9 @@ def test_filter_dialog_saves_suffix_and_loads_without_processing(qtbot, tmp_path
         {
             "stream_name": "Amplifier",
             "picks": ["EEG 1", "EEG 2"],
+            "kind": "highpass",
+            "model": "butterworth",
+            "order": 1,
             "lower": 3.0,
             "upper": None,
             "notch": None,

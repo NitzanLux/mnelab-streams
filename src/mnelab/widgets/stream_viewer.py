@@ -19,7 +19,7 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QDrag, QKeyEvent
+from PySide6.QtGui import QColor, QCursor, QDrag, QFontMetricsF, QKeyEvent
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -50,6 +50,7 @@ from PySide6.QtWidgets import (
 )
 
 from mnelab.widgets.channel_display import ChannelDisplayDialog
+from mnelab.widgets.stream_display import StreamDisplayPropertiesDialog
 from mnelab.widgets.viewer_controls import AnnotationSidebar
 from mnelab.widgets.viewer_layout import (
     ViewerLayoutError,
@@ -120,6 +121,10 @@ PANEL_BODY_SPACING = 2
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
+AUTOMATIC_TRACE_HUE_START = 210.0 / 360.0
+AUTOMATIC_TRACE_HUE_STEP = (3.0 - np.sqrt(5.0)) / 2.0
+AUTOMATIC_TRACE_SATURATION = 0.85
+AUTOMATIC_TRACE_VALUE = 0.95
 ACTIVATION_NAN_COLOR = "#9aa0a6"
 ACTIVATION_AXIS_MIN_WIDTH = 150
 ACTIVATION_AXIS_MAX_WIDTH = 360
@@ -453,6 +458,7 @@ class TraceLabelAxis(pg.AxisItem):
     def __init__(self, orientation, **kwargs):
         super().__init__(orientation, **kwargs)
         self.label_colors = {}
+        self._tick_label_names = []
 
     def set_label_colors(self, colors):
         """Set individual tick-label colors, keyed by displayed label text."""
@@ -463,6 +469,35 @@ class TraceLabelAxis(pg.AxisItem):
         self.picture = None
         self.update()
 
+    def set_channel_ticks(self, positions, names):
+        """Set lane ticks with labels elided to the fixed axis width."""
+        names = list(names)
+        font = self.style["tickFont"] or QApplication.font()
+        metrics = QFontMetricsF(font)
+        text_offset = float(self.style["tickTextOffset"][0])
+        tick_length = max(0.0, float(self.style["tickLength"]))
+        available_width = max(
+            1,
+            int(self.width() - text_offset - tick_length - 2),
+        )
+        labels = [
+            metrics.elidedText(
+                name,
+                Qt.TextElideMode.ElideLeft,
+                available_width,
+            )
+            for name in names
+        ]
+        self._tick_label_names = names
+        self.setTicks(
+            [
+                [
+                    (float(position), label)
+                    for position, label in zip(positions, labels, strict=True)
+                ]
+            ]
+        )
+
     def drawPicture(self, painter, axis_spec, tick_specs, text_specs):
         """Draw standard axis geometry, then color each tick label separately."""
         super().drawPicture(painter, axis_spec, tick_specs, [])
@@ -470,8 +505,13 @@ class TraceLabelAxis(pg.AxisItem):
             painter.setFont(self.style["tickFont"])
         painter.setClipRect(self.boundingRect().toAlignedRect())
         default_pen = self.textPen()
-        for rect, flags, label in text_specs:
-            painter.setPen(pg.mkPen(self.label_colors.get(label, default_pen.color())))
+        for index, (rect, flags, label) in enumerate(text_specs):
+            name = (
+                self._tick_label_names[index]
+                if index < len(self._tick_label_names)
+                else label
+            )
+            painter.setPen(pg.mkPen(self.label_colors.get(name, default_pen.color())))
             painter.drawText(rect, int(flags), label)
 
 
@@ -480,6 +520,7 @@ class StreamPlotWidget(pg.PlotWidget):
 
     zoom_requested = Signal(float, float)
     pan_requested = Signal(float)
+    click_requested = Signal(float)
     context_requested = Signal(object)
 
     def __init__(self, parent=None, **kwargs):
@@ -563,6 +604,8 @@ class StreamPlotWidget(pg.PlotWidget):
                 start = self._time_at(self._press_position)
                 stop = self._time_at(event.position())
                 self.zoom_requested.emit(min(start, stop), abs(stop - start))
+            else:
+                self.click_requested.emit(self._time_at(event.position()))
             self._clear_gesture()
             event.accept()
             return
@@ -645,6 +688,7 @@ class StreamPanel(QFrame):
     zoom_back_requested = Signal()
     zoom_forward_requested = Signal()
     reset_time_requested = Signal()
+    annotation_clicked = Signal(int)
 
     def __init__(
         self,
@@ -660,6 +704,8 @@ class StreamPanel(QFrame):
         gain=1.0,
         channel_order=None,
         channels_per_page=20,
+        event_overlays_visible=True,
+        annotation_overlays_visible=True,
         parent=None,
     ):
         super().__init__(parent)
@@ -669,10 +715,14 @@ class StreamPanel(QFrame):
         self._event_times = np.empty(0)
         self.set_events(events)
         self.annotation_colors = annotation_colors or {}
+        self.event_overlays_visible = bool(event_overlays_visible)
+        self.annotation_overlays_visible = bool(annotation_overlays_visible)
         self.display_scales = display_scales
         self.channel_settings = channel_settings
         self.channel_fits = channel_fits
-        self.annotation_visible = annotation_visible or (lambda _description: True)
+        self.annotation_visible = annotation_visible or (
+            lambda _index, _description: True
+        )
         source_channel_names = [
             name for source in sources for name in source["channel_names"]
         ]
@@ -688,9 +738,6 @@ class StreamPanel(QFrame):
         self._channel_types = dict(
             zip(raw.ch_names, raw.get_channel_types(), strict=True)
         )
-        self._channel_indices = {
-            name: index for index, name in enumerate(self.channel_names)
-        }
         self._source_by_channel = {
             name: source_index
             for source_index, source in enumerate(sources)
@@ -711,7 +758,9 @@ class StreamPanel(QFrame):
         outer.setContentsMargins(6, 4, 6, 6)
         outer.setSpacing(4)
 
-        header = QHBoxLayout()
+        self.header_widget = QWidget()
+        header = QHBoxLayout(self.header_widget)
+        header.setContentsMargins(0, 0, 0, 0)
         self.drag_handle = StreamDragHandle(self)
         self.drag_handle.detach_requested.connect(self.float_requested.emit)
         self.drag_handle.swap_requested.connect(self.swap_requested.emit)
@@ -725,7 +774,15 @@ class StreamPanel(QFrame):
         font.setBold(True)
         self.title_label.setFont(font)
         self.title_label.setMaximumWidth(300)
-        self.title_label.setToolTip(self._source_tooltip())
+        self.title_label.setToolTip(
+            self._source_tooltip() + "\nRight-click for stream display properties"
+        )
+        self.title_label.setContextMenuPolicy(
+            Qt.ContextMenuPolicy.CustomContextMenu
+        )
+        self.title_label.customContextMenuRequested.connect(
+            self._show_stream_context_menu
+        )
         header.addWidget(self.title_label)
         self.float_button = QPushButton("↗")
         self.float_button.setFixedWidth(30)
@@ -754,7 +811,7 @@ class StreamPanel(QFrame):
         )
         self.unit_combo.currentTextChanged.connect(self._settings_updated)
         header.addWidget(self.unit_combo)
-        header.addWidget(QLabel("Amplitude:"))
+        header.addWidget(QLabel("Gain:"))
         self.amplitude_down_button = QPushButton("−")
         self.amplitude_down_button.setFixedWidth(28)
         self.amplitude_down_button.setToolTip("Decrease amplitude by 1.25×")
@@ -769,7 +826,8 @@ class StreamPanel(QFrame):
         self.amplitude.setValue(gain)
         self.amplitude.setSuffix("×")
         self.amplitude.setToolTip(
-            "Displayed amplitude multiplier for every channel in this panel"
+            "Relative gain for every channel in this panel; use stream display "
+            "properties to set an absolute scale"
         )
         self.amplitude.valueChanged.connect(self._settings_updated)
         # Compatibility for callers of the first stream-viewer prototype.
@@ -782,13 +840,24 @@ class StreamPanel(QFrame):
             lambda: self.change_amplitude(AMPLITUDE_STEP)
         )
         header.addWidget(self.amplitude_up_button)
+        self.raw_scale_button = QPushButton("Raw")
+        self.raw_scale_button.setCheckable(True)
+        self.raw_scale_button.setToolTip(
+            "Show the current page with the normal shared stream scale"
+        )
+        self.raw_scale_button.clicked.connect(self.use_raw_scale)
+        header.addWidget(self.raw_scale_button)
         self.autoscale_button = QPushButton("Fit to Pane")
+        self.autoscale_button.setCheckable(True)
         self.autoscale_button.setToolTip(
             "Fit traces nearly edge-to-edge in their lanes without overlap"
         )
         self.autoscale_button.clicked.connect(self.fit_to_pane)
         self.fit_to_pane_button = self.autoscale_button
         header.addWidget(self.autoscale_button)
+        self.scale_mode_label = QLabel()
+        self.scale_mode_label.setMinimumWidth(72)
+        header.addWidget(self.scale_mode_label)
         self.zero_offset_button = QPushButton("Zero Offset")
         self.zero_offset_button.setToolTip(
             "Remove each visible channel's DC offset before amplitude scaling"
@@ -800,7 +869,7 @@ class StreamPanel(QFrame):
         self.scale_label.setMinimumWidth(110)
         self.scale_label.setMaximumWidth(320)
         header.addWidget(self.scale_label)
-        outer.addLayout(header)
+        outer.addWidget(self.header_widget)
 
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
@@ -844,6 +913,7 @@ class StreamPanel(QFrame):
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
         self.plot.zoom_requested.connect(self.time_zoom_requested.emit)
         self.plot.pan_requested.connect(self.time_pan_requested.emit)
+        self.plot.click_requested.connect(self._annotation_at_time_clicked)
         self.plot.context_requested.connect(self._show_plot_context_menu)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
@@ -853,8 +923,10 @@ class StreamPanel(QFrame):
         ]
         self._event_lines = []
         self._annotation_regions = []
+        self._visible_annotations = []
         self._update_channel_list()
         self._update_page_controls()
+        self._update_scale_mode_controls()
 
     @property
     def title(self):
@@ -963,6 +1035,89 @@ class StreamPanel(QFrame):
             self._fit_channel_values(name, self._values[index])
         self.redraw(self._visible_start, self._visible_duration)
 
+    def use_raw_scale(self):
+        """Return every visible trace to the normal shared stream scale."""
+        for name in self.visible_channel_names:
+            self.channel_fits.pop(name, None)
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def _update_scale_mode_controls(self):
+        """Show whether the current page uses raw, fitted, or mixed scaling."""
+        visible_names = self.visible_channel_names
+        fitted_count = sum(name in self.channel_fits for name in visible_names)
+        if visible_names and fitted_count == len(visible_names):
+            mode = "Fit"
+        elif fitted_count:
+            mode = "Mixed"
+        else:
+            mode = "Raw"
+        self.raw_scale_button.setChecked(mode == "Raw")
+        self.autoscale_button.setChecked(mode == "Fit")
+        self.scale_mode_label.setText(f"Mode: {mode}")
+
+    def fit_source_to_pane(self, source_index):
+        """Fit every visible channel from one source independently."""
+        source = self.sources[source_index]
+        visible_names = self.visible_channel_names
+        if not self._values.size:
+            return
+        for name in source["channel_names"]:
+            if name not in visible_names:
+                continue
+            row = visible_names.index(name)
+            self._fit_channel_values(name, self._values[row])
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def use_automatic_source_scale(self, source_index):
+        """Clear manual and lane-fit scales for one source."""
+        source = self.sources[source_index]
+        self.display_scales.pop(source["id"], None)
+        for name in source["channel_names"]:
+            self.channel_fits.pop(name, None)
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def source_absolute_amplitude(self, source_index, unit=None):
+        """Return one source's current signal magnitude per division."""
+        source = self.sources[source_index]
+        raw_scale = self.display_scales.get(source["id"])
+        if raw_scale is None:
+            raw_scale = 1.0
+        raw_scale /= max(self.amplitude.value(), np.finfo(float).eps)
+        if unit is None:
+            source_names = [
+                name
+                for name in source["channel_names"]
+                if name in self.channel_settings
+            ]
+            unit = (
+                self._channel_display_unit(source_names[0], raw_scale)
+                if source_names
+                else "Raw"
+            )
+        return raw_scale * UNIT_FACTORS.get(unit, 1.0), unit
+
+    def set_source_absolute_amplitude(self, source_index, amplitude, unit):
+        """Set an exact per-division scale and leave independent lane fitting."""
+        amplitude = float(amplitude)
+        if not np.isfinite(amplitude) or amplitude <= 0:
+            raise ValueError("Stream amplitude must be a positive finite number.")
+        unit = str(unit).strip() or "Raw"
+        factor = UNIT_FACTORS.get(unit, 1.0)
+        source = self.sources[source_index]
+        self.display_scales[source["id"]] = (
+            amplitude
+            / factor
+            * max(self.amplitude.value(), np.finfo(float).eps)
+        )
+        for name in source["channel_names"]:
+            self.channel_fits.pop(name, None)
+            if unit == "Auto":
+                self.channel_settings[name].pop("unit", None)
+            else:
+                self.channel_settings[name]["unit"] = unit
+        self._update_channel_list()
+        self.redraw(self._visible_start, self._visible_duration)
+
     def _fit_channel_values(self, name, values):
         """Store the visible-window center and denominator for one channel."""
         values = self._display_values(name, np.asarray(values, dtype=float))
@@ -1066,9 +1221,21 @@ class StreamPanel(QFrame):
         """Return the effective color shared by a trace and its labels."""
         if name in self.raw.info["bads"]:
             return QColor("#d62728")
-        return QColor(
-            self.channel_settings[name]["color"]
-            or pg.intColor(self._channel_indices[name], max(1, len(self.channel_names)))
+        custom_color = self.channel_settings[name]["color"]
+        if custom_color:
+            return QColor(custom_color)
+        visible_names = self.visible_channel_names
+        try:
+            visible_index = visible_names.index(name)
+        except ValueError:
+            visible_index = self.page_channel_names.index(name)
+        hue = (
+            AUTOMATIC_TRACE_HUE_START + visible_index * AUTOMATIC_TRACE_HUE_STEP
+        ) % 1.0
+        return QColor.fromHsvF(
+            hue,
+            AUTOMATIC_TRACE_SATURATION,
+            AUTOMATIC_TRACE_VALUE,
         )
 
     def reorder_channels(self, channel_order):
@@ -1081,9 +1248,6 @@ class StreamPanel(QFrame):
         if channel_order == self.channel_names:
             return
         self.channel_names = channel_order
-        self._channel_indices = {
-            name: index for index, name in enumerate(self.channel_names)
-        }
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1191,6 +1355,67 @@ class StreamPanel(QFrame):
     def open_channel_display(self, name):
         """Open the combined display editor for one channel."""
         self.create_channel_display_dialog(name).exec()
+
+    def _unit_choices_for_source(self, source_index):
+        """Return physical units represented by channels in one source."""
+        source = self.sources[source_index]
+        choices = []
+        for name in source["channel_names"]:
+            family = self._unit_family_for_channel(name)
+            choices.extend(
+                unit for unit in UNIT_CHOICES[family] if unit != "Auto"
+            )
+            if family == "raw":
+                choices.extend(SENSOR_UNIT_CHOICES)
+        return list(dict.fromkeys(choices or ["Raw"]))
+
+    def source_has_lane_fits(self, source_index):
+        """Return whether any channel in a source has an independent fit."""
+        return any(
+            name in self.channel_fits
+            for name in self.sources[source_index]["channel_names"]
+        )
+
+    def create_stream_display_dialog(self, source_index):
+        """Create an absolute-scale editor for one source stream."""
+        source = self.sources[source_index]
+        amplitude, unit = self.source_absolute_amplitude(source_index)
+        choices = self._unit_choices_for_source(source_index)
+        if unit not in choices:
+            choices.append(unit)
+        dialog = StreamDisplayPropertiesDialog(
+            source,
+            amplitude,
+            unit,
+            choices,
+            UNIT_FACTORS,
+            lane_fitted=self.source_has_lane_fits(source_index),
+            parent=self,
+        )
+
+        def sync_dialog():
+            current_amplitude, current_unit = self.source_absolute_amplitude(
+                source_index, dialog.unit
+            )
+            dialog.set_scale(current_amplitude, current_unit)
+            dialog.set_fit_status(self.source_has_lane_fits(source_index))
+
+        dialog.scale_changed.connect(
+            lambda value, display_unit: self.set_source_absolute_amplitude(
+                source_index, value, display_unit
+            )
+        )
+        dialog.fit_requested.connect(
+            lambda: (self.fit_source_to_pane(source_index), sync_dialog())
+        )
+        dialog.automatic_requested.connect(
+            lambda: (self.use_automatic_source_scale(source_index), sync_dialog())
+        )
+        return dialog
+
+    def open_stream_display(self, source_index):
+        """Open display properties for one source stream."""
+        self.create_stream_display_dialog(source_index).exec()
 
     def channel_information(self, name):
         """Return concise recording and display information for one channel."""
@@ -1438,6 +1663,49 @@ class StreamPanel(QFrame):
         )
         return menu
 
+    def _populate_stream_context_menu(self, menu, source_index):
+        """Add source-scale actions to ``menu``."""
+        source = self.sources[source_index]
+        menu.addAction(
+            "Display Properties…",
+            lambda _checked=False, index=source_index: self.open_stream_display(index),
+        )
+        menu.addAction(
+            "Fit Stream to Pane",
+            lambda _checked=False, index=source_index: self.fit_source_to_pane(index),
+        )
+        menu.addAction(
+            "Use Automatic Scale",
+            lambda _checked=False, index=source_index: (
+                self.use_automatic_source_scale(index)
+            ),
+        )
+        amplitude, unit = self.source_absolute_amplitude(source_index)
+        unit_label = "raw" if unit == "Raw" else unit
+        menu.setToolTipsVisible(True)
+        menu.actions()[0].setToolTip(
+            f"{source['name']}: {amplitude:.6g} {unit_label}/div"
+        )
+
+    def create_stream_context_menu(self, source_index=None):
+        """Create properties actions for one source or a joined panel."""
+        if source_index is not None:
+            if source_index < 0 or source_index >= len(self.sources):
+                raise IndexError("Unknown source stream index.")
+            menu = QMenu(self)
+            self._populate_stream_context_menu(menu, source_index)
+            return menu
+        menu = QMenu(self)
+        if len(self.sources) == 1:
+            self._populate_stream_context_menu(menu, 0)
+        else:
+            for index, source in enumerate(self.sources):
+                source_menu = menu.addMenu(str(source["name"]))
+                self._populate_stream_context_menu(source_menu, index)
+            menu.addSeparator()
+            menu.addAction("Fit All Streams to Pane", self.fit_to_pane)
+        return menu
+
     def _add_hidden_channel_actions(self, menu):
         hidden = [
             name
@@ -1483,6 +1751,19 @@ class StreamPanel(QFrame):
             self._add_hidden_channel_actions(menu)
         if menu.actions():
             menu.addSeparator()
+        if name is not None:
+            source_index = self._source_by_channel[name]
+            source_menu = menu.addMenu(f"{self.sources[source_index]['name']} Stream")
+            self._populate_stream_context_menu(source_menu, source_index)
+        elif len(self.sources) == 1:
+            source_menu = menu.addMenu(f"{self.sources[0]['name']} Stream")
+            self._populate_stream_context_menu(source_menu, 0)
+        else:
+            stream_menu = menu.addMenu("Streams")
+            for index, source in enumerate(self.sources):
+                source_menu = stream_menu.addMenu(str(source["name"]))
+                self._populate_stream_context_menu(source_menu, index)
+        menu.addSeparator()
         menu.addAction("Zoom Back", lambda: self.zoom_back_requested.emit())
         menu.addAction("Zoom Forward", lambda: self.zoom_forward_requested.emit())
         menu.addAction("Reset Time Window", lambda: self.reset_time_requested.emit())
@@ -1519,6 +1800,10 @@ class StreamPanel(QFrame):
         name = item.data(Qt.ItemDataRole.UserRole)
         menu = self.create_channel_context_menu(name)
         menu.exec(self.channel_list.viewport().mapToGlobal(position))
+
+    def _show_stream_context_menu(self, position):
+        menu = self.create_stream_context_menu()
+        menu.exec(self.title_label.mapToGlobal(position))
 
     def _choose_channel_gain(self, name):
         value, accepted = QInputDialog.getDouble(
@@ -1801,6 +2086,7 @@ class StreamPanel(QFrame):
 
     def redraw(self, start_time, duration):
         """Redraw cached visible data without reading the Raw object again."""
+        self._update_scale_mode_controls()
         visible_names = self.visible_channel_names
         offsets = (
             len(visible_names) - 1 - np.arange(len(visible_names))
@@ -1810,13 +2096,9 @@ class StreamPanel(QFrame):
             {name: self._channel_color(name) for name in visible_names}
         )
         if axis_channels != self._axis_channels:
-            self.plot.getAxis("left").setTicks(
-                [
-                    [
-                        (float(offset), name)
-                        for offset, name in zip(offsets, visible_names, strict=True)
-                    ]
-                ]
+            self.plot.getAxis("left").set_channel_ticks(
+                offsets,
+                visible_names,
             )
             self._axis_channels = axis_channels
         margin = self._lane_step / 2
@@ -1945,9 +2227,14 @@ class StreamPanel(QFrame):
 
     def _draw_overlays(self, visible_start, visible_stop):
         sfreq = float(self.raw.info["sfreq"])
-        first_event = np.searchsorted(self._event_times, visible_start, side="left")
-        last_event = np.searchsorted(self._event_times, visible_stop, side="right")
-        visible_events = self._event_times[first_event:last_event]
+        if self.event_overlays_visible:
+            first_event = np.searchsorted(self._event_times, visible_start, side="left")
+            last_event = np.searchsorted(
+                self._event_times, visible_stop, side="right"
+            )
+            visible_events = self._event_times[first_event:last_event]
+        else:
+            visible_events = np.empty(0)
         while len(self._event_lines) < len(visible_events):
             line = pg.InfiniteLine(angle=90, movable=False, pen=pg.mkPen("#e6a700"))
             line.setZValue(20)
@@ -1961,11 +2248,14 @@ class StreamPanel(QFrame):
                 line.hide()
 
         visible_annotations = []
-        if hasattr(self.raw, "annotations"):
-            for onset, duration, description in zip(
-                self.raw.annotations.onset,
-                self.raw.annotations.duration,
-                self.raw.annotations.description,
+        if self.annotation_overlays_visible and hasattr(self.raw, "annotations"):
+            for annotation_index, (onset, duration, description) in enumerate(
+                zip(
+                    self.raw.annotations.onset,
+                    self.raw.annotations.duration,
+                    self.raw.annotations.description,
+                    strict=True,
+                )
             ):
                 start = float(onset - self.raw.first_time)
                 duration = float(duration)
@@ -1973,12 +2263,13 @@ class StreamPanel(QFrame):
                 if (
                     stop < visible_start
                     or start > visible_stop
-                    or not self.annotation_visible(description)
+                    or not self.annotation_visible(annotation_index, description)
                 ):
                     continue
                 color = self.annotation_colors.get(description, "#4c78a8")
                 visible_annotations.append(
                     (
+                        annotation_index,
                         max(start, visible_start),
                         min(stop, visible_stop),
                         color,
@@ -1991,7 +2282,7 @@ class StreamPanel(QFrame):
             self._annotation_regions.append(region)
         for index, region in enumerate(self._annotation_regions):
             if index < len(visible_annotations):
-                start, stop, color = visible_annotations[index]
+                _annotation_index, start, stop, color = visible_annotations[index]
                 qcolor = QColor(color)
                 region.setRegion((start, stop))
                 region.setBrush(
@@ -2002,10 +2293,62 @@ class StreamPanel(QFrame):
                 region.show()
             else:
                 region.hide()
+        self._visible_annotations = visible_annotations
+
+    def set_event_overlays_visible(self, visible):
+        """Show or hide event lines without changing the underlying events."""
+        self.event_overlays_visible = bool(visible)
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def set_annotation_overlays_visible(self, visible):
+        """Show or hide annotation regions without changing the annotations."""
+        self.annotation_overlays_visible = bool(visible)
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def _annotation_at_time_clicked(self, time):
+        """Select the topmost visible annotation containing ``time``."""
+        for annotation_index, start, stop, _color in reversed(
+            self._visible_annotations
+        ):
+            if start <= time <= stop:
+                self.annotation_clicked.emit(annotation_index)
+                return
+
+
+class _AnnotationRegion(pg.BarGraphItem):
+    """Lane-bounded annotation region with the former region inspection API."""
+
+    def __init__(self):
+        super().__init__(
+            x0=[0],
+            x1=[0],
+            y0=[0],
+            y1=[1],
+            pen=pg.mkPen("#4c78a8"),
+            brush=pg.mkBrush(76, 120, 168, 70),
+        )
+        self._time_region = (0.0, 0.0)
+
+    def set_annotation(self, start, stop, lane_bottom, color):
+        """Position and recolor the rectangle inside one marker lane."""
+        qcolor = QColor(color)
+        self._time_region = (float(start), float(stop))
+        self.setOpts(
+            x0=[start],
+            x1=[stop],
+            y0=[lane_bottom + 0.06],
+            y1=[lane_bottom + 0.94],
+            pen=pg.mkPen(color),
+            brush=pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 70),
+        )
+
+    def getRegion(self):
+        """Return the time bounds retained for compatibility and testing."""
+        return self._time_region
 
 
 class AnnotationStream(QFrame):
-    """Dedicated timeline lane with bounded, wrapped annotation labels."""
+    """Dedicated, named timeline lanes with readable annotation labels."""
 
     annotation_clicked = Signal(int)
 
@@ -2014,12 +2357,19 @@ class AnnotationStream(QFrame):
         raw,
         annotation_colors=None,
         annotation_visible=None,
+        marker_streams=None,
+        smart_label_layout=False,
         parent=None,
     ):
         super().__init__(parent)
         self.raw = raw
         self.annotation_colors = annotation_colors or {}
-        self.annotation_visible = annotation_visible or (lambda _description: True)
+        self.annotation_visible = annotation_visible or (
+            lambda _index, _description: True
+        )
+        self.marker_streams = list(marker_streams or [])
+        self.smart_label_layout = bool(smart_label_layout)
+        self._lane_specs = self._build_lane_specs()
         self._regions = []
         self._labels = []
         self._last_window = None
@@ -2035,16 +2385,32 @@ class AnnotationStream(QFrame):
         layout.setContentsMargins(6, 4, 6, 6)
         layout.setSpacing(PANEL_BODY_SPACING)
 
-        self.title_label = QLabel("Annotations")
+        label_gutter = QWidget()
+        label_gutter.setFixedWidth(CHANNEL_LIST_WIDTH)
+        label_layout = QVBoxLayout(label_gutter)
+        label_layout.setContentsMargins(0, 0, 0, 18)
+        label_layout.setSpacing(2)
+        self._label_layout = label_layout
+
+        self.title_label = QLabel("Markers" if self.marker_streams else "Annotations")
         font = self.title_label.font()
         font.setBold(True)
         self.title_label.setFont(font)
         self.title_label.setFixedWidth(CHANNEL_LIST_WIDTH)
         self.title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.title_label)
+        label_layout.addWidget(self.title_label)
+        self.lane_labels = []
+        for lane in self._lane_specs:
+            label = QLabel(lane["name"])
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setWordWrap(True)
+            label.setToolTip(lane["name"])
+            label_layout.addWidget(label, 1)
+            self.lane_labels.append(label)
+        layout.addWidget(label_gutter)
 
         self.plot = pg.PlotWidget()
-        self.plot.setFixedHeight(150)
+        self.plot.setFixedHeight(max(150, min(360, 58 * len(self._lane_specs) + 35)))
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showAxis("left")
@@ -2054,6 +2420,39 @@ class AnnotationStream(QFrame):
         self.plot.getPlotItem().setClipToView(True)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         layout.addWidget(self.plot, 1)
+
+    def _build_lane_specs(self):
+        """Return marker lanes plus a fallback for non-XDF annotations."""
+        if len(self.marker_streams) < 2:
+            return [{"name": "Annotations", "annotation_prefix": None}]
+        lanes = [
+            {
+                "name": str(stream["name"]),
+                "annotation_prefix": str(stream["annotation_prefix"]),
+            }
+            for stream in self.marker_streams
+        ]
+        prefixes = tuple(lane["annotation_prefix"] for lane in lanes)
+        if any(
+            not str(description).startswith(prefixes)
+            for description in self.raw.annotations.description
+        ):
+            lanes.append({"name": "Other annotations", "annotation_prefix": None})
+        return lanes
+
+    @property
+    def lane_names(self):
+        """Return lane names in their displayed top-to-bottom order."""
+        return tuple(lane["name"] for lane in self._lane_specs)
+
+    def _annotation_lane(self, description):
+        """Return a top-to-bottom lane index and its display-only description."""
+        description = str(description)
+        for index, lane in enumerate(self._lane_specs):
+            prefix = lane["annotation_prefix"]
+            if prefix is not None and description.startswith(prefix):
+                return index, description[len(prefix) :]
+        return len(self._lane_specs) - 1, description
 
     @property
     def labels(self):
@@ -2065,7 +2464,8 @@ class AnnotationStream(QFrame):
         visible_stop = visible_start + duration
         self._last_window = (visible_start, duration)
         self.plot.setXRange(visible_start, visible_stop, padding=0)
-        self.plot.setYRange(0, 1, padding=0)
+        lane_count = len(self._lane_specs)
+        self.plot.setYRange(0, lane_count, padding=0)
         sfreq = float(self.raw.info["sfreq"])
         visible_annotations = []
         if hasattr(self.raw, "annotations"):
@@ -2086,23 +2486,23 @@ class AnnotationStream(QFrame):
                 if (
                     stop < visible_start
                     or start > visible_stop
-                    or not self.annotation_visible(description)
+                    or not self.annotation_visible(annotation_index, description)
                 ):
                     continue
                 color = self.annotation_colors.get(description, "#4c78a8")
+                lane_index, display_description = self._annotation_lane(description)
                 visible_annotations.append(
                     (
                         annotation_index,
                         max(start, visible_start),
                         min(stop, visible_stop),
-                        str(description),
+                        display_description,
                         color,
+                        lane_index,
                     )
                 )
-        self._visible_annotations = visible_annotations
-
         while len(self._regions) < len(visible_annotations):
-            region = pg.LinearRegionItem(values=(0, 0), movable=False)
+            region = _AnnotationRegion()
             region.setZValue(-10)
             self.plot.addItem(region)
             self._regions.append(region)
@@ -2113,28 +2513,122 @@ class AnnotationStream(QFrame):
 
         plot_width = max(1.0, self.plot.getViewBox().sceneBoundingRect().width())
         self._wrapped_plot_width = plot_width
+        placed_annotations = []
+        for index, annotation in enumerate(visible_annotations):
+            (
+                annotation_index,
+                start,
+                stop,
+                description,
+                color,
+                lane_index,
+            ) = annotation
+            label = self._labels[index]
+            label.setText(description, color=color)
+            if self.smart_label_layout:
+                natural_width = QFontMetricsF(
+                    label.textItem.font()
+                ).horizontalAdvance(description)
+                text_width = min(
+                    plot_width, max(72.0, min(360.0, natural_width + 16.0))
+                )
+            else:
+                text_width = min(plot_width, 220.0)
+            text_duration = duration * text_width / plot_width
+            label_start = max(
+                visible_start,
+                min(start, visible_stop - text_duration),
+            )
+            placed_annotations.append(
+                [
+                    annotation_index,
+                    start,
+                    stop,
+                    description,
+                    color,
+                    lane_index,
+                    label_start,
+                    label_start + text_duration,
+                    text_width,
+                    0,
+                ]
+            )
+
+        lane_row_counts = [1] * lane_count
+        if self.smart_label_layout:
+            label_gap = duration * 8.0 / plot_width
+            for lane_index in range(lane_count):
+                row_ends = []
+                lane_annotations = sorted(
+                    (
+                        annotation
+                        for annotation in placed_annotations
+                        if annotation[5] == lane_index
+                    ),
+                    key=lambda annotation: (
+                        annotation[6],
+                        annotation[1],
+                        annotation[0],
+                    ),
+                )
+                for annotation in lane_annotations:
+                    label_start = annotation[6]
+                    row_index = next(
+                        (
+                            index
+                            for index, row_end in enumerate(row_ends)
+                            if row_end + label_gap <= label_start
+                        ),
+                        len(row_ends),
+                    )
+                    if row_index == len(row_ends):
+                        row_ends.append(annotation[7])
+                    else:
+                        row_ends[row_index] = annotation[7]
+                    annotation[9] = row_index
+                lane_row_counts[lane_index] = max(1, len(row_ends))
+
+        total_rows = sum(lane_row_counts)
+        self.plot.setYRange(0, total_rows, padding=0)
+        if self.smart_label_layout:
+            height = max(150, min(500, 42 * total_rows + 35))
+        else:
+            height = max(150, min(360, 58 * lane_count + 35))
+        self.plot.setFixedHeight(height)
+        for index, row_count in enumerate(lane_row_counts):
+            self._label_layout.setStretch(index + 1, row_count)
+
+        lane_top_rows = np.cumsum([0, *lane_row_counts[:-1]])
+        self._visible_annotations = []
+        for annotation in placed_annotations:
+            lane_index = annotation[5]
+            row_index = annotation[9]
+            lane_bottom = (
+                total_rows - int(lane_top_rows[lane_index]) - row_index - 1
+            )
+            annotation[9] = lane_bottom
+            self._visible_annotations.append(tuple(annotation))
+
         for index, (region, label) in enumerate(zip(self._regions, self._labels)):
-            if index >= len(visible_annotations):
+            if index >= len(self._visible_annotations):
                 region.hide()
                 label.hide()
                 continue
-            _annotation_index, start, stop, description, color = visible_annotations[
-                index
-            ]
-            qcolor = QColor(color)
-            region.setRegion((start, stop))
-            region.setBrush(pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 70))
-            for line in region.lines:
-                line.setPen(pg.mkPen(color))
-            label.setText(description, color=color)
-            remaining_fraction = max(0.0, (visible_stop - start) / duration)
-            region_fraction = max(0.0, (stop - start) / duration)
-            text_width = min(
-                remaining_fraction * plot_width,
-                max(40.0, region_fraction * plot_width),
-            )
-            label.setTextWidth(max(1.0, text_width - 6.0))
-            label.setPos(start, 0.5)
+            (
+                _annotation_index,
+                start,
+                stop,
+                description,
+                color,
+                _lane_index,
+                label_start,
+                _label_stop,
+                text_width,
+                lane_bottom,
+            ) = self._visible_annotations[index]
+            region.set_annotation(start, stop, lane_bottom, color)
+            label.setTextWidth(max(1.0, text_width - 8.0))
+            label.setPos(label_start, lane_bottom + 0.5)
             label.setToolTip(description)
             region.show()
             label.show()
@@ -2147,13 +2641,33 @@ class AnnotationStream(QFrame):
         scene_position = event.scenePos()
         if not view_box.sceneBoundingRect().contains(scene_position):
             return
-        time = float(view_box.mapSceneToView(scene_position).x())
-        for annotation_index, start, stop, _description, _color in reversed(
-            self._visible_annotations
-        ):
-            if start <= time <= stop:
+        point = view_box.mapSceneToView(scene_position)
+        time = float(point.x())
+        row = int(np.floor(point.y()))
+        for (
+            annotation_index,
+            start,
+            stop,
+            _description,
+            _color,
+            _annotation_lane,
+            label_start,
+            label_stop,
+            _text_width,
+            lane_bottom,
+        ) in reversed(self._visible_annotations):
+            label_clicked = (
+                self.smart_label_layout and label_start <= time <= label_stop
+            )
+            if lane_bottom == row and (start <= time <= stop or label_clicked):
                 self.annotation_clicked.emit(annotation_index)
                 return
+
+    def set_smart_label_layout(self, enabled):
+        """Enable or disable collision-aware marker-label placement."""
+        self.smart_label_layout = bool(enabled)
+        if self._last_window is not None:
+            self.refresh(*self._last_window)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2404,6 +2918,7 @@ class StreamViewerWindow(QMainWindow):
         self,
         raw,
         streams=None,
+        marker_streams=None,
         events=None,
         annotation_colors=None,
         duration=10.0,
@@ -2424,6 +2939,7 @@ class StreamViewerWindow(QMainWindow):
             int(raw.first_samp),
         )
         self.source_streams = normalize_streams(raw, streams)
+        self.marker_streams = list(marker_streams or [])
         self.events = events
         self.annotation_colors = annotation_colors or {}
         self.max_channels = max(1, int(max_channels))
@@ -2454,6 +2970,8 @@ class StreamViewerWindow(QMainWindow):
         self._activation_task_token = 0
         self._activation_error = None
         self._activation_max_bins = 1000
+        self._event_overlays_visible = True
+        self._annotation_overlays_visible = True
         self._start_time = 0.0
         total_duration = max(1 / raw.info["sfreq"], raw.n_times / raw.info["sfreq"])
         self._duration = min(float(duration), total_duration)
@@ -2483,7 +3001,6 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_dock.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
         self.annotation_dock.setWidget(self.annotation_sidebar)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
@@ -2493,7 +3010,9 @@ class StreamViewerWindow(QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
 
-        controls = QHBoxLayout()
+        self.layout_controls = QWidget()
+        controls = QHBoxLayout(self.layout_controls)
+        controls.setContentsMargins(0, 0, 0, 0)
         self.join_button = QPushButton("Join Selected")
         self.join_button.setToolTip("Put the selected source panels in one display")
         self.join_button.clicked.connect(self.join_selected)
@@ -2547,7 +3066,7 @@ class StreamViewerWindow(QMainWindow):
         controls.addWidget(self.activation_map_button)
         controls.addWidget(self.annotations_button)
         controls.addStretch()
-        layout.addLayout(controls)
+        layout.addWidget(self.layout_controls)
 
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
@@ -2568,6 +3087,7 @@ class StreamViewerWindow(QMainWindow):
             raw,
             self.annotation_colors,
             annotation_visible=self.annotation_sidebar.plot_accepts,
+            marker_streams=self.marker_streams,
             parent=central,
         )
         self.annotation_stream.annotation_clicked.connect(
@@ -2575,11 +3095,14 @@ class StreamViewerWindow(QMainWindow):
         )
         self.annotation_stream.setToolTip(
             "Click an annotation to highlight it in the annotation browser; "
-            "descriptions wrap inside the visible plot width"
+            "each XDF marker stream has its own named lane and long descriptions "
+            "use a readable bounded width"
         )
         layout.addWidget(self.annotation_stream)
 
-        navigation = QHBoxLayout()
+        self.navigation_controls = QWidget()
+        navigation = QHBoxLayout(self.navigation_controls)
+        navigation.setContentsMargins(0, 0, 0, 0)
         navigation.addWidget(QLabel("Start:"))
         self.start_spin = QDoubleSpinBox()
         self.start_spin.setDecimals(3)
@@ -2587,6 +3110,11 @@ class StreamViewerWindow(QMainWindow):
         self.start_spin.setToolTip("Start time of the shared visible window")
         self.start_spin.valueChanged.connect(self.set_start_time)
         navigation.addWidget(self.start_spin)
+        self.relative_time_label = QLabel()
+        self.relative_time_label.setToolTip(
+            "Start of the visible window as relative hours:minutes:seconds"
+        )
+        navigation.addWidget(self.relative_time_label)
         self.time_slider = QSlider(Qt.Orientation.Horizontal)
         self.time_slider.setRange(0, 10000)
         self.time_slider.setToolTip("Navigate every stream on the shared timeline")
@@ -2601,7 +3129,7 @@ class StreamViewerWindow(QMainWindow):
         self.duration_spin.setValue(self._duration)
         self.duration_spin.valueChanged.connect(self.set_duration)
         navigation.addWidget(self.duration_spin)
-        layout.addLayout(navigation)
+        layout.addWidget(self.navigation_controls)
         self.setCentralWidget(central)
         self.interaction_hint_label = QLabel(
             "Hover trace: name + value · Drag: zoom · Shift/middle-drag: pan · "
@@ -2612,12 +3140,58 @@ class StreamViewerWindow(QMainWindow):
         self.statusBar().showMessage("Right-click a trace panel for channel actions")
 
         self._rebuild_panels()
+        self._create_view_menu()
         self._sync_navigation()
         self.refresh()
         self._display_montage_path = None
         self._display_montage_baseline = self.display_montage_state()
         self._default_display_montage = deepcopy(self._display_montage_baseline)
         self._create_display_montage_menu()
+
+    def _create_view_menu(self):
+        """Add the opt-in collision-aware marker-label layout."""
+        menu = self.menuBar().addMenu("&View")
+        smart_labels = menu.addAction("Smart Marker &Label Layout")
+        smart_labels.setCheckable(True)
+        smart_labels.setChecked(False)
+        smart_labels.setToolTip(
+            "Measure and pack nearby marker labels into the minimum number "
+            "of clickable rows"
+        )
+        smart_labels.toggled.connect(
+            self.annotation_stream.set_smart_label_layout
+        )
+        self.view_actions = {"smart_marker_labels": smart_labels}
+        menu.addSeparator()
+        menu.addAction("Activation &Map…", self.show_activation_map)
+
+    def _set_stream_controls_visible(self, visible):
+        """Toggle each panel's editing header."""
+        for panel in self.panels:
+            panel.header_widget.setVisible(visible)
+
+    def _set_channel_lists_visible(self, visible):
+        """Toggle the redundant draggable channel-name lists."""
+        for panel in self.panels:
+            panel.channel_list.setVisible(visible)
+
+    def _set_event_overlays_visible(self, visible):
+        """Toggle synchronized event lines in every signal panel."""
+        self._event_overlays_visible = bool(visible)
+        for panel in self.panels:
+            panel.set_event_overlays_visible(visible)
+
+    def _set_annotation_overlays_visible(self, visible):
+        """Toggle synchronized annotation regions in every signal panel."""
+        self._annotation_overlays_visible = bool(visible)
+        for panel in self.panels:
+            panel.set_annotation_overlays_visible(visible)
+
+    def _set_marker_timeline_visible(self, visible):
+        """Toggle the dedicated marker timeline and refresh it when revealed."""
+        self.annotation_stream.setVisible(visible)
+        if visible:
+            self.annotation_stream.refresh(self._start_time, self._duration)
 
     @property
     def display_groups(self):
@@ -2993,8 +3567,8 @@ class StreamViewerWindow(QMainWindow):
 
     def _select_annotation_from_stream(self, annotation_index):
         """Reveal and highlight a clicked annotation in the browser dock."""
+        self.annotation_dock.show()
         if self.annotation_sidebar.select_annotation(annotation_index):
-            self.annotation_dock.show()
             self.annotation_dock.raise_()
 
     @property
@@ -3098,6 +3672,8 @@ class StreamViewerWindow(QMainWindow):
                 gain=settings["gain"],
                 channel_order=settings.get("channel_order"),
                 channels_per_page=self.max_channels,
+                event_overlays_visible=self._event_overlays_visible,
+                annotation_overlays_visible=self._annotation_overlays_visible,
                 parent=self.panel_container,
             )
             self._settings[key] = panel.settings
@@ -3108,6 +3684,7 @@ class StreamViewerWindow(QMainWindow):
             panel.cursor_changed.connect(self.statusBar().showMessage)
             panel.time_zoom_requested.connect(self.set_time_window)
             panel.time_pan_requested.connect(self.pan_time_window)
+            panel.annotation_clicked.connect(self._select_annotation_from_stream)
             panel.zoom_back_requested.connect(self.zoom_back)
             panel.zoom_forward_requested.connect(self.zoom_forward)
             panel.reset_time_requested.connect(self.reset_time_window)
@@ -3493,6 +4070,12 @@ class StreamViewerWindow(QMainWindow):
         )
         self.time_slider.setValue(slider_value)
         self.duration_spin.setValue(self._duration)
+        total_seconds = int(max(0.0, self._start_time))
+        hours, remainder = divmod(total_seconds, 3600)
+        minutes, seconds = divmod(remainder, 60)
+        self.relative_time_label.setText(
+            f"Relative: {hours:02d}:{minutes:02d}:{seconds:02d}"
+        )
         self.start_spin.blockSignals(False)
         self.time_slider.blockSignals(False)
         self.duration_spin.blockSignals(False)
