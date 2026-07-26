@@ -600,6 +600,8 @@ Keyboard commands are:
 | Left / Right | Move by 25% of the visible window |
 | Shift+Left / Shift+Right | Move by one full visible window |
 | Plus / Minus | Multiply/divide selected panels by 1.25; if none are selected, affect all panels |
+| Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y | Move backward/forward through time-window history |
+| Backspace / Insert | Move backward/forward through time-window history |
 | Home / End | Go to the recording start / last valid window |
 | F11 | Toggle full screen |
 | Escape | Close the viewer, subject to display-montage save handling |
@@ -673,7 +675,7 @@ modifies, filters, or writes the underlying MNE data.
   enabled, it shall measure label widths, pack nearby labels into the minimum number
   of chronological sub-rows per marker stream, make label text clickable, and adjust
   the timeline height to the rows in use.
-- Zero-duration annotations shall receive a minimum visible width of one sample.
+- Zero-duration annotations shall be drawn as a single vertical line.
 - Annotation descriptions shall appear only in the dedicated annotation lane. They
   shall remain horizontal, wrap to the available region width, and be clipped within
   the plot rather than extending the window width.

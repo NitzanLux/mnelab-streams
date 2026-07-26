@@ -19,7 +19,15 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QColor, QCursor, QDrag, QFontMetricsF, QKeyEvent
+from PySide6.QtGui import (
+    QColor,
+    QCursor,
+    QDrag,
+    QFontMetricsF,
+    QKeyEvent,
+    QKeySequence,
+    QShortcut,
+)
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -78,6 +86,10 @@ UNIT_FACTORS = {
     "mS": 1e3,
     "µS": 1e6,
     "°C": 1.0,
+    "g": 1.0,
+    "m/s²": 1.0,
+    "rad/s": 1.0,
+    "°/s": 1.0,
     "Raw": 1.0,
 }
 
@@ -100,6 +112,8 @@ UNIT_CHOICES = {
     "molar": ["Auto", "mol", "mmol", "µmol", "Raw"],
     "conductance": ["Auto", "S", "mS", "µS", "Raw"],
     "temperature": ["Auto", "°C", "Raw"],
+    "acceleration": ["Auto", "g", "m/s²", "Raw"],
+    "angular_velocity": ["Auto", "°/s", "rad/s", "Raw"],
     "raw": ["Auto", "Raw"],
 }
 
@@ -522,6 +536,7 @@ class StreamPlotWidget(pg.PlotWidget):
     pan_requested = Signal(float)
     click_requested = Signal(float)
     context_requested = Signal(object)
+    measurement_changed = Signal(float, float, float, float, bool)
 
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -530,6 +545,24 @@ class StreamPlotWidget(pg.PlotWidget):
         self._press_start = 0.0
         self._press_duration = 0.0
         self._rubber_band = QRubberBand(QRubberBand.Shape.Rectangle, self.viewport())
+        self._measurement_label = QLabel(self.viewport())
+        self._measurement_label.setStyleSheet(
+            "QLabel { background: rgba(32, 36, 42, 225); color: white; "
+            "border: 1px solid #9aa0a6; border-radius: 3px; padding: 4px; }"
+        )
+        self._measurement_label.setTextFormat(Qt.TextFormat.PlainText)
+        self._measurement_label.hide()
+        self._crosshair_enabled = False
+        self._crosshair_added = False
+        self._crosshair_v = pg.InfiniteLine(
+            angle=90, movable=False, pen=pg.mkPen("#777777", style=Qt.PenStyle.DashLine)
+        )
+        self._crosshair_h = pg.InfiniteLine(
+            angle=0, movable=False, pen=pg.mkPen("#777777", style=Qt.PenStyle.DashLine)
+        )
+        for line in (self._crosshair_v, self._crosshair_h):
+            line.setZValue(50)
+            line.hide()
 
     def _scene_position(self, position):
         point = position.toPoint() if hasattr(position, "toPoint") else position
@@ -562,10 +595,18 @@ class StreamPlotWidget(pg.PlotWidget):
             super().mousePressEvent(event)
             return
         modifiers = event.modifiers()
-        if event.button() == Qt.MouseButton.MiddleButton or (
+        if (
             event.button() == Qt.MouseButton.LeftButton
             and modifiers & Qt.KeyboardModifier.ShiftModifier
         ):
+            self._gesture = "measure"
+            self._press_position = event.position()
+            self._update_measurement_band(event.position())
+            self._rubber_band.show()
+            self._measurement_label.hide()
+            event.accept()
+            return
+        if event.button() == Qt.MouseButton.MiddleButton:
             self._gesture = "pan"
             self._press_position = event.position()
             self._press_start, self._press_duration = self._time_range()
@@ -584,6 +625,11 @@ class StreamPlotWidget(pg.PlotWidget):
     def mouseMoveEvent(self, event):
         if self._gesture == "zoom":
             self._update_rubber_band(event.position())
+            event.accept()
+            return
+        if self._gesture == "measure":
+            self._update_measurement_band(event.position())
+            self._emit_measurement(event.position(), False)
             event.accept()
             return
         if self._gesture == "pan":
@@ -606,6 +652,12 @@ class StreamPlotWidget(pg.PlotWidget):
                 self.zoom_requested.emit(min(start, stop), abs(stop - start))
             else:
                 self.click_requested.emit(self._time_at(event.position()))
+            self._clear_gesture()
+            event.accept()
+            return
+        if self._gesture == "measure" and event.button() == Qt.MouseButton.LeftButton:
+            self._update_measurement_band(event.position())
+            self._emit_measurement(event.position(), True)
             self._clear_gesture()
             event.accept()
             return
@@ -652,7 +704,91 @@ class StreamPlotWidget(pg.PlotWidget):
 
     def leaveEvent(self, event):
         QToolTip.hideText()
+        self._crosshair_v.hide()
+        self._crosshair_h.hide()
         super().leaveEvent(event)
+
+    def set_crosshair_enabled(self, enabled):
+        """Enable cursor-following horizontal and vertical guide lines."""
+        self._crosshair_enabled = bool(enabled)
+        if self._crosshair_enabled and not self._crosshair_added:
+            self.addItem(self._crosshair_v, ignoreBounds=True)
+            self.addItem(self._crosshair_h, ignoreBounds=True)
+            self._crosshair_added = True
+        elif not self._crosshair_enabled and self._crosshair_added:
+            self._crosshair_v.hide()
+            self._crosshair_h.hide()
+            self.removeItem(self._crosshair_v)
+            self.removeItem(self._crosshair_h)
+            self._crosshair_added = False
+
+    def update_crosshair(self, scene_position):
+        """Move the crosshair to a scene position inside the data area."""
+        if not self._crosshair_enabled:
+            return
+        if not self.getPlotItem().vb.sceneBoundingRect().contains(scene_position):
+            self._crosshair_v.hide()
+            self._crosshair_h.hide()
+            return
+        point = self.getPlotItem().vb.mapSceneToView(scene_position)
+        self._crosshair_v.setPos(point.x())
+        self._crosshair_h.setPos(point.y())
+        self._crosshair_v.show()
+        self._crosshair_h.show()
+
+    def set_measurement_text(self, text):
+        """Show the formatted measurement beside the selection rectangle."""
+        self._measurement_label.setText(text)
+        self._measurement_label.adjustSize()
+        rect = self._rubber_band.geometry()
+        x = min(
+            rect.right() + 8,
+            max(0, self.viewport().width() - self._measurement_label.width() - 4),
+        )
+        y = min(
+            rect.top(),
+            max(0, self.viewport().height() - self._measurement_label.height() - 4),
+        )
+        self._measurement_label.move(x, y)
+        self._measurement_label.show()
+        self._measurement_label.raise_()
+
+    def clear_measurement(self):
+        """Remove the persistent measurement rectangle and its readout."""
+        self._rubber_band.hide()
+        self._measurement_label.hide()
+
+    def _emit_measurement(self, position, final):
+        start = self.getPlotItem().vb.mapSceneToView(
+            self._scene_position(self._press_position)
+        )
+        stop = self.getPlotItem().vb.mapSceneToView(self._scene_position(position))
+        self.measurement_changed.emit(
+            float(start.x()),
+            float(start.y()),
+            float(stop.x()),
+            float(stop.y()),
+            bool(final),
+        )
+
+    def _update_measurement_band(self, position):
+        data_rect = self.getPlotItem().vb.sceneBoundingRect()
+        bounds = QRectF(
+            self.mapFromScene(data_rect.topLeft()),
+            self.mapFromScene(data_rect.bottomRight()),
+        ).normalized()
+        start = self._press_position.toPoint()
+        stop = position.toPoint()
+        x1 = int(np.clip(start.x(), bounds.left(), bounds.right()))
+        x2 = int(np.clip(stop.x(), bounds.left(), bounds.right()))
+        y1 = int(np.clip(start.y(), bounds.top(), bounds.bottom()))
+        y2 = int(np.clip(stop.y(), bounds.top(), bounds.bottom()))
+        self._rubber_band.setGeometry(
+            min(x1, x2),
+            min(y1, y2),
+            max(1, abs(x2 - x1)),
+            max(1, abs(y2 - y1)),
+        )
 
     def _update_rubber_band(self, position):
         data_rect = self.getPlotItem().vb.sceneBoundingRect()
@@ -750,6 +886,7 @@ class StreamPanel(QFrame):
         self._visible_duration = 0.0
         self._display_unit = "Raw"
         self._display_units = {}
+        self._automatic_group_scales = {}
         self._lane_step = 3.0
         self._axis_channels = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
@@ -777,9 +914,7 @@ class StreamPanel(QFrame):
         self.title_label.setToolTip(
             self._source_tooltip() + "\nRight-click for stream display properties"
         )
-        self.title_label.setContextMenuPolicy(
-            Qt.ContextMenuPolicy.CustomContextMenu
-        )
+        self.title_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.title_label.customContextMenuRequested.connect(
             self._show_stream_context_menu
         )
@@ -915,6 +1050,7 @@ class StreamPanel(QFrame):
         self.plot.pan_requested.connect(self.time_pan_requested.emit)
         self.plot.click_requested.connect(self._annotation_at_time_clicked)
         self.plot.context_requested.connect(self._show_plot_context_menu)
+        self.plot.measurement_changed.connect(self._measurement_changed)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
         self._curves = [
@@ -1072,6 +1208,11 @@ class StreamPanel(QFrame):
         """Clear manual and lane-fit scales for one source."""
         source = self.sources[source_index]
         self.display_scales.pop(source["id"], None)
+        self._automatic_group_scales = {
+            key: scale
+            for key, scale in self._automatic_group_scales.items()
+            if key[0] != source["id"]
+        }
         for name in source["channel_names"]:
             self.channel_fits.pop(name, None)
         self.redraw(self._visible_start, self._visible_duration)
@@ -1105,9 +1246,7 @@ class StreamPanel(QFrame):
         factor = UNIT_FACTORS.get(unit, 1.0)
         source = self.sources[source_index]
         self.display_scales[source["id"]] = (
-            amplitude
-            / factor
-            * max(self.amplitude.value(), np.finfo(float).eps)
+            amplitude / factor * max(self.amplitude.value(), np.finfo(float).eps)
         )
         for name in source["channel_names"]:
             self.channel_fits.pop(name, None)
@@ -1362,9 +1501,7 @@ class StreamPanel(QFrame):
         choices = []
         for name in source["channel_names"]:
             family = self._unit_family_for_channel(name)
-            choices.extend(
-                unit for unit in UNIT_CHOICES[family] if unit != "Auto"
-            )
+            choices.extend(unit for unit in UNIT_CHOICES[family] if unit != "Auto")
             if family == "raw":
                 choices.extend(SENSOR_UNIT_CHOICES)
         return list(dict.fromkeys(choices or ["Raw"]))
@@ -1896,9 +2033,34 @@ class StreamPanel(QFrame):
             return "conductance"
         if channel_type == "temperature":
             return "temperature"
+        sensor_family = self._sensor_family(name)
+        if sensor_family is not None:
+            return sensor_family
         if source_type in VOLTAGE_TYPES:
             return "voltage"
         return "raw"
+
+    def _sensor_family(self, name):
+        """Infer common IMU channel families from source and channel labels."""
+        source = self.sources[self._source_by_channel[name]]
+        context = " ".join(
+            (
+                str(source.get("name", "")),
+                str(source.get("type", "")),
+                str(name),
+            )
+        ).casefold()
+        words = set(
+            context.replace("_", " ").replace("-", " ").replace("/", " ").split()
+        )
+        if (
+            any(token in context for token in ("accelerometer", "accel"))
+            or "acc" in words
+        ):
+            return "acceleration"
+        if any(token in context for token in ("gyroscope", "gyro")) or "gyr" in words:
+            return "angular_velocity"
+        return None
 
     def _unit_choices_for_channel(self, name):
         """Return suggested units; the channel editor also accepts custom text."""
@@ -1936,6 +2098,10 @@ class StreamPanel(QFrame):
             return "µS" if peak < 1e-3 else "S"
         if family == "temperature":
             return "°C"
+        if family == "acceleration":
+            return "g"
+        if family == "angular_velocity":
+            return "°/s"
         return "Raw"
 
     def _channel_display_unit(self, name, peak=None):
@@ -1997,6 +2163,7 @@ class StreamPanel(QFrame):
         )
 
     def _mouse_moved(self, scene_pos):
+        self.plot.update_crosshair(scene_pos)
         if (
             not self.plot.sceneBoundingRect().contains(scene_pos)
             or not len(self._times)
@@ -2047,6 +2214,60 @@ class StreamPanel(QFrame):
             position + QPoint(12, -24),
             f"{name}\n{value:.6g} {unit_label}",
             self.plot,
+        )
+
+    def _measurement_changed(self, start_time, start_y, stop_time, _stop_y, _final):
+        """Calculate physical statistics for a Shift-drag time segment."""
+        visible_names = self.visible_channel_names
+        if not visible_names or not len(self._times):
+            return
+        top_offset = (len(visible_names) - 1) * self._lane_step
+        channel_index = int(
+            np.clip(
+                round((top_offset - start_y) / self._lane_step),
+                0,
+                len(visible_names) - 1,
+            )
+        )
+        name = visible_names[channel_index]
+        low_time, high_time = sorted((start_time, stop_time))
+        first = int(
+            np.clip(
+                np.searchsorted(self._times, low_time),
+                0,
+                len(self._times) - 1,
+            )
+        )
+        last = int(
+            np.clip(
+                np.searchsorted(self._times, high_time, side="right") - 1,
+                first,
+                len(self._times) - 1,
+            )
+        )
+        segment = self._values[channel_index, first : last + 1]
+        finite = segment[np.isfinite(segment)]
+        display_unit = self._channel_display_unit(name)
+        factor = UNIT_FACTORS.get(display_unit, 1.0)
+        unit = "raw" if display_unit == "Raw" else display_unit
+        duration = abs(stop_time - start_time)
+        start_value = float(self._values[channel_index, first]) * factor
+        stop_value = float(self._values[channel_index, last]) * factor
+        delta = stop_value - start_value
+        if finite.size:
+            minimum = float(np.min(finite)) * factor
+            maximum = float(np.max(finite)) * factor
+        else:
+            minimum = maximum = float("nan")
+        slope = delta / duration if duration > np.finfo(float).eps else float("nan")
+        self.plot.set_measurement_text(
+            f"{name}\n"
+            f"t: {low_time:.6g} → {high_time:.6g} s   Δt: {duration:.6g} s\n"
+            f"value: {start_value:.6g} → {stop_value:.6g} {unit}   "
+            f"Δ: {delta:.6g} {unit}\n"
+            f"min/max: {minimum:.6g} / {maximum:.6g} {unit}   "
+            f"range: {maximum - minimum:.6g} {unit}\n"
+            f"slope: {slope:.6g} {unit}/s   samples: {last - first + 1}"
         )
 
     def _display_values(self, name, values):
@@ -2124,28 +2345,40 @@ class StreamPanel(QFrame):
                 continue
             source_id = source["id"]
             source_peak = self.display_scales.get(source_id)
-            if source_peak is None:
-                source_peak = self._window_source_scale(
-                    indices,
-                    visible_names,
-                    amplitude,
-                )
-                self.display_scales[source_id] = source_peak
+            scale_groups = {}
+            for index in indices:
+                family = self._sensor_family(visible_names[index]) or "source"
+                scale_groups.setdefault(family, []).append(index)
+            if source_peak is not None or len(scale_groups) == 1:
+                if source_peak is None:
+                    source_peak = self._window_source_scale(
+                        indices,
+                        visible_names,
+                        amplitude,
+                    )
+                    self.display_scales[source_id] = source_peak
+                channel_scales[indices] = source_peak
+            else:
+                group_peaks = []
+                for family, group_indices in scale_groups.items():
+                    key = (source_id, family)
+                    group_peak = self._automatic_group_scales.get(key)
+                    if group_peak is None:
+                        group_peak = self._window_source_scale(
+                            group_indices,
+                            visible_names,
+                            amplitude,
+                        )
+                        self._automatic_group_scales[key] = group_peak
+                    channel_scales[group_indices] = group_peak
+                    group_peaks.append(group_peak)
+                source_peak = max(group_peaks)
             source_scales[source_index] = source_peak
-            channel_scales[indices] = source_peak
 
         selected_unit = self.unit_combo.currentText()
-        panel_peak = max(
-            (scale / amplitude for scale in source_scales.values()),
-            default=1.0,
-        )
         self._display_units = {
-            name: self._channel_display_unit(
-                name,
-                source_scales.get(self._source_by_channel[name], panel_peak)
-                / amplitude,
-            )
-            for name in visible_names
+            name: self._channel_display_unit(name, channel_scales[index] / amplitude)
+            for index, name in enumerate(visible_names)
         }
         effective_units = set(self._display_units.values())
         self._display_unit = (
@@ -2182,11 +2415,15 @@ class StreamPanel(QFrame):
             curve.setPen(pg.mkPen(color, width=1))
             curve.show()
 
-        self._update_scale_label(source_scales, amplitude, visible_names)
+        self._update_scale_label(
+            source_scales, amplitude, visible_names, channel_scales
+        )
         self._draw_overlays(start_time, start_time + duration)
         self.plot.setXRange(start_time, start_time + duration, padding=0)
 
-    def _update_scale_label(self, source_scales, amplitude, visible_names):
+    def _update_scale_label(
+        self, source_scales, amplitude, visible_names, channel_scales=None
+    ):
         parts = []
         for source_index, scale in source_scales.items():
             source_names = [
@@ -2205,7 +2442,17 @@ class StreamPanel(QFrame):
             for display_unit in units:
                 factor = UNIT_FACTORS.get(display_unit, 1.0)
                 unit = "raw" if display_unit == "Raw" else display_unit
-                value = scale / amplitude * factor
+                unit_indices = [
+                    visible_names.index(name)
+                    for name in source_names
+                    if self._channel_display_unit(name) == display_unit
+                ]
+                unit_scale = (
+                    max(channel_scales[index] for index in unit_indices)
+                    if channel_scales is not None and unit_indices
+                    else scale
+                )
+                value = unit_scale / amplitude * factor
                 unit_prefix = f"{prefix}{display_unit}: " if len(units) > 1 else prefix
                 parts.append(f"{unit_prefix}{value:.3g} {unit}/div")
         visible_parts = parts[:2]
@@ -2226,12 +2473,9 @@ class StreamPanel(QFrame):
         )
 
     def _draw_overlays(self, visible_start, visible_stop):
-        sfreq = float(self.raw.info["sfreq"])
         if self.event_overlays_visible:
             first_event = np.searchsorted(self._event_times, visible_start, side="left")
-            last_event = np.searchsorted(
-                self._event_times, visible_stop, side="right"
-            )
+            last_event = np.searchsorted(self._event_times, visible_stop, side="right")
             visible_events = self._event_times[first_event:last_event]
         else:
             visible_events = np.empty(0)
@@ -2259,7 +2503,7 @@ class StreamPanel(QFrame):
             ):
                 start = float(onset - self.raw.first_time)
                 duration = float(duration)
-                stop = start + max(duration, 1 / sfreq)
+                stop = start + max(duration, 0.0)
                 if (
                     stop < visible_start
                     or start > visible_stop
@@ -2466,7 +2710,6 @@ class AnnotationStream(QFrame):
         self.plot.setXRange(visible_start, visible_stop, padding=0)
         lane_count = len(self._lane_specs)
         self.plot.setYRange(0, lane_count, padding=0)
-        sfreq = float(self.raw.info["sfreq"])
         visible_annotations = []
         if hasattr(self.raw, "annotations"):
             for annotation_index, (
@@ -2482,7 +2725,7 @@ class AnnotationStream(QFrame):
                 )
             ):
                 start = float(onset - self.raw.first_time)
-                stop = start + max(float(annotation_duration), 1 / sfreq)
+                stop = start + max(float(annotation_duration), 0.0)
                 if (
                     stop < visible_start
                     or start > visible_stop
@@ -2526,9 +2769,9 @@ class AnnotationStream(QFrame):
             label = self._labels[index]
             label.setText(description, color=color)
             if self.smart_label_layout:
-                natural_width = QFontMetricsF(
-                    label.textItem.font()
-                ).horizontalAdvance(description)
+                natural_width = QFontMetricsF(label.textItem.font()).horizontalAdvance(
+                    description
+                )
                 text_width = min(
                     plot_width, max(72.0, min(360.0, natural_width + 16.0))
                 )
@@ -2603,9 +2846,7 @@ class AnnotationStream(QFrame):
         for annotation in placed_annotations:
             lane_index = annotation[5]
             row_index = annotation[9]
-            lane_bottom = (
-                total_rows - int(lane_top_rows[lane_index]) - row_index - 1
-            )
+            lane_bottom = total_rows - int(lane_top_rows[lane_index]) - row_index - 1
             annotation[9] = lane_bottom
             self._visible_annotations.append(tuple(annotation))
 
@@ -2978,6 +3219,16 @@ class StreamViewerWindow(QMainWindow):
         self._initial_duration = self._duration
         self._zoom_history = []
         self._zoom_forward = []
+        self._navigation_shortcuts = []
+        for sequence, callback in (
+            (QKeySequence("Ctrl+Z"), self.zoom_back),
+            (QKeySequence("Ctrl+Y"), self.zoom_forward),
+            (QKeySequence("Ctrl+Shift+Z"), self.zoom_forward),
+        ):
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(callback)
+            self._navigation_shortcuts.append(shortcut)
         self._pending_slider_value = None
         self._navigation_timer = QTimer(self)
         self._navigation_timer.setSingleShot(True)
@@ -3029,7 +3280,7 @@ class StreamViewerWindow(QMainWindow):
         self.reset_button.clicked.connect(self.reset_layout)
         self.zoom_back_button = QPushButton("Zoom Back")
         self.zoom_back_button.setToolTip(
-            "Restore the previous mouse-selected time window (Backspace)"
+            "Restore the previous mouse-selected time window (Ctrl+Z or Backspace)"
         )
         self.zoom_back_button.clicked.connect(self.zoom_back)
         self.reset_time_button = QPushButton("Reset Time")
@@ -3081,14 +3332,23 @@ class StreamViewerWindow(QMainWindow):
         self.scroll.horizontalScrollBar().valueChanged.connect(
             self._schedule_viewport_refresh
         )
+        self.scroll.verticalScrollBar().rangeChanged.connect(
+            lambda _minimum, _maximum: QTimer.singleShot(
+                0, self._align_annotation_stream
+            )
+        )
         layout.addWidget(self.scroll, 1)
 
+        self.annotation_container = QWidget()
+        self.annotation_layout = QHBoxLayout(self.annotation_container)
+        self.annotation_layout.setContentsMargins(0, 0, 0, 0)
+        self.annotation_layout.setSpacing(0)
         self.annotation_stream = AnnotationStream(
             raw,
             self.annotation_colors,
             annotation_visible=self.annotation_sidebar.plot_accepts,
             marker_streams=self.marker_streams,
-            parent=central,
+            parent=self.annotation_container,
         )
         self.annotation_stream.annotation_clicked.connect(
             self._select_annotation_from_stream
@@ -3098,7 +3358,8 @@ class StreamViewerWindow(QMainWindow):
             "each XDF marker stream has its own named lane and long descriptions "
             "use a readable bounded width"
         )
-        layout.addWidget(self.annotation_stream)
+        self.annotation_layout.addWidget(self.annotation_stream)
+        layout.addWidget(self.annotation_container)
 
         self.navigation_controls = QWidget()
         navigation = QHBoxLayout(self.navigation_controls)
@@ -3132,7 +3393,8 @@ class StreamViewerWindow(QMainWindow):
         layout.addWidget(self.navigation_controls)
         self.setCentralWidget(central)
         self.interaction_hint_label = QLabel(
-            "Hover trace: name + value · Drag: zoom · Shift/middle-drag: pan · "
+            "Hover trace: name + value · Drag: zoom · Shift-drag: measure · "
+            "Middle-drag: pan · "
             "Wheel: move · Ctrl+wheel: zoom"
         )
         self.interaction_hint_label.setToolTip("")
@@ -3149,8 +3411,17 @@ class StreamViewerWindow(QMainWindow):
         self._create_display_montage_menu()
 
     def _create_view_menu(self):
-        """Add the opt-in collision-aware marker-label layout."""
+        """Add optional plot interaction and marker-layout controls."""
         menu = self.menuBar().addMenu("&View")
+        self.crosshair_action = menu.addAction("&Crosshair")
+        self.crosshair_action.setCheckable(True)
+        self.crosshair_action.setChecked(False)
+        self.crosshair_action.setToolTip(
+            "Show horizontal and vertical guides at the pointer"
+        )
+        self.crosshair_action.toggled.connect(self._set_crosshair_visible)
+        menu.addAction("Clear &Measurement", self._clear_measurements)
+        menu.addSeparator()
         smart_labels = menu.addAction("Smart Marker &Label Layout")
         smart_labels.setCheckable(True)
         smart_labels.setChecked(False)
@@ -3158,12 +3429,20 @@ class StreamViewerWindow(QMainWindow):
             "Measure and pack nearby marker labels into the minimum number "
             "of clickable rows"
         )
-        smart_labels.toggled.connect(
-            self.annotation_stream.set_smart_label_layout
-        )
+        smart_labels.toggled.connect(self.annotation_stream.set_smart_label_layout)
         self.view_actions = {"smart_marker_labels": smart_labels}
         menu.addSeparator()
         menu.addAction("Activation &Map…", self.show_activation_map)
+
+    def _set_crosshair_visible(self, visible):
+        """Apply the crosshair option to attached and floating signal panels."""
+        for panel in self.panels:
+            panel.plot.set_crosshair_enabled(visible)
+
+    def _clear_measurements(self):
+        """Clear persistent Shift-drag measurements from every signal panel."""
+        for panel in self.panels:
+            panel.plot.clear_measurement()
 
     def _set_stream_controls_visible(self, visible):
         """Toggle each panel's editing header."""
@@ -3695,6 +3974,8 @@ class StreamViewerWindow(QMainWindow):
                 lambda target, panel=panel: self.swap_panels(panel, target)
             )
             self.panels.append(panel)
+            if hasattr(self, "crosshair_action"):
+                panel.plot.set_crosshair_enabled(self.crosshair_action.isChecked())
         self._update_column_control()
         self._reflow_panels()
         for panel in self.panels:
@@ -4199,7 +4480,21 @@ class StreamViewerWindow(QMainWindow):
         super().showEvent(event)
         if not self._annotation_dock_sized:
             QTimer.singleShot(0, self._set_default_annotation_dock_width)
+        QTimer.singleShot(0, self._align_annotation_stream)
         QTimer.singleShot(0, self.refresh)
+
+    def resizeEvent(self, event):
+        """Keep the marker timeline aligned with the signal scroll viewport."""
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self._align_annotation_stream)
+
+    def _align_annotation_stream(self):
+        """Match the marker panel edges to the signal panels inside the scroll area."""
+        viewport = self.scroll.viewport()
+        viewport_origin = viewport.mapTo(self.scroll, QPoint(0, 0))
+        left = max(0, viewport_origin.x())
+        right = max(0, self.scroll.width() - left - viewport.width())
+        self.annotation_layout.setContentsMargins(left, 0, right, 0)
 
     def _set_default_annotation_dock_width(self):
         """Give the annotation dock 10% of the initial viewer width once."""
@@ -4217,7 +4512,11 @@ class StreamViewerWindow(QMainWindow):
         key = event.key()
         shift = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
         control = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-        if key == Qt.Key.Key_Left:
+        if control and key == Qt.Key.Key_Z:
+            self.zoom_forward() if shift else self.zoom_back()
+        elif control and key == Qt.Key.Key_Y:
+            self.zoom_forward()
+        elif key == Qt.Key.Key_Left:
             self.set_start_time(
                 self._start_time - self._duration * (1.0 if shift else 0.25)
             )
@@ -4250,6 +4549,11 @@ class StreamViewerWindow(QMainWindow):
         elif key == Qt.Key.Key_F11:
             self.showNormal() if self.isFullScreen() else self.showFullScreen()
         elif key == Qt.Key.Key_Escape:
-            self.close()
+            self._clear_measurements()
         else:
-            super().keyPressEvent(event)
+            # Do not forward arbitrary keys to QMainWindow. Depending on the
+            # platform and active application actions, inherited handling can
+            # trigger a window shortcut and unexpectedly hide the viewer.
+            event.accept()
+            return
+        event.accept()
