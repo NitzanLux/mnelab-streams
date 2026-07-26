@@ -318,9 +318,7 @@ def test_long_channel_axis_labels_are_elided_instead_of_dropped(qtbot):
     assert axis._tick_label_names == channel_names
 
 
-def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(
-    qtbot, viewer
-):
+def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(qtbot, viewer):
     """The duplicate channel-name columns use a compact, shared width budget."""
     viewer.show()
     qtbot.waitUntil(

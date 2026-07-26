@@ -1814,8 +1814,8 @@ class StreamPanel(QFrame):
         )
         menu.addAction(
             "Use Automatic Scale",
-            lambda _checked=False, index=source_index: (
-                self.use_automatic_source_scale(index)
+            lambda _checked=False, index=source_index: self.use_automatic_source_scale(
+                index
             ),
         )
         amplitude, unit = self.source_absolute_amplitude(source_index)

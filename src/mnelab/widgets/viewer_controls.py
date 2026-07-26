@@ -98,9 +98,7 @@ class AnnotationSidebar(QWidget):
         self.apply_to_plots.toggled.connect(self.filter_changed)
         self.list.itemClicked.connect(self._item_selected)
         self.list.itemActivated.connect(self._item_selected)
-        self.list.customContextMenuRequested.connect(
-            self._show_annotation_context_menu
-        )
+        self.list.customContextMenuRequested.connect(self._show_annotation_context_menu)
         self.refresh_list()
 
     @property
@@ -175,9 +173,7 @@ class AnnotationSidebar(QWidget):
         """Show or suppress one annotation without modifying the Raw object."""
         annotation_index = int(annotation_index)
         annotation_count = (
-            len(self.raw.annotations)
-            if hasattr(self.raw, "annotations")
-            else 0
+            len(self.raw.annotations) if hasattr(self.raw, "annotations") else 0
         )
         if annotation_index < 0 or annotation_index >= annotation_count:
             raise IndexError("Unknown annotation index.")
@@ -219,13 +215,11 @@ class AnnotationSidebar(QWidget):
             show_menu = menu.addMenu("Show Suppressed Annotation")
             for index in sorted(self._suppressed_indices):
                 description = str(self.raw.annotations.description[index])
-                onset = float(
-                    self.raw.annotations.onset[index] - self.raw.first_time
-                )
+                onset = float(self.raw.annotations.onset[index] - self.raw.first_time)
                 show_menu.addAction(
                     f"{onset:.3f} s  {description}",
-                    lambda _checked=False, index=index: (
-                        self.set_annotation_visible(index, True)
+                    lambda _checked=False, index=index: self.set_annotation_visible(
+                        index, True
                     ),
                 )
             menu.addAction("Show All Annotations", self.show_all_annotations)
@@ -234,9 +228,7 @@ class AnnotationSidebar(QWidget):
     def _show_annotation_context_menu(self, position):
         """Open visibility actions for the annotation under ``position``."""
         item = self.list.itemAt(position)
-        annotation_index = (
-            None if item is None else item.data(ANNOTATION_INDEX_ROLE)
-        )
+        annotation_index = None if item is None else item.data(ANNOTATION_INDEX_ROLE)
         menu = self.create_annotation_context_menu(annotation_index)
         if menu.actions():
             menu.exec(self.list.viewport().mapToGlobal(position))
@@ -284,11 +276,7 @@ class AnnotationSidebar(QWidget):
             suppressed_count = sum(
                 record[0] in self._suppressed_indices for record in records
             )
-            suffix = (
-                f" · {suppressed_count} suppressed"
-                if suppressed_count
-                else ""
-            )
+            suffix = f" · {suppressed_count} suppressed" if suppressed_count else ""
             self.count_label.setText(
                 f"Showing {visible_count} of {len(records)}{suffix}"
             )
