@@ -1364,10 +1364,12 @@ def test_each_stream_has_independent_drag_resize_handle(viewer):
     first, second = viewer.panels
     first_height = first.plot.height()
     second_height = second.plot.height()
+    first_hint = first.sizeHint().height()
 
     first.resize_handle.resize_requested.emit(47)
 
     assert first.plot.height() == first_height + 47
+    assert first.sizeHint().height() == first_hint + 47
     assert second.plot.height() == second_height
     assert first.resize_handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
     assert "Drag to resize" in first.resize_handle.toolTip()

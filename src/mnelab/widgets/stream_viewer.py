@@ -1517,8 +1517,13 @@ class StreamPanel(QFrame):
             return
         self._plot_height = height
         self.plot.setFixedHeight(height)
+        if self.layout() is not None:
+            self.layout().invalidate()
         self.updateGeometry()
         if self.parentWidget() is not None:
+            parent_layout = self.parentWidget().layout()
+            if parent_layout is not None:
+                parent_layout.invalidate()
             self.parentWidget().updateGeometry()
 
     def reset_channel_display(self, name):
