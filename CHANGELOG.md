@@ -11,6 +11,8 @@
 - Add right-click stream display properties with exact per-stream physical amplitude
   scales and reversible lane fitting
 - Add reusable JSON filter presets for per-stream filter operations and channel targets
+- Add live per-stream filter-response plots and an Apply & Add Another workflow for
+  ordered filter stages
 - Add an optional stream-viewer crosshair, Shift-drag measurement statistics showing time
   and value differences, and keyboard navigation through time-window history (by
   [NitzanLux](https://github.com/NitzanLux))
@@ -20,6 +22,10 @@
 - Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 - Keep the annotation timeline aligned with the signal panels when the stream viewer's
   scrollbar appears or disappears (by [NitzanLux](https://github.com/NitzanLux))
+- Keep open source/sEMG plots and activation-map windows attached to the filtered
+  dataset, and recompute activation from the filtered samples
+- Prevent missing XDF samples from contaminating the remainder of a channel during
+  IIR and notch filtering by resetting filter state at every non-finite gap
 
 ### 🌀 Changed
 - Rename the independent distribution and application to MNELAB Streams, retain the

@@ -458,6 +458,9 @@ annotations rather than silently replace them.
   ripple; moving-average sample count for high- and low-pass filters; and a resonator
   Q-factor with displayed -3 dB bandwidth for notch filters. Band filter order shall
   be even.
+- Every selected stream shall show a live theoretical magnitude-response plot in dB.
+  The dialog shall allow the valid current stage to be retained with **Apply & Add
+  Another**, then apply all retained and final stages in configuration order.
 - Notch filters shall optionally include every integer harmonic of the selected
   fundamental frequency that remains strictly below the target stream's Nyquist
   frequency. The expanded frequency list and selected channel picks shall be retained
@@ -465,6 +468,12 @@ annotations rather than silently replace them.
 - Cutoff values must be positive; a band-pass or band-stop upper cutoff must remain
   at least 12% above its lower cutoff, matching EDFbrowser's paired-frequency
   controls. The UI steps in 0.5 Hz increments.
+- Filtering a dataset with an open source/sEMG viewer shall retain that viewer and its
+  layout on the filtered dataset. An open activation map shall stay open, discard its
+  stale values, and recompute from the filtered samples.
+- Causal IIR and resonator-notch filters shall process every contiguous finite span
+  independently. Non-finite source samples shall remain in place without contaminating
+  later finite samples, and each post-gap span shall begin with a reset filter state.
 - Resampling shall accept 0.1-1,000,000 Hz and rely on MNE's anti-alias filtering.
 - Raw cropping shall allow either endpoint to be omitted and shall clamp selected
   endpoints to the recording bounds.

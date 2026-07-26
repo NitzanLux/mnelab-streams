@@ -3,8 +3,12 @@
 # License: BSD (3-clause)
 
 import math
+from copy import deepcopy
 from pathlib import Path
 
+import numpy as np
+import pyqtgraph as pg
+import scipy.signal
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -177,7 +181,7 @@ class StreamFilterPanel(QGroupBox):
 
     settings_changed = Signal()
 
-    def __init__(self, stream, fmax=None, parent=None):
+    def __init__(self, stream, fmax=None, response_sfreq=None, parent=None):
         stream_type = stream.get("type")
         name = stream.get("name") or "Data"
         title = (
@@ -191,6 +195,13 @@ class StreamFilterPanel(QGroupBox):
         self._last_order = 1
         self._last_samples = 16
         self._last_q_factor = 20
+        self._response_sfreq = (
+            float(response_sfreq)
+            if response_sfreq is not None
+            else 2 * float(fmax)
+            if fmax is not None
+            else None
+        )
 
         grid = QGridLayout(self)
         self.apply_edit = QCheckBox("Apply filter")
@@ -243,6 +254,21 @@ class StreamFilterPanel(QGroupBox):
         grid.addWidget(self.order_detail_label, 8, 0, 1, 2)
         grid.addWidget(self.harmonics_edit, 9, 0, 1, 2)
 
+        self.response_plot = pg.PlotWidget()
+        self.response_plot.setMinimumHeight(175)
+        self.response_plot.setMaximumHeight(220)
+        self.response_plot.setMenuEnabled(False)
+        self.response_plot.setMouseEnabled(x=False, y=False)
+        self.response_plot.showGrid(x=True, y=True, alpha=0.18)
+        self.response_plot.setLabel("bottom", "Frequency", units="Hz")
+        self.response_plot.setLabel("left", "Gain", units="dB")
+        self.response_plot.setTitle("Current stage response")
+        self.response_plot.setYRange(-60, 5, padding=0)
+        self.response_plot.setToolTip(
+            "Theoretical frequency response for this filter stage"
+        )
+        grid.addWidget(self.response_plot, 10, 0, 1, 2)
+
         channels_group = QGroupBox("Channels for this filter")
         channels_layout = QVBoxLayout(channels_group)
         self.select_all_channels = QCheckBox("All channels")
@@ -265,7 +291,7 @@ class StreamFilterPanel(QGroupBox):
         self.targets_label = QLabel()
         self.targets_label.setWordWrap(True)
         channels_layout.addWidget(self.targets_label)
-        grid.addWidget(channels_group, 10, 0, 1, 2)
+        grid.addWidget(channels_group, 11, 0, 1, 2)
         self.channels_group = channels_group
 
         self.filter_type_edit.currentTextChanged.connect(self._filter_type_changed)
@@ -281,8 +307,10 @@ class StreamFilterPanel(QGroupBox):
         self.harmonics_edit.toggled.connect(self.settings_changed)
         self.channel_list.itemChanged.connect(self._channel_selection_changed)
         self.select_all_channels.stateChanged.connect(self._toggle_all_channels)
+        self.settings_changed.connect(self._update_response_plot)
         self._update_target_summary()
         self._filter_type_changed(self.filter_type_edit.currentText())
+        self._update_response_plot()
 
     @staticmethod
     def _frequency_input(value, maximum):
@@ -638,6 +666,118 @@ class StreamFilterPanel(QGroupBox):
             self.order_detail_label.clear()
             self.order_detail_label.setVisible(False)
 
+    def _response_coefficients(self):
+        """Return coefficients matching the filter applied by the model."""
+        if self._response_sfreq is None or self._response_sfreq <= 0:
+            return None
+        kind = self.selected_filter_type.casefold()
+        model = self.selected_model
+        if model == "Moving Average":
+            samples = int(self.order_edit.value())
+            b = np.full(samples, 1.0 / samples)
+            if kind == "highpass":
+                impulse = np.zeros(samples)
+                impulse[0] = 1.0
+                b = impulse - b
+            return b, np.array([1.0])
+        if kind == "notch":
+            frequencies = self.notch
+            if not isinstance(frequencies, (list, tuple, np.ndarray)):
+                frequencies = [frequencies]
+            return [
+                scipy.signal.iirnotch(
+                    float(frequency),
+                    int(self.order_edit.value()),
+                    fs=self._response_sfreq,
+                )
+                for frequency in frequencies
+            ]
+
+        cutoff = {
+            "highpass": self.lower_edit.value(),
+            "lowpass": self.upper_edit.value(),
+            "bandpass": [self.lower_edit.value(), self.upper_edit.value()],
+            "bandstop": [self.lower_edit.value(), self.upper_edit.value()],
+        }[kind]
+        order = int(self.order_edit.value())
+        if kind in {"bandpass", "bandstop"}:
+            order //= 2
+        kwargs = {
+            "N": order,
+            "Wn": cutoff,
+            "btype": kind,
+            "ftype": {
+                "Butterworth": "butter",
+                "Chebyshev": "cheby1",
+                "Bessel": "bessel",
+            }[model],
+            "output": "sos",
+            "fs": self._response_sfreq,
+        }
+        if model == "Chebyshev":
+            kwargs["rp"] = float(self.ripple_edit.value())
+        return scipy.signal.iirfilter(**kwargs)
+
+    def _update_response_plot(self, *_args):
+        """Redraw the live theoretical magnitude response."""
+        if not hasattr(self, "response_plot"):
+            return
+        self.response_plot.clear()
+        if not self.apply_edit.isChecked() or not self.is_valid:
+            return
+        try:
+            coefficients = self._response_coefficients()
+            if coefficients is None:
+                return
+            if self.selected_filter_type == "Notch":
+                frequencies = np.linspace(
+                    0,
+                    self._response_sfreq / 2,
+                    4096,
+                    endpoint=False,
+                )
+                response = np.ones_like(frequencies, dtype=complex)
+                for b, a in coefficients:
+                    _, stage_response = scipy.signal.freqz(
+                        b,
+                        a,
+                        worN=frequencies,
+                        fs=self._response_sfreq,
+                    )
+                    response *= stage_response
+            elif self.selected_model != "Moving Average":
+                frequencies, response = scipy.signal.sosfreqz(
+                    coefficients,
+                    worN=4096,
+                    fs=self._response_sfreq,
+                )
+            else:
+                b, a = coefficients
+                frequencies, response = scipy.signal.freqz(
+                    b,
+                    a,
+                    worN=4096,
+                    fs=self._response_sfreq,
+                )
+            magnitude = np.maximum(
+                20 * np.log10(np.maximum(np.abs(response), 1e-3)),
+                -60,
+            )
+            self.response_plot.plot(
+                frequencies,
+                magnitude,
+                pen=pg.mkPen("#3daee9", width=2),
+            )
+            self.response_plot.setXRange(
+                0,
+                self._response_sfreq / 2,
+                padding=0,
+            )
+        except (KeyError, TypeError, ValueError):
+            # Invalid frequency pairs already disable Apply. Leave the plot blank
+            # until the controls describe a valid filter.
+            return
+
     def _toggle_all_channels(self, state):
         if self._updating_channels or state == Qt.CheckState.PartiallyChecked.value:
             return
@@ -782,7 +922,12 @@ class FilterDialog(QDialog):
                     else min(stream_fmax, nominal_nyquist)
                 )
             self.panels.append(
-                StreamFilterPanel(stream, fmax=stream_fmax, parent=self.panel_container)
+                StreamFilterPanel(
+                    stream,
+                    fmax=stream_fmax,
+                    response_sfreq=None if fmax is None else 2 * float(fmax),
+                    parent=self.panel_container,
+                )
             )
         for panel in self.panels:
             panel.settings_changed.connect(self.validate_inputs)
@@ -803,6 +948,11 @@ class FilterDialog(QDialog):
         self.buttonbox = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
         )
+        self._queued_filters = []
+        self.queued_filters_label = QLabel()
+        self.queued_filters_label.setWordWrap(True)
+        self.queued_filters_label.hide()
+        layout.addWidget(self.queued_filters_label)
         self.load_preset_button = self.buttonbox.addButton(
             "Load Preset…", QDialogButtonBox.ButtonRole.ActionRole
         )
@@ -810,8 +960,14 @@ class FilterDialog(QDialog):
             "Save Preset…", QDialogButtonBox.ButtonRole.ActionRole
         )
         self.ok_button = self.buttonbox.button(QDialogButtonBox.StandardButton.Ok)
+        self.ok_button.setText("Apply")
+        self.add_filter_button = self.buttonbox.addButton(
+            "Apply & Add Another",
+            QDialogButtonBox.ButtonRole.ActionRole,
+        )
         self.load_preset_button.clicked.connect(lambda: self.load_filter_preset())
         self.save_preset_button.clicked.connect(lambda: self.save_filter_preset())
+        self.add_filter_button.clicked.connect(self._queue_filter_stage)
         self.buttonbox.accepted.connect(self.accept)
         self.buttonbox.rejected.connect(self.reject)
         layout.addWidget(self.buttonbox)
@@ -872,7 +1028,21 @@ class FilterDialog(QDialog):
         enabled = [panel for panel in self.panels if panel.apply_edit.isChecked()]
         valid = bool(enabled) and all(panel.is_valid for panel in enabled)
         self.ok_button.setEnabled(valid)
+        self.add_filter_button.setEnabled(valid)
         self.save_preset_button.setEnabled(valid)
+
+    def _queue_filter_stage(self):
+        """Keep this stage and return to target selection for another one."""
+        if not self.ok_button.isEnabled():
+            return
+        self._queued_filters.extend(deepcopy(self._current_filters))
+        count = len(self._queued_filters)
+        self.queued_filters_label.setText(
+            f"{count} filter operation(s) ready. Configure the next stage, then "
+            "choose Apply or Apply & Add Another."
+        )
+        self.queued_filters_label.show()
+        self._show_filter_targets()
 
     @staticmethod
     def _stream_identity(stream):
@@ -1165,11 +1335,15 @@ class FilterDialog(QDialog):
         return True
 
     @property
-    def filters(self):
-        """Return enabled per-stream filter specifications."""
+    def _current_filters(self):
         return [
             spec for panel in self.panels if (spec := panel.filter_spec) is not None
         ]
+
+    @property
+    def filters(self):
+        """Return queued and current filters in their application order."""
+        return [*deepcopy(self._queued_filters), *self._current_filters]
 
     @property
     def selected_filter_type(self):

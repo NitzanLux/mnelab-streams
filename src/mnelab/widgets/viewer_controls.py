@@ -27,6 +27,7 @@ class AnnotationSidebar(QWidget):
 
     filter_changed = Signal()
     annotation_selected = Signal(float)
+    annotation_highlighted = Signal(int)
 
     def __init__(self, raw, parent=None):
         super().__init__(parent)
@@ -317,4 +318,7 @@ class AnnotationSidebar(QWidget):
         self.filter_changed.emit()
 
     def _item_selected(self, item):
+        self.annotation_highlighted.emit(
+            int(item.data(ANNOTATION_INDEX_ROLE))
+        )
         self.annotation_selected.emit(float(item.data(Qt.ItemDataRole.UserRole)))

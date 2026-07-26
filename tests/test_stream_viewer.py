@@ -20,6 +20,7 @@ from mnelab.widgets.stream_viewer import (
     ACTIVATION_AXIS_MIN_WIDTH,
     ACTIVATION_NAN_COLOR,
     CHANNEL_LABEL_WIDTH,
+    CHANNEL_LANE_HEIGHT,
     CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
     ActivationMapWindow,
@@ -899,6 +900,26 @@ def test_signal_annotation_click_highlights_matching_sidebar_item(qtbot, viewer)
     assert not viewer.annotation_dock.isHidden()
 
 
+def test_sidebar_trigger_click_highlights_annotation_traces(qtbot, viewer):
+    """A browser click highlights the trigger in marker and signal traces."""
+    sidebar = viewer.annotation_sidebar
+
+    qtbot.mouseClick(
+        sidebar.list.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=sidebar.list.visualItemRect(sidebar.list.item(0)).center(),
+    )
+
+    assert viewer._selected_annotation_index == 0
+    assert viewer.annotation_stream.selected_annotation_index == 0
+    assert all(panel.selected_annotation_index == 0 for panel in viewer.panels)
+    assert viewer.annotation_stream._regions[0].opts["pen"].widthF() == 3
+    assert all(
+        panel._annotation_regions[0].lines[0].pen.widthF() == 3
+        for panel in viewer.panels
+    )
+
+
 def test_navigation_shows_relative_hms_time(viewer):
     """The bottom navigation shows the visible start in hours:minutes:seconds."""
     assert viewer.relative_time_label.text() == "Relative: 00:00:00"
@@ -1322,6 +1343,34 @@ def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
     assert panel.visible_channel_names == ["EEG A", "EEG B"]
     assert panel.channel_list.count() == 2
     assert panel._axis_channels == ("EEG A", "EEG B")
+
+
+def test_hiding_channel_reduces_stream_plot_by_one_lane(viewer):
+    """Hiding and restoring a channel removes and restores its plot lane."""
+    panel = viewer.panels[0]
+    initial_height = panel.plot.height()
+
+    panel.set_channel_visible("EEG A", False)
+
+    assert panel.plot.height() == initial_height - CHANNEL_LANE_HEIGHT
+
+    panel.set_channel_visible("EEG A", True)
+
+    assert panel.plot.height() == initial_height
+
+
+def test_each_stream_has_independent_drag_resize_handle(viewer):
+    """A panel's bottom grip resizes only that stream plot."""
+    first, second = viewer.panels
+    first_height = first.plot.height()
+    second_height = second.plot.height()
+
+    first.resize_handle.resize_requested.emit(47)
+
+    assert first.plot.height() == first_height + 47
+    assert second.plot.height() == second_height
+    assert first.resize_handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
+    assert "Drag to resize" in first.resize_handle.toolTip()
 
 
 def test_swap_selected_exchanges_panel_locations(viewer):
@@ -1806,6 +1855,48 @@ def test_activation_map_button_reuses_and_releases_child_window(qtbot, viewer):
 
         cached_window.close()
         qtbot.waitUntil(lambda: viewer.activation_map_window is None)
+
+
+def test_replacing_filtered_data_preserves_and_recomputes_activation_map(
+    qtbot,
+    viewer,
+    raw,
+    streams,
+):
+    """A same-topology filtered copy keeps both source plots and map window."""
+    viewer.show_activation_map()
+    activation_window = viewer.activation_map_window
+    qtbot.waitUntil(
+        lambda: activation_window.image_item is not None,
+        timeout=5000,
+    )
+    filtered = raw.copy()
+    filtered._data *= 0.5
+
+    with patch(
+        "mnelab.widgets.stream_viewer.activation_matrix",
+        wraps=activation_matrix,
+    ) as calculate:
+        assert viewer.replace_data(
+            filtered,
+            streams=streams,
+            events=np.empty((0, 3), dtype=int),
+            dataset_id=99,
+            title="Filtered sEMG",
+        )
+        assert viewer.activation_map_window is activation_window
+        assert viewer.raw is filtered
+        assert viewer.dataset_id == 99
+        assert all(panel.raw is filtered for panel in viewer.panels)
+        qtbot.waitUntil(
+            lambda: activation_window.image_item is not None,
+            timeout=5000,
+        )
+
+    assert calculate.call_count == 1
+    assert activation_window.raw is filtered
+    activation_window.close()
+    qtbot.waitUntil(lambda: viewer.activation_map_window is None)
 
 
 def test_activation_time_selection_centers_viewer_and_syncs_region(qtbot, viewer):

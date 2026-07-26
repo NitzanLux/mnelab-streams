@@ -191,6 +191,9 @@ The filter workflow is organized with the same source decomposition as the viewe
 - A first page selects the relevant streams and then the exact channels within them.
 - A second page configures every selected stream independently.
 - The dialog continuously summarizes filter targets.
+- Each selected stream has a live gain-in-dB frequency-response plot.
+- **Apply & Add Another** retains the current stage and returns to target selection,
+  allowing ordered filter stages to be configured in one operation.
 - High-pass, low-pass, notch, band-pass, and band-stop filters are supported.
 - EDFbrowser-inspired Butterworth, Chebyshev, Bessel, moving-average, order,
   passband-ripple, resonator Q-factor, and bandwidth controls are available where
@@ -198,12 +201,15 @@ The filter workflow is organized with the same source decomposition as the viewe
 - Frequency controls are bounded by each source's nominal Nyquist frequency.
 - Notch filtering can expand a fundamental into all valid integer harmonics strictly
   below that source's Nyquist frequency.
+- IIR and notch filtering preserve explicit XDF gaps and reset their recursive state
+  after each gap instead of spreading one missing sample through the rest of a channel.
 - Selected picks and expanded notch frequencies are preserved in processing history.
 - Auxiliary-only datasets are supported; the feature does not require EEG channels.
 
 When multiple stream filters are accepted, they are applied to the derived dataset in
-stream order. Existing MNELAB dataset duplication and history behavior remains in
-effect.
+configuration order. Existing source/sEMG viewers are rebound to that filtered dataset
+without losing their layout, and any open activation map is recomputed in place.
+Existing MNELAB dataset duplication and history behavior remains in effect.
 
 ## 5. Source-oriented PSD viewer
 

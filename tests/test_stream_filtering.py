@@ -8,12 +8,13 @@ from unittest.mock import call, patch
 import mne
 import numpy as np
 import pytest
+import scipy.signal
 from PySide6.QtCore import Qt
 
 from mnelab.dialogs import FilterDialog
 from mnelab.filter_preset import FilterPresetError
 from mnelab.mainwindow import MainWindow
-from mnelab.model import Model
+from mnelab.model import Model, _finite_span_iir_filter
 
 
 def _raw_and_streams():
@@ -182,6 +183,50 @@ def test_band_frequencies_do_not_rewrite_each_other(qtbot):
     assert not panel.is_valid
 
 
+def test_filter_response_plot_updates_with_filter_settings(qtbot):
+    """Each stream panel shows the live theoretical magnitude response."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(dialog)
+    panel = dialog.panels[0]
+    panel.filter_type_edit.setCurrentText("Lowpass")
+    panel.upper_edit.setValue(10)
+
+    curve = panel.response_plot.listDataItems()[0]
+    frequencies, low_order = curve.getData()
+    assert frequencies[0] == pytest.approx(0)
+    assert frequencies[-1] < 50
+    assert low_order[np.searchsorted(frequencies, 5)] > -3
+    assert low_order[np.searchsorted(frequencies, 30)] < -5
+
+    panel.order_edit.setValue(8)
+    _, high_order = panel.response_plot.listDataItems()[0].getData()
+    assert (
+        high_order[np.searchsorted(frequencies, 30)]
+        < low_order[np.searchsorted(frequencies, 30)]
+    )
+
+
+def test_apply_and_add_another_queues_filters_in_order(qtbot):
+    """A filter stage can be retained before configuring the next stage."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=[streams[0]])
+    qtbot.addWidget(dialog)
+    panel = dialog.panels[0]
+    panel.filter_type_edit.setCurrentText("Highpass")
+    panel.lower_edit.setValue(2)
+
+    dialog.add_filter_button.click()
+
+    assert dialog.pages.currentWidget() is dialog.targets_page
+    assert "1 filter operation" in dialog.queued_filters_label.text()
+    panel.filter_type_edit.setCurrentText("Lowpass")
+    panel.upper_edit.setValue(20)
+    assert [stage["kind"] for stage in dialog.filters] == ["highpass", "lowpass"]
+    assert dialog.filters[0]["lower"] == 2
+    assert dialog.filters[1]["upper"] == 20
+
+
 def test_model_applies_each_filter_only_to_its_stream(tmp_path):
     """Independent stream filters use explicit, non-overlapping channel picks."""
     raw, streams = _raw_and_streams()
@@ -240,21 +285,26 @@ def test_model_applies_edfbrowser_chebyshev_bandstop(tmp_path):
         "notch": None,
     }
 
-    with patch.object(raw, "filter") as filter_mock:
+    with (
+        patch("mnelab.model.scipy.signal.iirfilter") as design_mock,
+        patch.object(raw, "apply_function") as apply_mock,
+    ):
+        design_mock.return_value = np.ones((3, 6))
         model.filter(stream_filters=[stream_filter])
 
-    filter_mock.assert_called_once_with(
-        20.0,
-        10.0,
+    design_mock.assert_called_once_with(
+        N=3,
+        Wn=[10.0, 20.0],
+        btype="bandstop",
+        ftype="cheby1",
+        output="sos",
+        fs=100.0,
+        rp=1.5,
+    )
+    apply_mock.assert_called_once_with(
+        _finite_span_iir_filter,
         picks=["EEG 1"],
-        method="iir",
-        iir_params={
-            "order": 3,
-            "ftype": "cheby1",
-            "output": "sos",
-            "rp": 1.5,
-        },
-        phase="forward",
+        sos=design_mock.return_value,
     )
 
 
@@ -283,7 +333,7 @@ def test_model_applies_resonator_notch_to_each_harmonic(tmp_path):
             "mnelab.model.scipy.signal.iirnotch",
             return_value=coefficients,
         ) as design_mock,
-        patch.object(raw, "notch_filter") as notch_mock,
+        patch.object(raw, "apply_function") as apply_mock,
     ):
         model.filter(stream_filters=[stream_filter])
 
@@ -291,10 +341,20 @@ def test_model_applies_resonator_notch_to_each_harmonic(tmp_path):
         call(20.0, 10, fs=100.0),
         call(40.0, 10, fs=100.0),
     ]
-    assert notch_mock.call_count == 2
-    assert [item.args[0] for item in notch_mock.call_args_list] == [20.0, 40.0]
-    assert all(item.kwargs["method"] == "iir" for item in notch_mock.call_args_list)
-    assert all(item.kwargs["phase"] == "forward" for item in notch_mock.call_args_list)
+    assert apply_mock.call_args_list == [
+        call(
+            _finite_span_iir_filter,
+            picks=["EEG 2"],
+            b=coefficients[0],
+            a=coefficients[1],
+        ),
+        call(
+            _finite_span_iir_filter,
+            picks=["EEG 2"],
+            b=coefficients[0],
+            a=coefficients[1],
+        ),
+    ]
 
 
 def test_model_applies_moving_average_only_to_selected_channels(tmp_path):
@@ -329,8 +389,126 @@ def test_model_applies_moving_average_only_to_selected_channels(tmp_path):
     np.testing.assert_allclose(raw.get_data(picks=["B"])[0], [10, 11, 12, 13])
 
 
+def test_finite_span_iir_matches_forward_filter_and_resets_after_gaps():
+    """Finite spans use MNE's forward zero-state semantics independently."""
+    sos = scipy.signal.butter(3, 0.2, output="sos")
+    values = np.linspace(-1, 1, 80)
+    expected = scipy.signal.sosfilt(sos, values)
+    np.testing.assert_allclose(
+        _finite_span_iir_filter(values, sos=sos),
+        expected,
+    )
+
+    values[25:30] = np.nan
+    filtered = _finite_span_iir_filter(values, sos=sos)
+    assert np.array_equal(np.isnan(filtered), np.isnan(values))
+    np.testing.assert_allclose(filtered[:25], scipy.signal.sosfilt(sos, values[:25]))
+    np.testing.assert_allclose(filtered[30:], scipy.signal.sosfilt(sos, values[30:]))
+
+
+@pytest.mark.parametrize(
+    ("filter_model", "extra"),
+    [
+        ("butterworth", {}),
+        ("chebyshev", {"ripple": 1.0}),
+        ("bessel", {}),
+    ],
+)
+def test_explicit_iir_preserves_only_original_nan_gaps(
+    tmp_path,
+    filter_model,
+    extra,
+):
+    """Every selectable IIR model resets at gaps without touching other picks."""
+    sfreq = 200.0
+    times = np.arange(1000) / sfreq
+    selected = np.sin(2 * np.pi * 10 * times) + 0.2 * np.sin(2 * np.pi * 60 * times)
+    selected[300:307] = np.nan
+    untouched = np.cos(2 * np.pi * 4 * times)
+    raw = mne.io.RawArray(
+        np.vstack((selected, untouched)),
+        mne.create_info(["sEMG", "Reference"], sfreq, ["emg", "misc"]),
+        verbose=False,
+    )
+    path = tmp_path / f"{filter_model}.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    model.filter(
+        stream_filters=[
+            {
+                "stream_name": "sEMG",
+                "picks": ["sEMG"],
+                "kind": "bandpass",
+                "model": filter_model,
+                "order": 4,
+                "lower": 5.0,
+                "upper": 40.0,
+                "notch": None,
+                **extra,
+            }
+        ]
+    )
+
+    result = raw.get_data()
+    assert np.array_equal(np.isnan(result[0]), np.isnan(selected))
+    assert np.isfinite(result[0, 307:]).all()
+    np.testing.assert_array_equal(result[1], untouched)
+
+
+def test_notch_harmonics_and_chained_iir_filters_do_not_spread_nans(tmp_path):
+    """Every harmonic and later queued stage preserves the same missing-data mask."""
+    sfreq = 250.0
+    times = np.arange(1250) / sfreq
+    values = np.sin(2 * np.pi * 15 * times)
+    values[400] = np.nan
+    values[800:805] = np.nan
+    original_nan = np.isnan(values)
+    raw = mne.io.RawArray(
+        values[None],
+        mne.create_info(["sEMG"], sfreq, ["emg"]),
+        verbose=False,
+    )
+    path = tmp_path / "chained.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    model.filter(
+        stream_filters=[
+            {
+                "stream_name": "sEMG",
+                "picks": ["sEMG"],
+                "kind": "notch",
+                "model": "resonator",
+                "order": 20,
+                "q_factor": 20,
+                "lower": None,
+                "upper": None,
+                "notch": [50.0, 100.0],
+            },
+            {
+                "stream_name": "sEMG",
+                "picks": ["sEMG"],
+                "kind": "highpass",
+                "model": "butterworth",
+                "order": 4,
+                "lower": 5.0,
+                "upper": None,
+                "notch": None,
+            },
+        ]
+    )
+
+    result = raw.get_data()[0]
+    assert np.array_equal(np.isnan(result), original_nan)
+    assert np.isfinite(result[401:800]).all()
+    assert np.isfinite(result[805:]).all()
+
+
 def test_model_explicit_iir_and_resonator_filters_execute_with_mne(tmp_path):
-    """The generated IIR parameters are accepted by the installed MNE version."""
+    """Finite recordings retain the expected causal SciPy IIR response."""
     rng = np.random.default_rng(42)
     raw = mne.io.RawArray(
         rng.standard_normal((2, 2000)),
@@ -370,8 +548,23 @@ def test_model_explicit_iir_and_resonator_filters_execute_with_mne(tmp_path):
     )
 
     assert np.isfinite(raw.get_data()).all()
-    assert not np.array_equal(raw.get_data(picks=["A"])[0], before[0])
-    assert not np.array_equal(raw.get_data(picks=["B"])[0], before[1])
+    lowpass_sos = scipy.signal.iirfilter(
+        N=4,
+        Wn=30.0,
+        btype="lowpass",
+        ftype="butter",
+        output="sos",
+        fs=200.0,
+    )
+    notch_b, notch_a = scipy.signal.iirnotch(50.0, 20, fs=200.0)
+    np.testing.assert_allclose(
+        raw.get_data(picks=["A"])[0],
+        scipy.signal.sosfilt(lowpass_sos, before[0]),
+    )
+    np.testing.assert_allclose(
+        raw.get_data(picks=["B"])[0],
+        scipy.signal.lfilter(notch_b, notch_a, before[1]),
+    )
     compile("\n".join(model.history), "<MNELAB history>", "exec")
 
 
@@ -774,3 +967,44 @@ def test_filter_action_passes_plot_view_stream_groups(qtbot, tmp_path):
         ["Aux"],
     ]
     filter_mock.assert_called_once_with(stream_filters=selected)
+
+
+def test_filter_action_rebinds_open_stream_viewer_to_filtered_copy(qtbot, tmp_path):
+    """Filtering preserves the open sEMG/source plots on the new dataset."""
+    raw, streams = _raw_and_streams()
+    path = tmp_path / "streams.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    window = MainWindow(model)
+    model.view = window
+    qtbot.addWidget(window)
+    model.load_data(raw, path, source_streams=streams)
+
+    from mnelab.widgets.stream_viewer import StreamViewerWindow
+
+    viewer = StreamViewerWindow(
+        raw,
+        streams=streams,
+        dataset_id=model.current["id"],
+    )
+    qtbot.addWidget(viewer)
+    window._stream_viewers.append(viewer)
+    original_id = viewer.dataset_id
+    selected = [
+        {
+            "stream_name": "Accessory",
+            "picks": ["Aux"],
+            "lower": None,
+            "upper": 15.0,
+            "notch": None,
+        }
+    ]
+    with patch("mnelab.mainwindow.FilterDialog") as dialog_class:
+        dialog_class.return_value.exec.return_value = True
+        dialog_class.return_value.filters = selected
+        window.filter_data()
+
+    assert model.current["id"] != original_id
+    assert viewer.dataset_id == model.current["id"]
+    assert viewer.raw is model.current["data"]
+    assert viewer in window._stream_viewers

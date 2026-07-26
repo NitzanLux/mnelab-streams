@@ -2254,6 +2254,8 @@ class MainWindow(QMainWindow):
             self._stream_viewers.append(viewer)
 
             def viewer_bads_changed():
+                dataset_id = viewer.dataset_id
+                data = viewer.raw
                 index = self.model.set_dataset_bads(
                     dataset_id, data.info["bads"], data=data
                 )
@@ -2269,6 +2271,8 @@ class MainWindow(QMainWindow):
                     self.data_changed(focus_sidebar=False, refresh_stream_viewers=False)
 
             def viewer_destroyed(*_args):
+                dataset_id = viewer.dataset_id
+                data = viewer.raw
                 if viewer in self._stream_viewers:
                     self._stream_viewers.remove(viewer)
                 remaining = any(
@@ -2676,8 +2680,34 @@ class MainWindow(QMainWindow):
         streams = normalize_streams(data, self.model.current["source_streams"])
         dialog = FilterDialog(self, fmax=nyquist, streams=streams)
         if dialog.exec():
-            self.auto_duplicate()
+            source_dataset_id = self.model.current["id"]
+            source_viewers = [
+                viewer
+                for viewer in self._stream_viewers
+                if viewer.dataset_id == source_dataset_id
+            ]
+            duplicated = self.auto_duplicate()
             self.model.filter(stream_filters=dialog.filters)
+            current = self.model.current
+            if source_viewers:
+                self._stream_viewer_bads_before.setdefault(
+                    current["id"],
+                    list(current["data"].info["bads"]),
+                )
+            for viewer in source_viewers:
+                viewer.replace_data(
+                    current["data"],
+                    streams=current["source_streams"],
+                    marker_streams=current["marker_streams"],
+                    events=current["events"],
+                    dataset_id=current["id"],
+                    title=current["name"],
+                )
+            if duplicated and not any(
+                viewer.dataset_id == source_dataset_id
+                for viewer in self._stream_viewers
+            ):
+                self._stream_viewer_bads_before.pop(source_dataset_id, None)
 
     def resample_data(self):
         """Resample data."""

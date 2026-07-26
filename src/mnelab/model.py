@@ -68,6 +68,37 @@ def _moving_average_filter(values, *, samples, highpass):
     return result
 
 
+def _finite_span_iir_filter(values, *, sos=None, b=None, a=None):
+    """Apply a causal IIR independently to finite spans, preserving gaps."""
+    values = np.asarray(values)
+    if values.ndim > 1:
+        return np.apply_along_axis(
+            _finite_span_iir_filter,
+            -1,
+            values,
+            sos=sos,
+            b=b,
+            a=a,
+        )
+    if sos is None and (b is None or a is None):
+        raise ValueError("Provide either second-order sections or b/a coefficients.")
+    if sos is not None and (b is not None or a is not None):
+        raise ValueError("Provide either second-order sections or b/a, not both.")
+
+    result = values.copy()
+    finite = np.isfinite(values)
+    changes = np.diff(np.pad(finite.astype(np.int8), (1, 1)))
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    for start, stop in zip(starts, stops, strict=True):
+        span = values[start:stop]
+        if sos is not None:
+            result[start:stop] = scipy.signal.sosfilt(sos, span)
+        else:
+            result[start:stop] = scipy.signal.lfilter(b, a, span)
+    return result
+
+
 def _read_raw_data(fname, *args, **kwargs):
     """Read Raw data, protecting XDF resampling from explicit missing samples."""
     if fname.lower().endswith((".xdf", ".xdfz", ".xdf.gz")):
@@ -187,7 +218,7 @@ class Model:
             "from mnelab.utils import annotations_between_events",
             "import numpy as np",
             "import scipy.signal",
-            "from mnelab.model import _moving_average_filter",
+            "from mnelab.model import _finite_span_iir_filter, _moving_average_filter",
             "from mnelab.utils import ("
             "detect_extreme_values,"
             "detect_kurtosis,"
@@ -1041,14 +1072,11 @@ class Model:
                         q_factor,
                         fs=float(data.info["sfreq"]),
                     )
-                    iir_params = {"b": b, "a": a}
-                    apply_filter(
-                        data.notch_filter,
-                        float(frequency),
+                    data.apply_function(
+                        _finite_span_iir_filter,
                         picks=picks,
-                        method="iir",
-                        iir_params=iir_params,
-                        phase="forward",
+                        b=b,
+                        a=a,
                     )
                     self.history.append(
                         "b, a = scipy.signal.iirnotch("
@@ -1056,17 +1084,12 @@ class Model:
                         f"fs={float(data.info['sfreq'])})"
                     )
                     self.history.append(
-                        f"data.notch_filter({float(frequency)}{picks_kwarg}, "
-                        "method='iir', "
-                        "iir_params={'b': b, 'a': a}, phase='forward')"
+                        "data.apply_function(_finite_span_iir_filter"
+                        f"{picks_kwarg}, b=b, a=a)"
                     )
                 frequency_text = ", ".join(f"{float(value):g}" for value in frequencies)
                 return f"notch {frequency_text}\u2009Hz (Q {q_factor})"
 
-            low = stream_filter.get("lower")
-            high = stream_filter.get("upper")
-            if kind == "bandstop":
-                low, high = high, low
             model_names = {
                 "butterworth": "butter",
                 "chebyshev": "cheby1",
@@ -1074,32 +1097,46 @@ class Model:
             }
             order = int(stream_filter["order"])
             design_order = order // 2 if kind in {"bandpass", "bandstop"} else order
-            iir_params = {
-                "order": design_order,
+            cutoff = {
+                "highpass": stream_filter["lower"],
+                "lowpass": stream_filter["upper"],
+                "bandpass": [
+                    stream_filter["lower"],
+                    stream_filter["upper"],
+                ],
+                "bandstop": [
+                    stream_filter["lower"],
+                    stream_filter["upper"],
+                ],
+            }[kind]
+            design_kwargs = {
+                "N": design_order,
+                "Wn": cutoff,
+                "btype": kind,
                 "ftype": model_names[model],
                 "output": "sos",
+                "fs": float(data.info["sfreq"]),
             }
             if model == "chebyshev":
-                iir_params["rp"] = float(stream_filter["ripple"])
-            apply_filter(
-                data.filter,
-                low,
-                high,
+                design_kwargs["rp"] = float(stream_filter["ripple"])
+            sos = scipy.signal.iirfilter(**design_kwargs)
+            data.apply_function(
+                _finite_span_iir_filter,
                 picks=picks,
-                method="iir",
-                iir_params=iir_params,
-                phase="forward",
+                sos=sos,
             )
+            self.history.append(f"sos = scipy.signal.iirfilter(**{design_kwargs!r})")
             self.history.append(
-                f"data.filter({low}, {high}{picks_kwarg}, method='iir', "
-                f"iir_params={iir_params!r}, phase='forward')"
+                f"data.apply_function(_finite_span_iir_filter{picks_kwarg}, sos=sos)"
             )
             if kind in {"bandpass", "bandstop"}:
                 return (
                     f"{kind} {stream_filter['lower']}-{stream_filter['upper']}\u2009Hz"
                 )
-            cutoff = low if kind == "highpass" else high
-            return f"{kind} {cutoff}\u2009Hz"
+            cutoff_text = (
+                stream_filter["lower"] if kind == "highpass" else stream_filter["upper"]
+            )
+            return f"{kind} {cutoff_text}\u2009Hz"
 
         if stream_filters is None:
             description = filter_one(lower, upper, notch)

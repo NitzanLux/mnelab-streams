@@ -51,6 +51,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QRubberBand,
     QScrollArea,
+    QSizePolicy,
     QSlider,
     QSpinBox,
     QToolTip,
@@ -133,6 +134,9 @@ MAX_AMPLITUDE = 1000.0
 CHANNEL_LIST_WIDTH = 96
 CHANNEL_LABEL_WIDTH = 64
 PANEL_BODY_SPACING = 2
+CHANNEL_LANE_HEIGHT = 32
+MIN_STREAM_PLOT_HEIGHT = 64
+MAX_STREAM_PLOT_HEIGHT = 2000
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
@@ -436,6 +440,49 @@ class StreamDragHandle(QLabel):
 
     def mouseReleaseEvent(self, event):
         self._press_position = None
+        super().mouseReleaseEvent(event)
+
+
+class StreamResizeHandle(QFrame):
+    """Bottom-edge mouse handle that changes one stream panel's plot height."""
+
+    resize_requested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_global_y = None
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("Drag to resize this stream")
+        self.setFrameShape(QFrame.Shape.HLine)
+        self.setFrameShadow(QFrame.Shadow.Sunken)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_global_y = int(round(event.globalPosition().y()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._last_global_y is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            global_y = int(round(event.globalPosition().y()))
+            delta = global_y - self._last_global_y
+            if delta:
+                self._last_global_y = global_y
+                self.resize_requested.emit(delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_global_y = None
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
 
@@ -854,6 +901,7 @@ class StreamPanel(QFrame):
         self.annotation_colors = annotation_colors or {}
         self.event_overlays_visible = bool(event_overlays_visible)
         self.annotation_overlays_visible = bool(annotation_overlays_visible)
+        self.selected_annotation_index = None
         self.display_scales = display_scales
         self.channel_settings = channel_settings
         self.channel_fits = channel_fits
@@ -891,6 +939,7 @@ class StreamPanel(QFrame):
         self._lane_step = 3.0
         self._axis_channels = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 4, 6, 6)
@@ -1035,8 +1084,12 @@ class StreamPanel(QFrame):
         self.plot = StreamPlotWidget(
             axisItems={"left": TraceLabelAxis(orientation="left")}
         )
-        visible_count = min(len(self.channel_names), self.channels_per_page)
-        self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
+        visible_count = len(self.visible_channel_names)
+        self._plot_height = max(
+            150,
+            MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * visible_count,
+        )
+        self.plot.setFixedHeight(self._plot_height)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showAxis("left")
@@ -1054,6 +1107,9 @@ class StreamPanel(QFrame):
         self.plot.measurement_changed.connect(self._measurement_changed)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
+        self.resize_handle = StreamResizeHandle(self)
+        self.resize_handle.resize_requested.connect(self.resize_plot_by)
+        outer.addWidget(self.resize_handle)
         self._curves = [
             self.plot.plot([], [], pen=pg.mkPen("#4c78a8", width=1))
             for _ in range(visible_count)
@@ -1128,7 +1184,9 @@ class StreamPanel(QFrame):
         index = int(np.clip(index, 0, self.page_count - 1))
         if index == self._page:
             return
+        previous_visible_count = len(self.visible_channel_names)
         self._page = index
+        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1425,11 +1483,14 @@ class StreamPanel(QFrame):
         visible = bool(visible)
         if self.channel_settings[name]["visible"] == visible:
             return
+        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name]["visible"] = visible
-        self._visibility_changed()
+        self._visibility_changed(previous_visible_count)
 
-    def _visibility_changed(self):
+    def _visibility_changed(self, previous_visible_count=None):
         """Refresh labels, lanes, and fetched rows after a visibility change."""
+        if previous_visible_count is not None:
+            self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1437,8 +1498,32 @@ class StreamPanel(QFrame):
         self.page_changed.emit()
         self._settings_updated()
 
+    def _adjust_height_for_channel_count(self, previous_visible_count):
+        """Add or remove exactly one plot lane for each visibility-count change."""
+        lane_delta = len(self.visible_channel_names) - int(previous_visible_count)
+        if lane_delta:
+            self.resize_plot_by(CHANNEL_LANE_HEIGHT * lane_delta)
+
+    def resize_plot_by(self, delta):
+        """Resize this panel's plot by a mouse-drag or channel-lane delta."""
+        height = int(
+            np.clip(
+                self._plot_height + int(delta),
+                MIN_STREAM_PLOT_HEIGHT,
+                MAX_STREAM_PLOT_HEIGHT,
+            )
+        )
+        if height == self._plot_height:
+            return
+        self._plot_height = height
+        self.plot.setFixedHeight(height)
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            self.parentWidget().updateGeometry()
+
     def reset_channel_display(self, name):
         """Restore one channel's display-only properties."""
+        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name] = {
             "gain": 1.0,
             "offset": 0.0,
@@ -1447,6 +1532,7 @@ class StreamPanel(QFrame):
             "visible": True,
         }
         self.channel_fits.pop(name, None)
+        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -2527,14 +2613,25 @@ class StreamPanel(QFrame):
             self._annotation_regions.append(region)
         for index, region in enumerate(self._annotation_regions):
             if index < len(visible_annotations):
-                _annotation_index, start, stop, color = visible_annotations[index]
+                annotation_index, start, stop, color = visible_annotations[index]
+                selected = annotation_index == self.selected_annotation_index
                 qcolor = QColor(color)
                 region.setRegion((start, stop))
                 region.setBrush(
-                    pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 24)
+                    pg.mkBrush(
+                        qcolor.red(),
+                        qcolor.green(),
+                        qcolor.blue(),
+                        90 if selected else 24,
+                    )
                 )
                 for line in region.lines:
-                    line.setPen(pg.mkPen(color, width=1.5))
+                    line.setPen(
+                        pg.mkPen(
+                            "#ffd54f" if selected else color,
+                            width=3 if selected else 1.5,
+                        )
+                    )
                 region.show()
             else:
                 region.hide()
@@ -2548,6 +2645,13 @@ class StreamPanel(QFrame):
     def set_annotation_overlays_visible(self, visible):
         """Show or hide annotation regions without changing the annotations."""
         self.annotation_overlays_visible = bool(visible)
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def set_selected_annotation(self, annotation_index):
+        """Highlight one annotation overlay in this signal panel."""
+        self.selected_annotation_index = (
+            None if annotation_index is None else int(annotation_index)
+        )
         self.redraw(self._visible_start, self._visible_duration)
 
     def _annotation_at_time_clicked(self, time):
@@ -2574,7 +2678,7 @@ class _AnnotationRegion(pg.BarGraphItem):
         )
         self._time_region = (0.0, 0.0)
 
-    def set_annotation(self, start, stop, lane_bottom, color):
+    def set_annotation(self, start, stop, lane_bottom, color, selected=False):
         """Position and recolor the rectangle inside one marker lane."""
         qcolor = QColor(color)
         self._time_region = (float(start), float(stop))
@@ -2583,8 +2687,13 @@ class _AnnotationRegion(pg.BarGraphItem):
             x1=[stop],
             y0=[lane_bottom + 0.06],
             y1=[lane_bottom + 0.94],
-            pen=pg.mkPen(color),
-            brush=pg.mkBrush(qcolor.red(), qcolor.green(), qcolor.blue(), 70),
+            pen=pg.mkPen("#ffd54f" if selected else color, width=3 if selected else 1),
+            brush=pg.mkBrush(
+                qcolor.red(),
+                qcolor.green(),
+                qcolor.blue(),
+                150 if selected else 70,
+            ),
         )
 
     def getRegion(self):
@@ -2609,6 +2718,7 @@ class AnnotationStream(QFrame):
         super().__init__(parent)
         self.raw = raw
         self.annotation_colors = annotation_colors or {}
+        self.selected_annotation_index = None
         self.annotation_visible = annotation_visible or (
             lambda _index, _description: True
         )
@@ -2857,7 +2967,7 @@ class AnnotationStream(QFrame):
                 label.hide()
                 continue
             (
-                _annotation_index,
+                annotation_index,
                 start,
                 stop,
                 description,
@@ -2868,12 +2978,20 @@ class AnnotationStream(QFrame):
                 text_width,
                 lane_bottom,
             ) = self._visible_annotations[index]
-            region.set_annotation(start, stop, lane_bottom, color)
+            selected = annotation_index == self.selected_annotation_index
+            region.set_annotation(start, stop, lane_bottom, color, selected)
             label.setTextWidth(max(1.0, text_width - 8.0))
             label.setPos(label_start, lane_bottom + 0.5)
             label.setToolTip(description)
             region.show()
             label.show()
+
+    def set_selected_annotation(self, annotation_index):
+        """Highlight one marker in the annotation trace."""
+        self.selected_annotation_index = (
+            None if annotation_index is None else int(annotation_index)
+        )
+        self.refresh(*self._last_window)
 
     def _mouse_clicked(self, event):
         """Emit the source index of the annotation under a left click."""
@@ -3042,6 +3160,23 @@ class ActivationMapWindow(QMainWindow):
         )
         self.state_label.show()
         self.statusBar().showMessage("Activation overview failed")
+
+    def reset_for_data(self, raw):
+        """Keep the map window open while replacing its underlying samples."""
+        self.raw = raw
+        self.total_duration = raw.n_times / float(raw.info["sfreq"])
+        self.times = np.empty(0)
+        self.matrix = np.empty((len(self.streams), 0))
+        if self.image_item is not None:
+            self.plot.removeItem(self.image_item)
+            self.image_item = None
+        if self.nan_image_item is not None:
+            self.plot.removeItem(self.nan_image_item)
+            self.nan_image_item = None
+        self.nan_legend.hide()
+        self.current_region.setBounds((0, self.total_duration))
+        self.plot.setXRange(0, self.total_duration, padding=0)
+        self.show_loading()
 
     def set_activation_data(self, times, matrix):
         """Install a completed activation matrix on the GUI thread."""
@@ -3214,6 +3349,7 @@ class StreamViewerWindow(QMainWindow):
         self._activation_max_bins = 1000
         self._event_overlays_visible = True
         self._annotation_overlays_visible = True
+        self._selected_annotation_index = None
         self._start_time = 0.0
         total_duration = max(1 / raw.info["sfreq"], raw.n_times / raw.info["sfreq"])
         self._duration = min(float(duration), total_duration)
@@ -3245,6 +3381,9 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_sidebar = AnnotationSidebar(raw, parent=self)
         self.annotation_sidebar.filter_changed.connect(self._annotation_filter_changed)
         self.annotation_sidebar.annotation_selected.connect(self._center_on_annotation)
+        self.annotation_sidebar.annotation_highlighted.connect(
+            self._highlight_annotation
+        )
         self.annotation_dock = QDockWidget("Annotations", self)
         self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
         self.annotation_dock.setAllowedAreas(
@@ -3830,6 +3969,56 @@ class StreamViewerWindow(QMainWindow):
             int(raw.first_samp),
         )
 
+    def replace_data(
+        self,
+        raw,
+        *,
+        streams=None,
+        marker_streams=None,
+        events=None,
+        dataset_id=None,
+        title=None,
+    ):
+        """Rebind an open viewer to a value-modified copy with the same topology."""
+        signature = (
+            tuple(raw.ch_names),
+            tuple(raw.get_channel_types()),
+            float(raw.info["sfreq"]),
+            int(raw.n_times),
+            int(raw.first_samp),
+        )
+        if signature != self._topology_signature:
+            return False
+
+        self.raw = raw
+        self.dataset_id = dataset_id
+        self.source_streams = normalize_streams(raw, streams)
+        self.marker_streams = list(marker_streams or [])
+        if title is not None:
+            self.setWindowTitle(str(title))
+        self.annotation_sidebar.raw = raw
+        self.annotation_stream.raw = raw
+        for panel in self.panels:
+            panel.raw = raw
+        self.sync_events(events)
+
+        # Ignore any result still arriving from the previous Raw object, preserve
+        # the child window, and calculate its map from the filtered samples.
+        self._activation_task_token += 1
+        self._activation_task = None
+        self._activation_cache = None
+        self._activation_error = None
+        if self.activation_map_window is not None:
+            self.activation_map_window.reset_for_data(raw)
+            self.activation_map_window.set_current_window(
+                self._start_time,
+                self._duration,
+            )
+            self._start_activation_computation()
+        self.sync_bad_channels(raw.info["bads"], redraw=False)
+        self.refresh()
+        return True
+
     def sync_events(self, events):
         """Update event overlays from the owning MNELAB dataset."""
         self.events = events
@@ -3848,9 +4037,17 @@ class StreamViewerWindow(QMainWindow):
 
     def _select_annotation_from_stream(self, annotation_index):
         """Reveal and highlight a clicked annotation in the browser dock."""
+        self._highlight_annotation(annotation_index)
         self.annotation_dock.show()
         if self.annotation_sidebar.select_annotation(annotation_index):
             self.annotation_dock.raise_()
+
+    def _highlight_annotation(self, annotation_index):
+        """Synchronize the selected trigger across the browser and all traces."""
+        self._selected_annotation_index = int(annotation_index)
+        self.annotation_stream.set_selected_annotation(annotation_index)
+        for panel in self.panels:
+            panel.set_selected_annotation(annotation_index)
 
     @property
     def start_time(self):
@@ -3904,7 +4101,9 @@ class StreamViewerWindow(QMainWindow):
         ]
         for index, panel in enumerate(attached):
             row, column = divmod(index, self._columns)
-            self.panel_layout.addWidget(panel, row, column)
+            self.panel_layout.addWidget(
+                panel, row, column, alignment=Qt.AlignmentFlag.AlignTop
+            )
             panel.show()
         for column in range(max(1, len(self.panels))):
             self.panel_layout.setColumnStretch(
@@ -3957,6 +4156,7 @@ class StreamViewerWindow(QMainWindow):
                 annotation_overlays_visible=self._annotation_overlays_visible,
                 parent=self.panel_container,
             )
+            panel.selected_annotation_index = self._selected_annotation_index
             self._settings[key] = panel.settings
             panel.selection_changed.connect(self._update_group_buttons)
             panel.settings_changed.connect(self._remember_settings)
