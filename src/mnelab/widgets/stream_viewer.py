@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import (
+    QEvent,
     QMimeData,
     QObject,
     QPoint,
@@ -3326,6 +3327,7 @@ class StreamViewerWindow(QMainWindow):
         self.panel_layout.setContentsMargins(0, 0, 0, 0)
         self.panel_layout.setSpacing(6)
         self.scroll.setWidget(self.panel_container)
+        self.scroll.viewport().installEventFilter(self)
         self.scroll.verticalScrollBar().valueChanged.connect(
             self._schedule_viewport_refresh
         )
@@ -4487,6 +4489,12 @@ class StreamViewerWindow(QMainWindow):
         """Keep the marker timeline aligned with the signal scroll viewport."""
         super().resizeEvent(event)
         QTimer.singleShot(0, self._align_annotation_stream)
+
+    def eventFilter(self, watched, event):
+        """Realign when a scrollbar changes the signal viewport width."""
+        if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._align_annotation_stream)
+        return super().eventFilter(watched, event)
 
     def _align_annotation_stream(self):
         """Match the marker panel edges to the signal panels inside the scroll area."""

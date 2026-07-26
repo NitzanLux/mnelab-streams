@@ -323,7 +323,9 @@ def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(
 ):
     """The duplicate channel-name columns use a compact, shared width budget."""
     viewer.show()
-    qtbot.waitUntil(lambda: viewer.annotation_stream.width() > 0)
+    qtbot.waitUntil(
+        lambda: viewer.annotation_stream.width() == viewer.panel_container.width()
+    )
 
     assert all(
         panel.channel_list.width() == CHANNEL_LIST_WIDTH for panel in viewer.panels
@@ -335,6 +337,15 @@ def test_channel_gutter_is_compact_and_annotation_timeline_stays_aligned(
         == viewer.panel_container.mapToGlobal(QPoint(0, 0)).x()
     )
     assert CHANNEL_LIST_WIDTH + CHANNEL_LABEL_WIDTH < 200
+
+    viewer.scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+    qtbot.waitUntil(
+        lambda: viewer.annotation_stream.width() == viewer.panel_container.width()
+    )
+    assert (
+        viewer.annotation_stream.mapToGlobal(QPoint(0, 0)).x()
+        == viewer.panel_container.mapToGlobal(QPoint(0, 0)).x()
+    )
 
 
 def test_panels_have_independent_units_and_gain(viewer):
