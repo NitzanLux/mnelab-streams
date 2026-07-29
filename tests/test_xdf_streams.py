@@ -36,6 +36,20 @@ def test_all_streams_selected_by_default(qtbot, rows):
     assert selected == {row[0] for row in rows}
     assert set(dialog.selected_streams) == {2, 4}
     assert set(dialog.selected_markers) == {1, 3}
+    assert dialog.resample.isEnabled()
+    assert not dialog.resample.isChecked()
+    assert dialog.gap_threshold_checkbox.isEnabled()
+
+
+def test_gap_detection_does_not_require_resampling(qtbot, rows):
+    """Timestamp gaps can be shown without moving samples to a common grid."""
+    dialog = XDFStreamsDialog(None, rows, fname="x")
+    qtbot.addWidget(dialog)
+
+    dialog.gap_threshold_checkbox.setChecked(True)
+
+    assert not dialog.resample.isChecked()
+    assert dialog.gap_threshold.isEnabled()
 
 
 def test_ok_disabled_with_only_markers_selected(qtbot, rows):
@@ -76,3 +90,23 @@ def test_suggested_fs_uses_maximum_data_rate(qtbot, rows):
     # The 5000 Hz string stream is ignored, while the highest data-stream rate wins
     # regardless of its channel count.
     assert dialog.fs_new.value() == 44100.0
+
+
+def test_unified_dialog_shows_stream_presence_across_files(qtbot, rows):
+    dialog = XDFStreamsDialog(
+        None,
+        rows,
+        fname=None,
+        presence_counts={1: 3, 2: 3, 3: 2, 4: 1},
+        file_count=3,
+    )
+    qtbot.addWidget(dialog)
+
+    assert dialog.windowTitle() == "Select XDF Streams — 3 files"
+    assert dialog.view.columnCount() == 7
+    presence_by_id = {
+        dialog.view.item(row, 0).value(): dialog.view.item(row, 6).text()
+        for row in range(dialog.view.rowCount())
+    }
+    assert presence_by_id == {1: "3/3", 2: "3/3", 3: "2/3", 4: "1/3"}
+    assert dialog.details_button.isHidden()

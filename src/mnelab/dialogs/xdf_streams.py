@@ -27,15 +27,23 @@ from mnelab.widgets import FlatDoubleSpinBox
 
 
 class XDFStreamsDialog(QDialog):
-    def __init__(self, parent, rows, fname):
+    def __init__(self, parent, rows, fname=None, presence_counts=None, file_count=None):
         super().__init__(parent)
-        self.setWindowTitle(f"Select XDF Streams — {Path(fname).name}")
+        if fname is None:
+            self.setWindowTitle(
+                f"Select XDF Streams — {int(file_count or 0)} files"
+            )
+        else:
+            self.setWindowTitle(f"Select XDF Streams — {Path(fname).name}")
         self.fname = fname
+        self.presence_counts = presence_counts or {}
+        self.file_count = file_count
 
         muted = self.palette().color(
             QPalette.ColorGroup.Disabled, QPalette.ColorRole.Text
         )
-        self.view = QTableWidget(len(rows), 6)
+        column_count = 7 if file_count is not None else 6
+        self.view = QTableWidget(len(rows), column_count)
         for i, row in enumerate(rows):
             self.view.setItem(i, 0, IntTableWidgetItem(row[0]))
             self.view.setItem(i, 1, QTableWidgetItem(row[1]))
@@ -43,6 +51,13 @@ class XDFStreamsDialog(QDialog):
             self.view.setItem(i, 3, IntTableWidgetItem(row[3]))
             self.view.setItem(i, 4, QTableWidgetItem(row[4]))
             self.view.setItem(i, 5, FloatTableWidgetItem(row[5]))
+            if file_count is not None:
+                present = int(self.presence_counts.get(row[0], 0))
+                self.view.setItem(
+                    i,
+                    6,
+                    QTableWidgetItem(f"{present}/{int(file_count)}"),
+                )
             if row[4] == "string":  # marker stream
                 font = self.view.item(i, 0).font()
                 font.setItalic(True)
@@ -51,17 +66,21 @@ class XDFStreamsDialog(QDialog):
                     item.setForeground(muted)
                     item.setFont(font)
 
-        self.view.setHorizontalHeaderLabels(
-            [
-                "ID",
-                "Name",
-                "Type",
-                "Channels",
-                "Format",
-                "Sampling Rate",
-            ]
+        headers = [
+            "Group" if file_count is not None else "ID",
+            "Name",
+            "Type",
+            "Channels",
+            "Format",
+            "Sampling Rate",
+        ]
+        if file_count is not None:
+            headers.append("Files")
+        self.view.setHorizontalHeaderLabels(headers)
+        set_header_alignments(
+            self.view,
+            "rllrlrr" if file_count is not None else "rllrlr",
         )
-        set_header_alignments(self.view, "rllrlr")
 
         self.view.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.view.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
@@ -118,6 +137,15 @@ class XDFStreamsDialog(QDialog):
         hbox1.addWidget(self._prefix_markers)
 
         vbox = QVBoxLayout(self)
+        if file_count is not None:
+            batch_note = QLabel(
+                "Each row combines the same logical stream across the readable "
+                "files. The Files column shows how many files announce that stream; "
+                "missing intervals can be filled with NaN during channel-union "
+                "merging."
+            )
+            batch_note.setWordWrap(True)
+            vbox.addWidget(batch_note)
         vbox.addWidget(self.view)
         vbox.addWidget(self.marker_note)
         vbox.addLayout(hbox1)
@@ -125,6 +153,7 @@ class XDFStreamsDialog(QDialog):
         hbox2 = QHBoxLayout()
         self.details_button = QPushButton("Details")
         self.details_button.clicked.connect(self.details)
+        self.details_button.setVisible(fname is not None)
         hbox2.addWidget(self.details_button)
         hbox2.addStretch()
         self.buttonbox = QDialogButtonBox(
@@ -147,12 +176,13 @@ class XDFStreamsDialog(QDialog):
         return self._prefix_markers.isChecked()
 
     def details(self):
-        self.parent().xdf_metadata(self.fname)
+        if self.fname is not None:
+            self.parent().xdf_metadata(self.fname)
 
     @Slot()
     def _toggle_gap_threshold(self):
-        """Enable/disable gap threshold controls based on resample checkbox."""
-        enabled = self.resample.isChecked()
+        """Enable gap detection whenever at least one numeric stream is selected."""
+        enabled = bool(self.selected_streams)
         self.gap_threshold_checkbox.setEnabled(enabled)
         self.gap_threshold_label.setEnabled(enabled)
         if not enabled:
@@ -165,13 +195,12 @@ class XDFStreamsDialog(QDialog):
 
     @Slot()
     def toggle_buttons(self):
-        # toggle the resample selection
+        # Native-rate loading is the default even when multiple streams are selected.
+        # Resampling remains available as an explicit opt-in.
         if len(self.selected_streams) > 1:
-            self.resample.setEnabled(False)
-            self.resample.setChecked(True)
+            self.resample.setEnabled(True)
         elif len(self.selected_streams) == 1:
             self.resample.setEnabled(True)
-            self.resample.setChecked(False)
         else:
             self.resample.setEnabled(False)
             self.resample.setChecked(False)

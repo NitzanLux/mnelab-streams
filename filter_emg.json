@@ -1,0 +1,136 @@
+{
+  "format": "mnelab-filter-preset",
+  "version": 1,
+  "streams": [
+    {
+      "name": "MotorControlCursor",
+      "type": "MotorControl",
+      "channel_names": [
+        "task_id",
+        "trial",
+        "phase",
+        "raw_x",
+        "raw_y",
+        "disp_x",
+        "disp_y",
+        "manip_x",
+        "manip_y",
+        "vel_x",
+        "vel_y",
+        "transform_type",
+        "param1",
+        "param2",
+        "field_enabled",
+        "button",
+        "is_practice"
+      ],
+      "filter": null
+    },
+    {
+      "name": "XtrodesEMG",
+      "type": "EMG",
+      "channel_names": [
+        "Ch0",
+        "Ch1",
+        "Ch2",
+        "Ch3",
+        "Ch4",
+        "Ch5",
+        "Ch6",
+        "Ch7",
+        "Ch8",
+        "Ch9",
+        "Ch10",
+        "Ch11",
+        "Ch12",
+        "Ch13",
+        "Ch14",
+        "Ch15"
+      ],
+      "filter": {
+        "kind": "notch",
+        "channels": [
+          "Ch0",
+          "Ch1",
+          "Ch2",
+          "Ch3",
+          "Ch4",
+          "Ch5",
+          "Ch6",
+          "Ch7",
+          "Ch8",
+          "Ch9",
+          "Ch10",
+          "Ch11",
+          "Ch12",
+          "Ch13",
+          "Ch14",
+          "Ch15"
+        ],
+        "model": "resonator",
+        "order": 20,
+        "frequency": 50.0,
+        "harmonics": true,
+        "q_factor": 20
+      }
+    },
+    {
+      "name": "XtrodesIMU",
+      "type": "IMU",
+      "channel_names": [
+        "Acc X",
+        "Acc Y",
+        "Acc Z",
+        "Gyro X",
+        "Gyro Y",
+        "Gyro Z"
+      ],
+      "filter": null
+    },
+    {
+      "name": "FemtoBolt_cam1_CL8E7510041",
+      "type": "FrameSync",
+      "channel_names": [
+        "frame_index-0",
+        "depth_device_ts_us-0",
+        "depth_system_ts_us-0",
+        "depth_global_ts_us-0",
+        "color_device_ts_us-0",
+        "color_system_ts_us-0",
+        "color_global_ts_us-0",
+        "color_host_ts-0"
+      ],
+      "filter": null
+    },
+    {
+      "name": "FemtoBolt_cam0_CL8E751007P",
+      "type": "FrameSync",
+      "channel_names": [
+        "frame_index-1",
+        "depth_device_ts_us-1",
+        "depth_system_ts_us-1",
+        "depth_global_ts_us-1",
+        "color_device_ts_us-1",
+        "color_system_ts_us-1",
+        "color_global_ts_us-1",
+        "color_host_ts-1"
+      ],
+      "filter": null
+    },
+    {
+      "name": "FemtoBolt_cam2_CL8E751008M",
+      "type": "FrameSync",
+      "channel_names": [
+        "frame_index-2",
+        "depth_device_ts_us-2",
+        "depth_system_ts_us-2",
+        "depth_global_ts_us-2",
+        "color_device_ts_us-2",
+        "color_system_ts_us-2",
+        "color_global_ts_us-2",
+        "color_host_ts-2"
+      ],
+      "filter": null
+    }
+  ]
+}

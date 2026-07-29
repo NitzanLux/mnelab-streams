@@ -263,6 +263,44 @@ def test_annotation_dock_cannot_float(viewer):
     assert not features & QDockWidget.DockWidgetFeature.DockWidgetFloatable
 
 
+def test_streams_tab_defaults_on_and_toggles_source_traces(viewer):
+    """The Streams tab lists every source and displays each one by default."""
+    assert [
+        viewer.sidebar_tabs.tabText(index)
+        for index in range(viewer.sidebar_tabs.count())
+    ] == ["Annotations", "Streams"]
+    assert viewer.stream_list.count() == 2
+    assert [
+        viewer.stream_list.item(index).checkState()
+        for index in range(viewer.stream_list.count())
+    ] == [Qt.CheckState.Checked, Qt.CheckState.Checked]
+    assert all(panel.isVisibleTo(viewer.panel_container) for panel in viewer.panels)
+
+    viewer.stream_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+
+    assert viewer.panels[0].isVisibleTo(viewer.panel_container)
+    assert viewer.panels[1].isHidden()
+    assert viewer.panels[1].visible_channel_names == []
+
+    viewer.stream_list.item(1).setCheckState(Qt.CheckState.Checked)
+
+    assert viewer.panels[1].isVisibleTo(viewer.panel_container)
+    assert viewer.panels[1].visible_channel_names == ["Audio L"]
+
+
+def test_stream_toggle_filters_a_joined_panel_by_source(viewer):
+    """A stream toggle removes only that source's traces from a joined panel."""
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+
+    viewer.stream_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+
+    assert len(viewer.panels) == 1
+    assert viewer.panels[0].isVisibleTo(viewer.panel_container)
+    assert viewer.panels[0].visible_channel_names == ["Audio L"]
+
+
 def test_grid_defaults_to_one_column_and_reflows_in_place(viewer):
     """Column changes rearrange existing stream panels in source order."""
     panels = tuple(viewer.panels)

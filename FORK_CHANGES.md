@@ -239,6 +239,21 @@ PSD calculation and display account for heterogeneous data:
 
 The fork expands XDF loading from one-file stream selection into a batch workflow.
 
+When one XDF contains numeric streams with different rates, the streams remain on
+their native sample grids by default. Stream viewer panels share a time window in
+seconds but read their own timestamps and samples. Resampling is opt-in during import
+and remains available later through **Process > Resample Data** for operations that
+require one conventional MNE `Raw` grid.
+
+Regular timestamps are handled per native stream without changing sample values or
+counts. Streams carrying the version-2 explicit timestamp contract are preserved
+after LSL clock synchronization. Legacy repeated-stamp buffers are interpolated
+between measured buffer endpoints; legacy streams without recoverable boundaries use
+a free-slope sample-clock fit. Nominal metadata never determines reconstructed sample
+spacing. Original timestamps, measured and nominal rates, reconstruction method,
+confidence, segments, and maximum correction remain available as diagnostics.
+Irregular marker times are retained.
+
 ### File discovery and ordering
 
 - **File > Open** accepts multiple selected XDF, XDFZ, or XDF.GZ recordings.

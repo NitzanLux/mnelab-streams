@@ -340,11 +340,27 @@ streams shall be selectable in the same table.
 - Selected marker streams shall be converted to annotations.
 - Marker descriptions may be prefixed with stream IDs when more than one marker stream
   is selected.
-- Selecting multiple numeric streams shall require resampling onto one shared sampling
-  grid. For one numeric stream, resampling is optional.
+- Selecting multiple numeric streams shall preserve each stream's sample count,
+  values, channel metadata, and measured native timing by default. Each viewer panel
+  shall read its source independently while sharing navigation in seconds.
+- Version-2 explicit per-sample timestamps shall remain authoritative after LSL clock
+  synchronization and shall not receive additional de-jittering.
+- Legacy repeated timestamps shall be treated as buffer-endpoint evidence. Samples
+  shall be placed uniformly between consecutive measured endpoints; the nominal rate
+  shall not determine their spacing. Legacy streams without identifiable endpoints
+  shall use an independent free-slope sample-index/time fit.
+- Recovery shall not change sample order, sample values, explicit `NaN` values,
+  channel count, or marker contents. Marker timestamps remain irregular event times.
+  Original timestamps, nominal and measured rates, correction method, confidence,
+  timing segments, and maximum correction shall remain available as diagnostics.
+- Import-time resampling remains an explicit option. A native-rate recording may also
+  be converted later with Process > Resample Data when an operation requires one MNE
+  sampling grid.
 - The suggested target frequency shall be the most common selected nominal frequency,
   weighted by channel count.
-- Optional gap detection is enabled only with resampling; its UI range is 0.1-10 s.
+- Optional gap detection has a UI range of 0.1-10 s. For native-rate viewing it shall
+  use timestamp discontinuities without synthesizing samples; for resampled imports it
+  shall mark the corresponding common-grid interval as missing.
 - If one selected numeric stream contains no samples and another usable stream remains,
   MNELAB shall remove the empty stream, retry the load, and warn with the skipped stream
   IDs. A sole empty numeric stream remains a load error.
@@ -875,8 +891,10 @@ persist. Display-montage paths are viewer-local and are not added to global pref
   interpolation, and re-referencing).
 - Long ICA/ERDS calculations shall expose cancellation; activation calculation shall
   expose a non-modal error and retry path.
-- Unexpected programming or third-party exceptions may still reach the Python
-  traceback; MNELAB does not install a global crash-recovery/session journal.
+- Unexpected programming, third-party, and native Python faults shall be written to
+  `mnelab-crash.log` in the platform-local application data directory. The log shall
+  be reset at startup so it describes only the latest run, and a clean run shall remove
+  it.
 
 ## 16. Performance requirements
 

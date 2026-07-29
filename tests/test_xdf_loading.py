@@ -24,12 +24,14 @@ from mnelab.mainwindow import (
     _name_xdf_marker_annotations,
     _qualify_xdf_duplicate_channels,
     _resolve_xdf_rows,
+    _unified_xdf_stream_rows,
     _unify_xdf_streams,
     _xdf_files_in_folder,
     _xdf_marker_stream_descriptors,
     _xdf_stream_descriptors,
 )
 from mnelab.model import Model
+from mnelab.xdf import NativeXDFRecording
 
 
 def _load_xdf(model, stream_ids=(30, 31), fs_new=256.0, gap_threshold=0.0):
@@ -44,6 +46,23 @@ def _load_xdf(model, stream_ids=(30, 31), fs_new=256.0, gap_threshold=0.0):
         fs_new=fs_new,
         gap_threshold=gap_threshold,
     )
+
+
+def test_load_xdf_uses_native_collection_without_requested_resampling():
+    """Multiple streams use the native-rate loader when resampling is not selected."""
+    model = MagicMock()
+
+    skipped_stream_ids = _load_xdf(model, fs_new=None)
+
+    assert skipped_stream_ids == []
+    model.load_native_xdf.assert_called_once_with(
+        "recording.xdf",
+        stream_ids=[30, 31],
+        marker_ids=[10],
+        prefix_markers=False,
+        gap_threshold=0.0,
+    )
+    model.load.assert_not_called()
 
 
 def test_load_xdf_skips_empty_stream():
@@ -563,9 +582,11 @@ def test_multiple_xdf_configuration_skips_damaged_file():
         skip_unreadable_files=True,
     )
     window = SimpleNamespace(
-        _set_last_dir=MagicMock(),
-        _configure_xdf=MagicMock(
-            side_effect=[damaged, configurations[0], configurations[1]]
+        _configure_xdfs=MagicMock(
+            return_value=(
+                configurations,
+                [("damaged.xdf", damaged)],
+            )
         ),
         _merge_xdfs=MagicMock(),
         _show_xdf_error=MagicMock(),
@@ -584,6 +605,79 @@ def test_multiple_xdf_configuration_skips_damaged_file():
         unreadable_failures=[("damaged.xdf", damaged)],
     )
     window._show_xdf_error.assert_not_called()
+
+
+def test_unified_xdf_rows_match_stream_names_across_changing_ids():
+    """Batch selection uses logical identity rather than file-local stream IDs."""
+    file_rows = [
+        (
+            "one.xdf",
+            [
+                [1, "XtrodesEMG", "EMG", 8, "float32", 500.0],
+                [2, "Camera", "FrameSync", 2, "float32", 15.0],
+            ],
+        ),
+        (
+            "two.xdf",
+            [
+                [7, "XtrodesEMG", "EMG", 8, "float32", 500.0],
+            ],
+        ),
+    ]
+
+    rows, identity_by_id, identities_by_file, presence = (
+        _unified_xdf_stream_rows(file_rows)
+    )
+
+    assert [row[1] for row in rows] == ["XtrodesEMG", "Camera"]
+    assert presence == {1: 2, 2: 1}
+    assert identities_by_file["one.xdf"][1] == identity_by_id[1]
+    assert identities_by_file["two.xdf"][7] == identity_by_id[1]
+
+
+def test_batch_configuration_uses_one_selection_for_all_file_ids():
+    first_rows = [
+        [1, "XtrodesEMG", "EMG", 8, "float32", 500.0],
+        [2, "Camera", "FrameSync", 2, "float32", 15.0],
+    ]
+    second_rows = [
+        [7, "XtrodesEMG", "EMG", 8, "float32", 500.0],
+        [9, "Camera", "FrameSync", 2, "float32", 15.0],
+    ]
+    selection = SimpleNamespace(
+        exec=lambda: True,
+        selected_streams=[1, 2],
+        selected_markers=[],
+        prefix_markers=False,
+        resample=SimpleNamespace(isChecked=lambda: False),
+        fs_new=SimpleNamespace(value=lambda: 500.0),
+        gap_threshold_checkbox=SimpleNamespace(isChecked=lambda: False),
+        gap_threshold=SimpleNamespace(value=lambda: 0.1),
+    )
+    window = SimpleNamespace(_set_last_dir=MagicMock())
+
+    with (
+        patch(
+            "mnelab.mainwindow._resolve_xdf_rows",
+            side_effect=[first_rows, second_rows],
+        ),
+        patch(
+            "mnelab.mainwindow.XDFStreamsDialog",
+            return_value=selection,
+        ) as dialog_class,
+    ):
+        configurations, failures = MainWindow._configure_xdfs(
+            window,
+            ["one.xdf", "two.xdf"],
+            skip_unreadable=True,
+        )
+
+    assert failures == []
+    assert [configuration["stream_ids"] for configuration in configurations] == [
+        [1, 2],
+        [7, 9],
+    ]
+    dialog_class.assert_called_once()
 
 
 def test_merge_skips_file_that_fails_during_full_load(tmp_path):
@@ -623,6 +717,325 @@ def test_merge_skips_file_that_fails_during_full_load(tmp_path):
     ]
     assert window.model.current["data"].n_times == 20
     assert "damaged.xdf" in warning.call_args.args[2]
+
+
+def test_merge_keeps_native_streams_and_samples_on_shared_grid(tmp_path):
+    """Native streams concatenate independently without changing sample values."""
+    paths = [tmp_path / name for name in ("one.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        offset = 0.0 if Path(configuration["fname"]) == paths[0] else 100.0
+        streams = []
+        for stream_id, channel, channel_offset in (
+            (1, "Fz", 0.0),
+            (2, "Cz", 10.0),
+        ):
+            raw = mne.io.RawArray(
+                (offset + channel_offset + np.arange(10, dtype=float))[None],
+                mne.create_info([channel], 100.0, ["eeg"]),
+                verbose=False,
+            )
+            streams.append(
+                {
+                    "id": stream_id,
+                    "name": channel,
+                    "raw": raw,
+                    "timestamps": np.arange(10, dtype=float) / 100.0,
+                    "nominal_srate": 100.0,
+                }
+            )
+        model.load_data(
+            NativeXDFRecording(streams),
+            configuration["fname"],
+        )
+        model.current["source_streams"] = [
+            _stream(1, "Fz", ["Fz"]),
+            _stream(2, "Cz", ["Cz"]),
+        ]
+        model.current["marker_streams"] = []
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+    configurations = [
+        {
+            "fname": str(path),
+            "rows": [],
+            "stream_ids": [1, 2],
+            "fs_new": None,
+        }
+        for path in paths
+    ]
+
+    with patch("mnelab.mainwindow.read_settings", return_value=False):
+        MainWindow._merge_xdfs(window, configurations)
+
+    merged = window.model.current["data"]
+    assert isinstance(merged, NativeXDFRecording)
+    assert merged.ch_names == ["Fz", "Cz"]
+    assert merged.n_times == 20
+    np.testing.assert_array_equal(
+        np.vstack([entry["raw"].get_data() for entry in merged.streams]),
+        np.vstack(
+            (
+                np.r_[np.arange(10), 100 + np.arange(10)],
+                np.r_[10 + np.arange(10), 110 + np.arange(10)],
+            )
+        ),
+    )
+
+
+def test_merge_aligns_shifted_equal_rate_native_streams(tmp_path):
+    """Shifted equal-rate grids merge without interpolating original samples."""
+    paths = [tmp_path / name for name in ("one.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        streams = []
+        for stream_id, channel, shift in (
+            (1, "Fz", 0.0),
+            (2, "Cz", 0.001),
+        ):
+            raw = mne.io.RawArray(
+                np.ones((1, 10)),
+                mne.create_info([channel], 100.0, ["eeg"]),
+                verbose=False,
+            )
+            streams.append(
+                {
+                    "id": stream_id,
+                    "name": channel,
+                    "raw": raw,
+                    "timestamps": np.arange(10, dtype=float) / 100.0 + shift,
+                    "nominal_srate": 100.0,
+                }
+            )
+        model.load_data(NativeXDFRecording(streams), configuration["fname"])
+        model.current["source_streams"] = [
+            _stream(1, "Fz", ["Fz"]),
+            _stream(2, "Cz", ["Cz"]),
+        ]
+        model.current["marker_streams"] = []
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with patch("mnelab.mainwindow.read_settings", return_value=False):
+        MainWindow._merge_xdfs(
+            window,
+            [
+                {
+                    "fname": str(path),
+                    "rows": [],
+                    "stream_ids": [1, 2],
+                    "fs_new": None,
+                }
+                for path in paths
+            ],
+        )
+
+    merged = window.model.current["data"]
+    assert isinstance(merged, NativeXDFRecording)
+    assert [entry["raw"].n_times for entry in merged.streams] == [20, 20]
+
+
+def test_merge_keeps_samples_with_compressed_native_timestamps(tmp_path):
+    """Compressed timestamps do not force amplitude interpolation."""
+    paths = [tmp_path / name for name in ("one.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        streams = []
+        for stream_id, channel in ((1, "Fz"), (2, "Cz")):
+            raw = mne.io.RawArray(
+                np.ones((1, 10)),
+                mne.create_info([channel], 100.0, ["eeg"]),
+                verbose=False,
+            )
+            timestamps = np.arange(10, dtype=float) / 100.0
+            if stream_id == 2:
+                timestamps[1] = 0.004
+            streams.append(
+                {
+                    "id": stream_id,
+                    "name": channel,
+                    "raw": raw,
+                    "timestamps": timestamps,
+                    "nominal_srate": 100.0,
+                }
+            )
+        model.load_data(NativeXDFRecording(streams), configuration["fname"])
+        model.current["source_streams"] = [
+            _stream(1, "Fz", ["Fz"]),
+            _stream(2, "Cz", ["Cz"]),
+        ]
+        model.current["marker_streams"] = []
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with patch("mnelab.mainwindow.read_settings", return_value=False):
+        MainWindow._merge_xdfs(
+            window,
+            [
+                {
+                    "fname": str(path),
+                    "rows": [],
+                    "stream_ids": [1, 2],
+                    "fs_new": None,
+                }
+                for path in paths
+            ],
+        )
+
+    merged = window.model.current["data"]
+    assert [entry["raw"].n_times for entry in merged.streams] == [20, 20]
+
+
+def test_merge_accepts_segmented_native_timestamp_reset(tmp_path):
+    """Known timestamp resets join monotonically within their native stream."""
+    paths = [tmp_path / name for name in ("one.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        streams = []
+        for stream_id, channel in ((1, "Fz"), (2, "Cz")):
+            raw = mne.io.RawArray(
+                np.ones((1, 10)),
+                mne.create_info([channel], 100.0, ["eeg"]),
+                verbose=False,
+            )
+            timestamps = np.arange(10, dtype=float) / 100.0
+            if stream_id == 2:
+                timestamps[2] = 0.005
+            streams.append(
+                {
+                    "id": stream_id,
+                    "name": channel,
+                    "raw": raw,
+                    "timestamps": timestamps,
+                    "nominal_srate": 100.0,
+                    "timestamp_segments": (
+                        ((0, 1), (2, 9)) if stream_id == 2 else ((0, 9),)
+                    ),
+                }
+            )
+        model.load_data(NativeXDFRecording(streams), configuration["fname"])
+        model.current["source_streams"] = [
+            _stream(1, "Fz", ["Fz"]),
+            _stream(2, "Cz", ["Cz"]),
+        ]
+        model.current["marker_streams"] = []
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with patch("mnelab.mainwindow.read_settings", return_value=False):
+        MainWindow._merge_xdfs(
+            window,
+            [
+                {
+                    "fname": str(path),
+                    "rows": [],
+                    "stream_ids": [1, 2],
+                    "fs_new": None,
+                }
+                for path in paths
+            ],
+        )
+
+    merged = window.model.current["data"]
+    assert all(
+        np.all(np.diff(entry["timestamps"]) > 0) for entry in merged.streams
+    )
+
+
+def test_merge_native_channel_union_fills_missing_stream_interval(tmp_path):
+    """A stream absent from one file is represented by NaN at its own rate."""
+    paths = [tmp_path / name for name in ("one.xdf", "two.xdf")]
+    for path in paths:
+        path.write_bytes(b"xdf")
+
+    def load_configuration(configuration, model):
+        emg = mne.io.RawArray(
+            np.ones((1, 100)),
+            mne.create_info(["EMG"], 100.0, ["misc"]),
+            verbose=False,
+        )
+        streams = [
+            {
+                "id": 1,
+                "name": "EMG",
+                "raw": emg,
+                "timestamps": np.arange(100, dtype=float) / 100.0,
+                "nominal_srate": 100.0,
+            }
+        ]
+        descriptors = [_stream(1, "EMG", ["EMG"])]
+        if Path(configuration["fname"]) == paths[0]:
+            camera = mne.io.RawArray(
+                np.ones((1, 10)),
+                mne.create_info(["Frame"], 10.0, ["misc"]),
+                verbose=False,
+            )
+            streams.append(
+                {
+                    "id": 2,
+                    "name": "Camera",
+                    "raw": camera,
+                    "timestamps": np.arange(10, dtype=float) / 10.0,
+                    "nominal_srate": 10.0,
+                }
+            )
+            descriptors.append(_stream(2, "Camera", ["Frame"]))
+        model.load_data(NativeXDFRecording(streams), configuration["fname"])
+        model.current["source_streams"] = descriptors
+        model.current["marker_streams"] = []
+        return []
+
+    window = SimpleNamespace(
+        model=Model(),
+        _load_xdf_configuration=load_configuration,
+    )
+
+    with patch("mnelab.mainwindow.read_settings", return_value=False):
+        MainWindow._merge_xdfs(
+            window,
+            [
+                {
+                    "fname": str(path),
+                    "rows": [],
+                    "stream_ids": [1, 2],
+                    "fs_new": None,
+                }
+                for path in paths
+            ],
+            allow_channel_union=True,
+        )
+
+    merged = window.model.current["data"]
+    camera = next(entry for entry in merged.streams if entry["name"] == "Camera")
+    assert camera["raw"].n_times == 20
+    assert np.isnan(camera["raw"].get_data()[0, 10:]).all()
+    assert [entry["id"] for entry in merged.streams] == [
+        stream["id"] for stream in window.model.current["source_streams"]
+    ]
 
 
 def test_merge_requires_two_readable_files(tmp_path):

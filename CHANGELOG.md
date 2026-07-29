@@ -1,5 +1,7 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Add a last-run-only crash log for source and packaged application failures (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Select filter target streams and channels before configuration, add band-stop
   filtering, and expose EDFbrowser-inspired Butterworth, Chebyshev, Bessel,
   moving-average, order, ripple, resonator Q-factor, bandwidth, and notch-harmonic
@@ -18,6 +20,8 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and
+  recovering legacy buffered timing from measured endpoints instead of nominal rates
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
 - Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 - Keep the annotation timeline aligned with the signal panels when the stream viewer's

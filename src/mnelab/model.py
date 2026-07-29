@@ -24,7 +24,12 @@ from mnextend import (
 from mnextend.io.readers import raw_readers
 
 from mnelab.utils import Montage, count_locations
-from mnelab.xdf import finite_aware_xdf_resampling, write_xdf
+from mnelab.xdf import (
+    NativeXDFRecording,
+    finite_aware_xdf_resampling,
+    read_native_xdf,
+    write_xdf,
+)
 
 
 class LabelsNotFoundError(Exception):
@@ -109,6 +114,8 @@ def _read_raw_data(fname, *args, **kwargs):
 
 def _data_nbytes(data):
     """Return in-memory data size without copying preloaded arrays."""
+    if isinstance(data, NativeXDFRecording):
+        return data.nbytes
     array = getattr(data, "_data", None)
     return array.nbytes if array is not None else data.get_data().nbytes
 
@@ -468,6 +475,29 @@ class Model:
         name, _ = split_name_ext(fname, raw_readers)
         self.load_data(data, fname, name=name)
 
+    def load_native_xdf(
+        self,
+        fname,
+        stream_ids,
+        marker_ids=None,
+        prefix_markers=False,
+        gap_threshold=0.0,
+    ):
+        """Load multiple numeric XDF streams without changing their sample grids."""
+        fname = str(Path(fname).resolve().as_posix())
+        data = read_native_xdf(
+            fname,
+            stream_ids,
+            marker_ids=marker_ids,
+            prefix_markers=prefix_markers,
+            gap_threshold=gap_threshold,
+        )
+        name, _ = split_name_ext(fname, raw_readers)
+        self.history.append(
+            f"data = read_native_xdf({fname!r}, stream_ids={list(stream_ids)!r})"
+        )
+        self.load_data(data, fname, name=name)
+
     @data_changed
     def find_events(
         self,
@@ -764,10 +794,23 @@ class Model:
         ica = self.current["ica"]
 
         fs = data.info["sfreq"]
-        n_samples = len(data.times)
-        samples = f"{n_samples:,}".replace(",", "\u2009")
+        if isinstance(data, NativeXDFRecording):
+            native_counts = [entry["raw"].n_times for entry in data.streams]
+            samples = " + ".join(
+                f"{count:,}".replace(",", "\u2009") for count in native_counts
+            )
+            n_samples = sum(native_counts)
+            seconds = data.duration
+            sampling_frequency = "Native: " + ", ".join(
+                f"{rate:.6g}\u2009Hz"
+                for rate in dict.fromkeys(data.native_sfreqs.values())
+            )
+        else:
+            n_samples = len(data.times)
+            samples = f"{n_samples:,}".replace(",", "\u2009")
+            seconds = n_samples / fs
+            sampling_frequency = f"{fs:.6g}\u2009Hz"
 
-        seconds = n_samples / fs
         minutes, seconds = divmod(seconds, 60)
         hours, minutes = divmod(minutes, 60)
         hours, minutes = int(hours), int(minutes)
@@ -857,7 +900,7 @@ class Model:
             "Channels": f"{nchan} (" + chans + ")",
             "Streams": _format_stream_info(data, self.current["source_streams"]),
             "Samples": samples,
-            "Sampling Frequency": f"{fs:.6g}\u2009Hz",
+            "Sampling Frequency": sampling_frequency,
             "Length": length,
             "Events": events,
             "Annotations": annots,
@@ -1164,7 +1207,10 @@ class Model:
 
     @data_changed
     def resample(self, sfreq):
-        self.current["data"].resample(sfreq)
+        if isinstance(self.current["data"], NativeXDFRecording):
+            self.current["data"] = self.current["data"].materialize(sfreq)
+        else:
+            self.current["data"].resample(sfreq)
         self.current["name"] += f" ({sfreq}\u2009Hz)"
         self.history.append(f"data.resample({sfreq})")
 
@@ -1404,6 +1450,8 @@ class Model:
         dataset = self.data[index]
         if dataset["data"] is None:
             return  # already evicted
+        if isinstance(dataset["data"], NativeXDFRecording):
+            return  # native-rate collections cannot be represented by one FIF cache
         if dataset["_cache_path"] is None:
             suffix = "_raw.fif" if dataset["dtype"] == "raw" else "_epo.fif"
             fd, path = tempfile.mkstemp(suffix=suffix, prefix="mnelab_")

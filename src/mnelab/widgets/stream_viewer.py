@@ -55,6 +55,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QSlider,
     QSpinBox,
+    QTabWidget,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -68,6 +69,7 @@ from mnelab.widgets.viewer_layout import (
     load_viewer_layout,
     save_viewer_layout,
 )
+from mnelab.xdf import NativeXDFRecording
 
 UNIT_FACTORS = {
     "V": 1.0,
@@ -245,6 +247,36 @@ def normalize_streams(raw, streams=None, *, add_unassigned=True):
     return normalized
 
 
+def _native_entry_for_stream(raw, stream):
+    """Resolve merged descriptors to their owning native stream defensively."""
+    requested = set(stream.get("channel_names", []))
+    by_id = raw._by_id.get(stream.get("id"))
+    if by_id is not None and requested.issubset(by_id["raw"].ch_names):
+        return by_id
+
+    name = str(stream.get("name") or "").strip().casefold()
+    name_matches = [
+        entry
+        for entry in raw.streams
+        if str(entry.get("name") or "").strip().casefold() == name
+    ]
+    for entry in name_matches:
+        if requested.issubset(entry["raw"].ch_names):
+            return entry
+
+    channel_matches = [
+        entry
+        for entry in raw.streams
+        if requested.intersection(entry["raw"].ch_names)
+    ]
+    if channel_matches:
+        return max(
+            channel_matches,
+            key=lambda entry: len(requested.intersection(entry["raw"].ch_names)),
+        )
+    return name_matches[0] if name_matches else by_id
+
+
 def activation_matrix(
     raw,
     streams=None,
@@ -269,6 +301,76 @@ def activation_matrix(
         streams,
         add_unassigned=not bool(streams),
     )
+    if isinstance(raw, NativeXDFRecording):
+        n_bins = min(
+            max_bins,
+            max(len(entry["timestamps"]) for entry in raw.streams),
+        )
+        edges = np.linspace(0.0, raw.duration, n_bins + 1)
+        times = (edges[:-1] + edges[1:]) / 2
+        squared_sum = np.zeros((len(streams), n_bins), dtype=float)
+        finite_count = np.zeros((len(streams), n_bins), dtype=np.int64)
+        has_nan = np.zeros((len(streams), n_bins), dtype=bool)
+        missing = np.zeros((len(streams), n_bins), dtype=bool)
+        for stream_index, stream in enumerate(streams):
+            entry = _native_entry_for_stream(raw, stream)
+            if entry is None:
+                missing[stream_index] = True
+                continue
+            timestamps = np.asarray(entry["timestamps"], dtype=float)
+            picks = [
+                entry["raw"].ch_names.index(name)
+                for name in stream["channel_names"]
+                if name in entry["raw"].ch_names
+            ]
+            if not picks:
+                missing[stream_index] = True
+                continue
+            values = entry["raw"]._data[picks]
+            bins = np.clip(
+                np.searchsorted(edges, timestamps, side="right") - 1,
+                0,
+                n_bins - 1,
+            )
+            missing[stream_index, times < timestamps[0]] = True
+            missing[stream_index, times > timestamps[-1]] = True
+            intervals = np.diff(timestamps)
+            if len(intervals):
+                expected_interval = 1 / float(entry["raw"].info["sfreq"])
+                gap_limit = max(0.1, 1.5 * expected_interval)
+                for gap_index in np.flatnonzero(intervals > gap_limit):
+                    missing[
+                        stream_index,
+                        (times > timestamps[gap_index])
+                        & (times < timestamps[gap_index + 1]),
+                    ] = True
+            for bin_index in np.unique(bins):
+                segment = values[:, bins == bin_index]
+                has_nan[stream_index, bin_index] = np.isnan(segment).any()
+                finite = np.isfinite(segment)
+                if finite.any():
+                    squared_sum[stream_index, bin_index] = np.square(
+                        segment[finite]
+                    ).sum()
+                    finite_count[stream_index, bin_index] = int(finite.sum())
+        energy = np.full_like(squared_sum, np.nan)
+        valid = finite_count > 0
+        energy[valid] = np.sqrt(squared_sum[valid] / finite_count[valid])
+        normalized = np.zeros_like(energy)
+        for stream_index, row in enumerate(energy):
+            finite = row[np.isfinite(row)]
+            if not finite.size:
+                continue
+            low, high = np.percentile(finite, (10, 95))
+            if not high > low:
+                high = float(np.max(finite))
+                if not high > low:
+                    continue
+            normalized[stream_index] = np.clip((row - low) / (high - low), 0, 1)
+            normalized[stream_index, ~np.isfinite(normalized[stream_index])] = 0
+        normalized[has_nan | missing] = np.nan
+        return times, normalized
+
     n_bins = min(max_bins, int(raw.n_times))
     if n_bins == 0:
         return np.empty(0), np.empty((len(streams), 0))
@@ -884,6 +986,7 @@ class StreamPanel(QFrame):
         display_scales,
         channel_settings,
         channel_fits,
+        stream_visibility=None,
         annotation_visible=None,
         unit="Auto",
         gain=1.0,
@@ -906,6 +1009,11 @@ class StreamPanel(QFrame):
         self.display_scales = display_scales
         self.channel_settings = channel_settings
         self.channel_fits = channel_fits
+        self.stream_visibility = (
+            stream_visibility
+            if stream_visibility is not None
+            else {source["id"]: True for source in sources}
+        )
         self.annotation_visible = annotation_visible or (
             lambda _index, _description: True
         )
@@ -928,6 +1036,9 @@ class StreamPanel(QFrame):
             name: source_index
             for source_index, source in enumerate(sources)
             for name in source["channel_names"]
+        }
+        self._source_id_by_channel = {
+            name: source["id"] for source in sources for name in source["channel_names"]
         }
         self.unit_family = self._unit_family()
         self._times = np.empty(0)
@@ -1143,7 +1254,10 @@ class StreamPanel(QFrame):
 
     @property
     def page_count(self):
-        return max(1, int(np.ceil(len(self.channel_names) / self.channels_per_page)))
+        return max(
+            1,
+            int(np.ceil(len(self.active_channel_names) / self.channels_per_page)),
+        )
 
     @property
     def page_index(self):
@@ -1155,8 +1269,17 @@ class StreamPanel(QFrame):
         stop = start + self.channels_per_page
         return [
             name
-            for name in self.channel_names[start:stop]
+            for name in self.active_channel_names[start:stop]
             if self.channel_settings[name]["visible"]
+        ]
+
+    @property
+    def active_channel_names(self):
+        """Return channels belonging to source streams enabled in the browser."""
+        return [
+            name
+            for name in self.channel_names
+            if self.stream_visibility.get(self._source_id_by_channel[name], True)
         ]
 
     @property
@@ -1164,7 +1287,7 @@ class StreamPanel(QFrame):
         """Return the stable page, including channels hidden from the plot."""
         start = self._page * self.channels_per_page
         stop = start + self.channels_per_page
-        return self.channel_names[start:stop]
+        return self.active_channel_names[start:stop]
 
     @property
     def settings(self):
@@ -1719,6 +1842,13 @@ class StreamPanel(QFrame):
         if name in self.visible_channel_names and self._values.size:
             row = self.visible_channel_names.index(name)
             values = self._values[row]
+        elif isinstance(self.raw, NativeXDFRecording):
+            _times, values = self.raw.channel_window(
+                name,
+                self._visible_start,
+                self._visible_start + self._visible_duration,
+            )
+            values = values[0]
         else:
             sfreq = float(self.raw.info["sfreq"])
             start = max(0, int(np.floor(self._visible_start * sfreq)))
@@ -3333,6 +3463,7 @@ class StreamViewerWindow(QMainWindow):
             int(raw.first_samp),
         )
         self.source_streams = normalize_streams(raw, streams)
+        self._stream_visibility = {stream["id"]: True for stream in self.source_streams}
         self.marker_streams = list(marker_streams or [])
         self.events = events
         self.annotation_colors = annotation_colors or {}
@@ -3401,6 +3532,27 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_sidebar.annotation_highlighted.connect(
             self._highlight_annotation
         )
+        self.stream_list = QListWidget()
+        self.stream_list.setObjectName("streamVisibilityList")
+        self.stream_list.setAlternatingRowColors(True)
+        self.stream_list.setToolTip(
+            "Check a source stream to display it in the trace viewer"
+        )
+        for index, stream in enumerate(self.source_streams):
+            item = QListWidgetItem(str(stream["name"]))
+            item.setData(Qt.ItemDataRole.UserRole, index)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            item.setCheckState(Qt.CheckState.Checked)
+            item.setToolTip(
+                f"{stream['name']} ({stream.get('type') or 'Data'})\n"
+                f"{len(stream['channel_names'])} channel(s)"
+            )
+            self.stream_list.addItem(item)
+        self.stream_list.itemChanged.connect(self._stream_item_changed)
+        self.sidebar_tabs = QTabWidget()
+        self.sidebar_tabs.setObjectName("streamViewerSidebarTabs")
+        self.sidebar_tabs.addTab(self.annotation_sidebar, "Annotations")
+        self.sidebar_tabs.addTab(self.stream_list, "Streams")
         self.annotation_dock = QDockWidget("Annotations", self)
         self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
         self.annotation_dock.setAllowedAreas(
@@ -3410,7 +3562,7 @@ class StreamViewerWindow(QMainWindow):
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
-        self.annotation_dock.setWidget(self.annotation_sidebar)
+        self.annotation_dock.setWidget(self.sidebar_tabs)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
         self._annotation_dock_sized = False
 
@@ -4048,6 +4200,28 @@ class StreamViewerWindow(QMainWindow):
         for panel in self.panels:
             panel.redraw(self._start_time, self._duration)
 
+    def _stream_item_changed(self, item):
+        """Apply one source-stream toggle without changing channel preferences."""
+        index = item.data(Qt.ItemDataRole.UserRole)
+        if index is None or not 0 <= int(index) < len(self.source_streams):
+            return
+        stream = self.source_streams[int(index)]
+        visible = item.checkState() == Qt.CheckState.Checked
+        if self._stream_visibility.get(stream["id"], True) == visible:
+            return
+        affected_panels = [
+            (panel, len(panel.visible_channel_names))
+            for panel in self.panels
+            if stream["id"] in panel.source_ids
+        ]
+        self._stream_visibility[stream["id"]] = visible
+        for panel, previous_visible_count in affected_panels:
+            panel._page = min(panel._page, panel.page_count - 1)
+            panel._visibility_changed(previous_visible_count)
+            panel._update_page_controls()
+        self._reflow_panels()
+        self.refresh()
+
     def _center_on_annotation(self, onset):
         """Center a selected whole-recording annotation in the shared view."""
         self.set_start_time(float(onset) - self._duration / 2)
@@ -4114,8 +4288,24 @@ class StreamViewerWindow(QMainWindow):
         for panel in self.panels:
             self.panel_layout.removeWidget(panel)
         attached = [
-            panel for panel in self.panels if panel not in self._detached_windows
+            panel
+            for panel in self.panels
+            if panel not in self._detached_windows
+            and any(
+                self._stream_visibility.get(source_id, True)
+                for source_id in panel.source_ids
+            )
         ]
+        for panel in self.panels:
+            if panel not in self._detached_windows and panel not in attached:
+                panel.hide()
+        for panel, window in self._detached_windows.items():
+            window.setVisible(
+                any(
+                    self._stream_visibility.get(source_id, True)
+                    for source_id in panel.source_ids
+                )
+            )
         for index, panel in enumerate(attached):
             row, column = divmod(index, self._columns)
             self.panel_layout.addWidget(
@@ -4164,6 +4354,7 @@ class StreamViewerWindow(QMainWindow):
                 self._display_scales,
                 self._channel_settings,
                 self._channel_fits,
+                stream_visibility=self._stream_visibility,
                 annotation_visible=self.annotation_sidebar.plot_accepts,
                 unit=settings["unit"],
                 gain=settings["gain"],
@@ -4262,7 +4453,9 @@ class StreamViewerWindow(QMainWindow):
 
     def _update_group_buttons(self):
         selected = self._selected_indices()
-        self.join_button.setEnabled(len(selected) >= 2)
+        self.join_button.setEnabled(
+            len(selected) >= 2 and not isinstance(self.raw, NativeXDFRecording)
+        )
         self.split_button.setEnabled(
             any(len(self._groups[index]) > 1 for index in selected)
         )
@@ -4591,6 +4784,25 @@ class StreamViewerWindow(QMainWindow):
         if self._closing:
             return
         self.annotation_stream.refresh(self._start_time, self._duration)
+        panels = self._panels_in_viewport()
+        if isinstance(self.raw, NativeXDFRecording):
+            stop_time = self._start_time + self._duration
+            for panel in panels:
+                if len(panel.sources) != 1:
+                    continue
+                times, values = self.raw.window(
+                    panel.sources[0]["id"],
+                    panel.visible_channel_names,
+                    self._start_time,
+                    stop_time,
+                )
+                panel.refresh(
+                    self._start_time,
+                    self._duration,
+                    times,
+                    values,
+                )
+            return
         sfreq = float(self.raw.info["sfreq"])
         start = max(0, int(np.floor(self._start_time * sfreq)))
         stop = min(
@@ -4599,7 +4811,6 @@ class StreamViewerWindow(QMainWindow):
         )
         if stop <= start:
             stop = min(self.raw.n_times, start + 1)
-        panels = self._panels_in_viewport()
         visible_names = list(
             dict.fromkeys(
                 name for panel in panels for name in panel.visible_channel_names

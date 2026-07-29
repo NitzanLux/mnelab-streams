@@ -81,6 +81,60 @@ uv run ruff check
 uv run ruff format --check
 ```
 
+## Build distributable packages
+
+Generated files are written to `dist/` or `standalone/dist/`. These directories
+contain build outputs and should not be committed to Git; publish installers as
+release assets instead.
+
+### Python wheel and source archive
+
+From the repository root:
+
+```shell
+uv sync --locked --all-groups --all-extras
+uv build
+```
+
+This creates the `.whl` and `.tar.gz` packages in `dist/`.
+
+### Windows executable and installer
+
+Install
+[Inno Setup 6](https://jrsoftware.org/isinfo.php) and ensure `iscc.exe` is on
+`PATH`. Then open PowerShell in the repository root:
+
+```powershell
+uv sync --locked --all-groups --all-extras
+Set-Location standalone
+..\.venv\Scripts\Activate.ps1
+.\create-standalone-windows.ps1
+```
+
+PyInstaller creates the portable application at
+`standalone/dist/MNELAB-Streams/MNELAB-Streams.exe`. Keep the executable with the
+other files in that folder. Inno Setup then creates the versioned installer
+`standalone/MNELAB-Streams-<VERSION>.exe`.
+
+### macOS application and DMG
+
+The macOS packages must be built on macOS. From the repository root:
+
+```shell
+uv sync --locked --all-groups --all-extras
+cd standalone
+uv run python create-standalone-macos.py build-app
+uv run python create-standalone-macos.py build-dmg
+```
+
+This creates `standalone/dist/MNELAB-Streams.app` and
+`standalone/MNELAB-Streams-<VERSION>.dmg`. The DMG is unsigned by default; public
+distribution requires Apple code signing and notarization.
+
+The **Standalone** GitHub Actions workflow can build both platforms without a local
+Windows or macOS build machine. Run it manually from the repository's **Actions**
+page and download the Windows and macOS artifacts after both jobs finish.
+
 ## Getting started
 
 ### Inspect one recording
@@ -119,6 +173,10 @@ uv run ruff format --check
 
 - Display gain, offset, units, color, layout, and DC removal are presentation settings;
   they do not alter the MNE data.
+- Multi-rate XDF streams retain their own sample values and measured native timing.
+  Versioned explicit timestamps are preserved; legacy buffered timestamps are
+  recovered from observed buffer endpoints or a measured sample-clock fit without
+  forcing the nominal rate. Acquisition gaps remain missing.
 - Filtering, bad-channel changes, and other scientific processing do change dataset
   state and are reflected in MNELAB's history where applicable.
 - A display montage is not a sensor montage. It stores viewer presentation only.

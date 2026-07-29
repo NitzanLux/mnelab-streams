@@ -23,6 +23,25 @@ IS_DEV_VERSION = __version__.split(".")[-1].startswith("dev")
 
 
 def main():
+    from mnelab.crash_logging import (
+        finish_crash_logging,
+        record_exception,
+        start_crash_logging,
+    )
+
+    start_crash_logging()
+    try:
+        _run()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException:
+        record_exception(*sys.exc_info())
+        raise
+    finally:
+        finish_crash_logging()
+
+
+def _run():
     mp.freeze_support()
     mp.set_start_method("spawn", force=True)
 

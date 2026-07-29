@@ -98,10 +98,11 @@ class XDFImportDialog(QDialog):
         layout.addWidget(self.split_on_discontinuity)
 
         self.merge_note = QLabel(
-            "Merged files must use the same sampling frequency and type for every "
-            "shared channel. Different channel sets can be aligned with NaN-filled "
-            "intervals. The seam threshold can stop the import or split recordings "
-            "into time-contiguous data sets."
+            "One unified stream-selection window is shown for the readable files. "
+            "Each logical stream retains its native sampling rate. Different stream "
+            "or channel sets can be aligned with NaN-filled intervals. The seam "
+            "threshold can stop the import or split recordings into time-contiguous "
+            "data sets."
         )
         self.merge_note.setWordWrap(True)
         self.merge_note.setEnabled(False)

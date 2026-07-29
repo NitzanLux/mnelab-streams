@@ -9,6 +9,8 @@ import struct
 import tempfile
 import uuid
 from contextlib import contextmanager
+from copy import deepcopy
+from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 from xml.etree.ElementTree import Element, SubElement, tostring
@@ -20,6 +22,8 @@ from mne.io.constants import FIFF
 
 _SAMPLES_PER_CHUNK = 256
 _RESAMPLER_LOCK = RLock()
+_DEJITTER_BATCH_TOLERANCE_SECONDS = 1e-4
+_DEJITTER_GAP_SECONDS = 0.1
 _UNIT_NAMES = {
     FIFF.FIFF_UNIT_NONE: "NA",
     FIFF.FIFF_UNIT_UNITLESS: "NA",
@@ -56,6 +60,1061 @@ _UNIT_NAMES = {
     FIFF.FIFF_UNIT_AM_M3: "A/m^3",
     FIFF.FIFF_UNIT_PX: "pixel",
 }
+
+
+def _xdf_channel_metadata(stream):
+    """Return channel names, MNE types, and physical-unit scale for one stream."""
+    from mne.io import get_channel_type_constants
+
+    count = int(stream["info"]["channel_count"][0])
+    names, types, units = [], [], []
+    supported_types = get_channel_type_constants(True)
+    try:
+        channels = stream["info"]["desc"][0]["channels"][0]["channel"]
+        for channel in channels:
+            names.append(str(channel["label"][0]))
+            channel_type = str(channel["type"][0]).lower() if channel["type"] else ""
+            types.append(channel_type if channel_type in supported_types else "misc")
+            units.append(channel["unit"][0] if channel["unit"] else "NA")
+    except (KeyError, TypeError, IndexError):
+        pass
+    if len(names) != count:
+        stream_name = str(stream["info"]["name"][0])
+        names = [f"{stream_name}_{index}" for index in range(count)]
+    if len(types) != count:
+        types = ["misc"] * count
+    if len(units) != count:
+        units = ["NA"] * count
+    microvolts = {"microvolt", "microvolts", "µV", "μV", "uV"}
+    scale = np.asarray([1e-6 if unit in microvolts else 1.0 for unit in units])
+    return names, types, scale
+
+
+def _unique_xdf_channel_names(entries):
+    """Make channel labels exhaustive and unique without changing stream order."""
+    counts = {}
+    for entry in entries:
+        for name in entry["raw"].ch_names:
+            counts[name] = counts.get(name, 0) + 1
+    used = set()
+    for entry in entries:
+        mapping = {}
+        stream_name = str(entry["name"])
+        for original in entry["raw"].ch_names:
+            candidate = (
+                f"{stream_name} — {original}" if counts[original] > 1 else original
+            )
+            base = candidate
+            suffix = 2
+            while candidate in used:
+                candidate = f"{base} ({suffix})"
+                suffix += 1
+            used.add(candidate)
+            if candidate != original:
+                mapping[original] = candidate
+        if mapping:
+            entry["raw"].rename_channels(mapping)
+
+
+class NativeXDFRecording:
+    """A timestamp-aligned collection of numeric XDF streams at native rates.
+
+    The combined ``info`` object is metadata only. Samples remain in the individual
+    MNE Raw objects and are never placed on a common grid until :meth:`materialize`
+    is explicitly called.
+    """
+
+    def __init__(self, streams, annotations=None, meas_date=None, gap_threshold=0.0):
+        self.streams = list(streams)
+        if not self.streams:
+            raise ValueError(
+                "A native XDF recording needs at least one numeric stream."
+            )
+        _unique_xdf_channel_names(self.streams)
+        self._by_id = {entry["id"]: entry for entry in self.streams}
+        self.ch_names = [
+            name for entry in self.streams for name in entry["raw"].ch_names
+        ]
+        channel_types = [
+            kind for entry in self.streams for kind in entry["raw"].get_channel_types()
+        ]
+        self.native_sfreqs = {
+            entry["id"]: float(entry["raw"].info["sfreq"]) for entry in self.streams
+        }
+        self.timeline_sfreq = max(self.native_sfreqs.values())
+        self.info = mne.create_info(self.ch_names, self.timeline_sfreq, channel_types)
+        if meas_date is not None:
+            self.info.set_meas_date(meas_date)
+        self.info["bads"] = [
+            name for entry in self.streams for name in entry["raw"].info["bads"]
+        ]
+        self.annotations = (
+            annotations.copy()
+            if annotations is not None
+            else mne.Annotations([], [], [])
+        )
+        self.meas_date = meas_date
+        self.gap_threshold = float(gap_threshold)
+        self.first_samp = 0
+        self.duration = max(float(entry["timestamps"][-1]) for entry in self.streams)
+        self.n_times = max(1, int(np.ceil(self.duration * self.timeline_sfreq)) + 1)
+        self._cals = np.ones(len(self.ch_names))
+
+    @property
+    def times(self):
+        return np.arange(self.n_times, dtype=float) / self.timeline_sfreq
+
+    @property
+    def first_time(self):
+        """Time of the first sample, matching the MNE Raw property."""
+        return self.first_samp / self.timeline_sfreq
+
+    @property
+    def nbytes(self):
+        return sum(entry["raw"]._data.nbytes for entry in self.streams)
+
+    def __deepcopy__(self, memo):
+        copied = type(self)(
+            deepcopy(self.streams, memo),
+            annotations=self.annotations,
+            meas_date=self.meas_date,
+            gap_threshold=self.gap_threshold,
+        )
+        copied.info["bads"] = list(self.info["bads"])
+        return copied
+
+    def get_channel_types(self, picks=None, unique=False, only_data_chs=False):
+        types = [
+            mne.channel_type(self.info, index) for index in range(self.info["nchan"])
+        ]
+        if picks is not None:
+            indices = [
+                self.ch_names.index(pick) if isinstance(pick, str) else int(pick)
+                for pick in picks
+            ]
+            types = [types[index] for index in indices]
+        if unique:
+            types = list(dict.fromkeys(types))
+        return types
+
+    def get_montage(self):
+        return None
+
+    def set_annotations(self, annotations):
+        self.annotations = annotations.copy()
+        return self
+
+    def rename_channels(self, mapping):
+        """Rename channels in both the combined metadata and source streams."""
+        for entry in self.streams:
+            local = {
+                source: target
+                for source, target in mapping.items()
+                if source in entry["raw"].ch_names
+            }
+            if local:
+                entry["raw"].rename_channels(local)
+        mne.rename_channels(self.info, mapping)
+        self.ch_names = list(self.info["ch_names"])
+        return self
+
+    def set_channel_types(
+        self,
+        mapping,
+        *,
+        on_unit_change="warn",
+        verbose=None,
+    ):
+        """Set channel types with the same keyword contract as MNE Raw."""
+        for entry in self.streams:
+            local = {
+                name: kind
+                for name, kind in mapping.items()
+                if name in entry["raw"].ch_names
+            }
+            if local:
+                entry["raw"].set_channel_types(
+                    local,
+                    on_unit_change=on_unit_change,
+                    verbose=verbose,
+                )
+        types = [
+            kind for entry in self.streams for kind in entry["raw"].get_channel_types()
+        ]
+        for index, kind in enumerate(types):
+            self.info["chs"][index]["kind"] = mne.create_info(["x"], 1.0, [kind])[
+                "chs"
+            ][0]["kind"]
+        return self
+
+    def stream_for_channel(self, name):
+        for entry in self.streams:
+            if name in entry["raw"].ch_names:
+                return entry
+        raise KeyError(name)
+
+    def window(self, stream_id, channel_names, start, stop):
+        """Return exact source timestamps and samples within a time interval."""
+        requested = set(channel_names)
+        entry = self._by_id.get(stream_id)
+        if entry is None or not requested.issubset(entry["raw"].ch_names):
+            complete = [
+                candidate
+                for candidate in self.streams
+                if requested.issubset(candidate["raw"].ch_names)
+            ]
+            if complete:
+                entry = complete[0]
+            else:
+                overlapping = [
+                    candidate
+                    for candidate in self.streams
+                    if requested.intersection(candidate["raw"].ch_names)
+                ]
+                if overlapping:
+                    entry = max(
+                        overlapping,
+                        key=lambda candidate: len(
+                            requested.intersection(candidate["raw"].ch_names)
+                        ),
+                    )
+        if entry is None:
+            return np.empty(0), np.empty((len(channel_names), 0))
+
+        timestamps = entry["timestamps"]
+        left = int(np.searchsorted(timestamps, start, side="left"))
+        right = int(np.searchsorted(timestamps, stop, side="right"))
+        times = timestamps[left:right]
+        values = np.full((len(channel_names), len(times)), np.nan)
+        for row, name in enumerate(channel_names):
+            if name in entry["raw"].ch_names:
+                pick = entry["raw"].ch_names.index(name)
+                values[row] = entry["raw"]._data[pick, left:right]
+        if self.gap_threshold > 0 and len(times) > 1:
+            gaps = np.flatnonzero(np.diff(times) > self.gap_threshold)
+            if len(gaps):
+                times = np.insert(times, gaps + 1, times[gaps] + np.finfo(float).eps)
+                values = np.insert(values, gaps + 1, np.nan, axis=1)
+        return times, values
+
+    def channel_window(self, name, start, stop):
+        entry = self.stream_for_channel(name)
+        return self.window(entry["id"], [name], start, stop)
+
+    def to_raw_if_compatible_grid(self, *, atol=1e-9):
+        """Flatten equal-rate streams without interpolating sample values.
+
+        Identical timestamp grids are stacked directly. Otherwise, streams with
+        one common nominal rate are de-jittered onto that grid while preserving
+        sample order and real timestamp gaps; missing bins remain ``NaN``. ``None``
+        is returned for non-monotonic timestamps or incompatible nominal rates.
+        """
+        reference_times = np.asarray(self.streams[0]["timestamps"], dtype=float)
+        shared_grid = all(
+            np.asarray(entry["timestamps"]).shape == reference_times.shape
+            and np.allclose(
+                entry["timestamps"],
+                reference_times,
+                rtol=0.0,
+                atol=atol,
+            )
+            for entry in self.streams[1:]
+        )
+        nominal_rates = [
+            float(entry.get("nominal_srate", np.nan)) for entry in self.streams
+        ]
+        measured_rates = [
+            float(entry["raw"].info["sfreq"]) for entry in self.streams
+        ]
+        valid_nominal_rates = all(
+            np.isfinite(rate) and rate > 0 for rate in nominal_rates
+        )
+        common_nominal_rate = valid_nominal_rates and np.allclose(
+            nominal_rates,
+            np.median(nominal_rates),
+            rtol=1e-3,
+            atol=1e-9,
+        )
+        valid_measured_rates = all(
+            np.isfinite(rate) and rate > 0 for rate in measured_rates
+        )
+        common_measured_rate = valid_measured_rates and np.allclose(
+            measured_rates,
+            np.median(measured_rates),
+            rtol=1e-2,
+            atol=1e-9,
+        )
+        if common_nominal_rate:
+            median_rate = float(np.median(nominal_rates))
+        elif common_measured_rate:
+            median_rate = float(np.median(measured_rates))
+        else:
+            median_rate = None
+        if median_rate is not None:
+            nearest_integer = round(median_rate)
+            sfreq = (
+                float(nearest_integer)
+                if np.isclose(median_rate, nearest_integer, rtol=1e-2, atol=1e-9)
+                else median_rate
+            )
+        elif shared_grid:
+            sfreq = float(self.streams[0]["raw"].info["sfreq"])
+        else:
+            return None
+
+        if shared_grid:
+            data = np.vstack([entry["raw"].get_data() for entry in self.streams])
+        else:
+            sample_indices = []
+            for entry in self.streams:
+                timestamps = np.asarray(entry["timestamps"], dtype=float)
+                if (
+                    len(timestamps) != entry["raw"].n_times
+                    or not np.isfinite(timestamps).all()
+                ):
+                    return None
+                intervals = np.diff(timestamps)
+                segment_boundaries = {
+                    int(stop)
+                    for _start, stop in entry.get("timestamp_segments", ())[:-1]
+                }
+                invalid = np.flatnonzero(intervals <= 0)
+                if any(int(index) not in segment_boundaries for index in invalid):
+                    return None
+                start = max(0, int(np.rint(timestamps[0] * sfreq)))
+                steps = np.maximum(
+                    1,
+                    np.rint(np.maximum(intervals, 0.0) * sfreq).astype(np.int64),
+                )
+                if segment_boundaries:
+                    steps[list(segment_boundaries)] = 1
+                indices = start + np.r_[0, np.cumsum(steps)]
+                sample_indices.append(indices)
+
+            n_times = max((indices[-1] + 1 for indices in sample_indices), default=0)
+            if n_times == 0:
+                return None
+            data = np.full((len(self.ch_names), n_times), np.nan)
+            row = 0
+            for entry, indices in zip(self.streams, sample_indices, strict=True):
+                values = entry["raw"].get_data()
+                next_row = row + len(values)
+                data[row:next_row, indices] = values
+                row = next_row
+
+        channel_types = [
+            kind for entry in self.streams for kind in entry["raw"].get_channel_types()
+        ]
+        raw = mne.io.RawArray(
+            data,
+            mne.create_info(self.ch_names, sfreq, channel_types),
+            verbose=False,
+        )
+        raw.info["bads"] = list(self.info["bads"])
+        if self.meas_date is not None:
+            raw.set_meas_date(self.meas_date)
+        raw.set_annotations(self.annotations)
+        return raw
+
+    def materialize(self, sfreq):
+        """Create one synchronized MNE Raw object at the requested sampling rate."""
+        from scipy.interpolate import interp1d
+
+        sfreq = float(sfreq)
+        if not np.isfinite(sfreq) or sfreq <= 0:
+            raise ValueError("The target sampling rate must be positive.")
+        sample_count = max(1, int(np.ceil(self.duration * sfreq)) + 1)
+        grid = np.arange(sample_count, dtype=float) / sfreq
+        data = np.full((len(self.ch_names), sample_count), np.nan)
+        row = 0
+        for entry in self.streams:
+            timestamps = np.asarray(entry["timestamps"], dtype=float)
+            source_values = np.asarray(entry["raw"]._data, dtype=float).T
+            values, validity = _fill_nonfinite_samples(source_values, timestamps)
+            source_rate = float(entry["raw"].info["sfreq"])
+            sos = (
+                scipy.signal.butter(
+                    8, 0.95 * sfreq / 2, btype="low", fs=source_rate, output="sos"
+                )
+                if sfreq < source_rate
+                else None
+            )
+            intervals = np.diff(timestamps)
+            expected_interval = 1 / source_rate
+            gap_limit = (
+                self.gap_threshold
+                if self.gap_threshold > 0
+                else max(0.1, 1.5 * expected_interval)
+            )
+            gap_indices = np.flatnonzero(intervals > gap_limit)
+            segment_starts = np.r_[0, gap_indices + 1]
+            segment_stops = np.r_[gap_indices + 1, len(timestamps)]
+            converted = np.full((sample_count, values.shape[1]), np.nan)
+            for start, stop in zip(segment_starts, segment_stops, strict=True):
+                segment_times = timestamps[start:stop]
+                segment_values = values[start:stop]
+                segment_validity = validity[start:stop]
+                if sos is not None and len(segment_values) > 27:
+                    segment_values = scipy.signal.sosfiltfilt(
+                        sos,
+                        segment_values,
+                        axis=0,
+                    )
+                target = (grid >= segment_times[0]) & (grid <= segment_times[-1])
+                if not target.any():
+                    continue
+                if len(segment_times) == 1:
+                    nearest_grid = int(np.argmin(np.abs(grid - segment_times[0])))
+                    converted[nearest_grid] = segment_values[0]
+                    converted[nearest_grid, ~segment_validity[0]] = np.nan
+                    continue
+                segment_converted = interp1d(
+                    segment_times,
+                    segment_values,
+                    axis=0,
+                    kind="linear",
+                    bounds_error=False,
+                    fill_value=np.nan,
+                )(grid[target])
+                nearest = _nearest_sample_indices(segment_times, grid[target])
+                segment_converted[~segment_validity[nearest]] = np.nan
+                converted[target] = segment_converted
+            count = converted.shape[1]
+            data[row : row + count] = converted.T
+            row += count
+        types = [
+            kind for entry in self.streams for kind in entry["raw"].get_channel_types()
+        ]
+        raw = mne.io.RawArray(
+            data,
+            mne.create_info(self.ch_names, sfreq, types),
+            verbose=False,
+        )
+        raw.info["bads"] = list(self.info["bads"])
+        if self.meas_date is not None:
+            raw.set_meas_date(self.meas_date)
+        raw.set_annotations(self.annotations)
+        return raw
+
+
+def concatenate_native_xdf_recordings(recordings, *, allow_channel_union=False):
+    """Concatenate native streams, optionally filling unavailable data with NaN."""
+    recordings = list(recordings)
+    if not recordings:
+        raise ValueError("At least one native XDF recording is required.")
+    if not all(isinstance(recording, NativeXDFRecording) for recording in recordings):
+        raise TypeError("All recordings must be NativeXDFRecording instances.")
+
+    def by_name(recording):
+        result = {}
+        for entry in recording.streams:
+            key = str(entry["name"]).strip().casefold()
+            if key in result:
+                raise ValueError(
+                    f'Native XDF stream name "{entry["name"]}" is not unique.'
+                )
+            result[key] = entry
+        return result
+
+    stream_maps = [by_name(recording) for recording in recordings]
+    stream_keys = list(
+        dict.fromkeys(key for stream_map in stream_maps for key in stream_map)
+    )
+    if not allow_channel_union:
+        reference_set = set(stream_maps[0])
+        for stream_map in stream_maps[1:]:
+            if set(stream_map) != reference_set:
+                missing = sorted(reference_set - set(stream_map))
+                additional = sorted(set(stream_map) - reference_set)
+                differences = []
+                if missing:
+                    differences.append("missing: " + ", ".join(missing))
+                if additional:
+                    differences.append("additional: " + ", ".join(additional))
+                raise ValueError(
+                    "Native XDF stream names differ between files ("
+                    + "; ".join(differences)
+                    + ")."
+                )
+
+    def normalized_times(entry, sfreq):
+        times = np.asarray(entry["timestamps"], dtype=float)
+        if not len(times):
+            return times
+        intervals = np.diff(times)
+        boundaries = {
+            int(stop)
+            for _start, stop in entry.get("timestamp_segments", ())[:-1]
+        }
+        invalid = np.flatnonzero(intervals <= 0)
+        if any(int(index) not in boundaries for index in invalid):
+            raise ValueError(
+                f'Unsegmented non-monotonic timestamps in "{entry["name"]}".'
+            )
+        steps = np.maximum(
+            1,
+            np.rint(np.maximum(intervals, 0.0) * sfreq).astype(np.int64),
+        )
+        if boundaries:
+            steps[list(boundaries)] = 1
+        start = max(0, int(np.rint(times[0] * sfreq)))
+        return (start + np.r_[0, np.cumsum(steps)]) / sfreq
+
+    offsets = []
+    cursor = 0.0
+    for recording in recordings:
+        offsets.append(cursor)
+        positive_rates = [
+            float(entry.get("nominal_srate", 0))
+            for entry in recording.streams
+            if float(entry.get("nominal_srate", 0)) > 0
+        ]
+        seam_step = 1.0 / max(positive_rates or [recording.timeline_sfreq])
+        normalized_duration = max(
+            (
+                normalized_times(
+                    entry,
+                    float(entry.get("nominal_srate", 0))
+                    or float(entry["raw"].info["sfreq"]),
+                )[-1]
+                for entry in recording.streams
+            ),
+            default=recording.duration,
+        )
+        cursor += max(recording.duration, normalized_duration) + seam_step
+
+    merged_entries = []
+    for key in stream_keys:
+        entries = [stream_map.get(key) for stream_map in stream_maps]
+        present_entries = [entry for entry in entries if entry is not None]
+        reference = present_entries[0]
+        channel_types = {}
+        channel_names = []
+        for entry in present_entries:
+            for name, kind in zip(
+                entry["raw"].ch_names,
+                entry["raw"].get_channel_types(),
+                strict=True,
+            ):
+                previous = channel_types.get(name)
+                if previous is not None and previous != kind:
+                    raise ValueError(
+                        f'Channel type differs for "{name}" in native stream '
+                        f'"{reference["name"]}".'
+                    )
+                if previous is None:
+                    channel_names.append(name)
+                    channel_types[name] = kind
+        if not allow_channel_union:
+            for entry in present_entries[1:]:
+                if entry["raw"].ch_names != channel_names:
+                    raise ValueError(
+                        f'Channels differ for native stream "{reference["name"]}".'
+                    )
+        nominal_rates = [
+            float(entry.get("nominal_srate", 0)) for entry in present_entries
+        ]
+        positive_nominal = [rate for rate in nominal_rates if rate > 0]
+        if positive_nominal and not np.allclose(
+            positive_nominal,
+            np.median(positive_nominal),
+            rtol=1e-3,
+            atol=1e-9,
+        ):
+            raise ValueError(
+                f'Nominal rates differ for native stream "{reference["name"]}".'
+            )
+        sfreq = (
+            float(np.median(positive_nominal))
+            if positive_nominal
+            else float(reference["raw"].info["sfreq"])
+        )
+        value_blocks = []
+        timestamp_blocks = []
+        source_timestamp_blocks = []
+        segments = []
+        sample_offset = 0
+        for recording, entry, offset in zip(
+            recordings, entries, offsets, strict=True
+        ):
+            if entry is None:
+                sample_count = max(
+                    1,
+                    int(np.floor(recording.duration * sfreq)) + 1,
+                )
+                block = np.full((len(channel_names), sample_count), np.nan)
+                local_times = np.arange(sample_count, dtype=float) / sfreq
+                local_source_times = local_times
+                local_segments = ((0, sample_count - 1),)
+            else:
+                sample_count = entry["raw"].n_times
+                block = np.full((len(channel_names), sample_count), np.nan)
+                rows = [channel_names.index(name) for name in entry["raw"].ch_names]
+                block[rows] = entry["raw"].get_data()
+                local_times = normalized_times(entry, sfreq)
+                local_source_times = np.asarray(
+                    entry.get("source_timestamps", entry["timestamps"]),
+                    dtype=float,
+                )
+                local_segments = entry.get("timestamp_segments") or (
+                    (0, sample_count - 1),
+                )
+            value_blocks.append(block)
+            timestamp_blocks.append(local_times + offset)
+            source_timestamp_blocks.append(local_source_times + offset)
+            segments.extend(
+                (start + sample_offset, stop + sample_offset)
+                for start, stop in local_segments
+            )
+            sample_offset += sample_count
+
+        values = np.concatenate(value_blocks, axis=1)
+        raw = mne.io.RawArray(
+            values,
+            mne.create_info(
+                channel_names,
+                sfreq,
+                [channel_types[name] for name in channel_names],
+            ),
+            verbose=False,
+        )
+        raw.info["bads"] = sorted(
+            {
+                bad
+                for entry in present_entries
+                for bad in entry["raw"].info.get("bads", [])
+            }
+        )
+        timestamps = np.concatenate(timestamp_blocks)
+        source_timestamps = np.concatenate(source_timestamp_blocks)
+
+        merged_entry = deepcopy(reference)
+        merged_entry.update(
+            id=f"merged:{len(merged_entries) + 1}",
+            raw=raw,
+            timestamps=timestamps,
+            source_timestamps=source_timestamps,
+            timestamp_segments=tuple(segments),
+            nominal_srate=sfreq,
+        )
+        merged_entries.append(merged_entry)
+
+    annotation_onsets = []
+    annotation_durations = []
+    annotation_descriptions = []
+    for recording, offset in zip(recordings, offsets, strict=True):
+        annotation_onsets.extend(recording.annotations.onset + offset)
+        annotation_durations.extend(recording.annotations.duration)
+        annotation_descriptions.extend(recording.annotations.description)
+    for offset in offsets[1:]:
+        annotation_onsets.extend((offset, offset))
+        annotation_durations.extend((0.0, 0.0))
+        annotation_descriptions.extend(("BAD boundary", "EDGE boundary"))
+    annotations = mne.Annotations(
+        annotation_onsets,
+        annotation_durations,
+        annotation_descriptions,
+        orig_time=recordings[0].meas_date,
+    )
+    return NativeXDFRecording(
+        merged_entries,
+        annotations=annotations,
+        meas_date=recordings[0].meas_date,
+        gap_threshold=max(recording.gap_threshold for recording in recordings),
+    )
+
+
+def _xdf_synchronization_metadata(stream):
+    """Return scalar synchronization metadata from an XDF stream description."""
+    try:
+        synchronization = stream["info"]["desc"][0]["synchronization"][0]
+    except (KeyError, TypeError, IndexError):
+        return {}
+    metadata = {}
+    for key, value in synchronization.items():
+        if isinstance(value, list) and value:
+            metadata[key] = str(value[0])
+        elif value is not None:
+            metadata[key] = str(value)
+    return metadata
+
+
+def _uses_explicit_buffer_timestamps(metadata):
+    return (
+        metadata.get("timestamp_model_version") == "2"
+        and metadata.get("timestamp_semantics") == "explicit_per_sample"
+        and metadata.get("timestamp_interpolation")
+        == "uniform_between_buffer_endpoints"
+    )
+
+
+def read_native_xdf(
+    fname, stream_ids, marker_ids=None, prefix_markers=False, gap_threshold=0.0
+):
+    """Read clock-synchronized XDF streams without creating a shared sample grid."""
+    from pyxdf import load_xdf
+
+    # Clock synchronization maps every outlet onto the recorder clock. Timestamp
+    # de-jittering remains disabled because version-2 outlets already provide
+    # authoritative per-sample times and legacy recovery below is auditable.
+    loaded, header = load_xdf(
+        fname,
+        synchronize_clocks=True,
+        dejitter_timestamps=False,
+    )
+    by_id = {stream["info"]["stream_id"]: stream for stream in loaded}
+    selected = []
+    starts = []
+    corrected_timestamps = {}
+    for stream_id in stream_ids:
+        stream = by_id[stream_id]
+        timestamps = np.asarray(stream["time_stamps"], dtype=float)
+        if not len(timestamps):
+            raise ValueError(f"Stream {stream_id} contains no samples.")
+        source_effective = float(
+            np.asarray(stream["info"]["effective_srate"]).item()
+        )
+        metadata = _xdf_synchronization_metadata(stream)
+        (
+            corrected,
+            segments,
+            measured_srate,
+            buffered_runs,
+            buffered_samples,
+            timestamp_method,
+            timestamp_confidence,
+        ) = _recover_native_timestamps(
+            timestamps,
+            explicit=_uses_explicit_buffer_timestamps(metadata),
+        )
+        corrected_timestamps[stream_id] = (
+            corrected,
+            segments,
+            source_effective,
+            measured_srate,
+            buffered_runs,
+            buffered_samples,
+            timestamp_method,
+            timestamp_confidence,
+            metadata,
+        )
+        starts.append(float(corrected[0]))
+    first_time = min(starts)
+    for stream_id in stream_ids:
+        stream = by_id[stream_id]
+        source_timestamps = np.asarray(stream["time_stamps"], dtype=float)
+        (
+            timestamps,
+            segments,
+            source_effective,
+            measured_srate,
+            buffered_runs,
+            buffered_samples,
+            timestamp_method,
+            timestamp_confidence,
+            metadata,
+        ) = corrected_timestamps[stream_id]
+        names, types, scale = _xdf_channel_metadata(stream)
+        nominal = float(stream["info"]["nominal_srate"][0])
+        sampling_rate = measured_srate
+        if not np.isfinite(sampling_rate) or sampling_rate <= 0:
+            sampling_rate = nominal
+        if not np.isfinite(sampling_rate) or sampling_rate <= 0:
+            raise ValueError(
+                f"Stream {stream_id} does not have a measurable sampling rate."
+            )
+        values = np.asarray(stream["time_series"], dtype=float) * scale
+        raw = mne.io.RawArray(
+            values.T,
+            mne.create_info(names, sampling_rate, types),
+            verbose=False,
+        )
+        selected.append(
+            {
+                "id": stream_id,
+                "name": str(stream["info"]["name"][0]),
+                "raw": raw,
+                "timestamps": timestamps - first_time,
+                "source_timestamps": source_timestamps - first_time,
+                "nominal_srate": nominal,
+                "effective_srate": measured_srate,
+                "source_effective_srate": source_effective,
+                "dejittered_srate": measured_srate,
+                "timestamp_segments": segments,
+                "buffered_timestamp_runs": buffered_runs,
+                "buffered_samples_reconstructed": buffered_samples,
+                "dejitter_method": timestamp_method,
+                "timestamp_method": timestamp_method,
+                "timestamp_confidence": timestamp_confidence,
+                "timestamp_model_version": metadata.get(
+                    "timestamp_model_version",
+                    "legacy",
+                ),
+                "nominal_srate_role": metadata.get(
+                    "nominal_srate_role",
+                    "descriptive",
+                ),
+                "max_timestamp_correction": float(
+                    np.max(np.abs(timestamps - source_timestamps))
+                ),
+            }
+        )
+
+    onsets, descriptions = [], []
+    for stream_id, stream in by_id.items():
+        channel_format = str(stream["info"]["channel_format"][0])
+        if channel_format != "string":
+            continue
+        nominal = float(stream["info"]["nominal_srate"][0])
+        if nominal == 0 and marker_ids is not None and stream_id not in marker_ids:
+            continue
+        prefix = f"{stream_id}-" if prefix_markers else ""
+        for timestamp, row in zip(stream["time_stamps"], stream["time_series"]):
+            for item in row:
+                if item:
+                    onsets.append(float(timestamp) - first_time)
+                    descriptions.append(f"{prefix}{item}")
+    meas_date = None
+    recording_datetime = header["info"].get("datetime", [None])[0]
+    if recording_datetime:
+        try:
+            meas_date = datetime.fromisoformat(recording_datetime)
+        except ValueError:
+            recording_datetime = recording_datetime[:-2] + ":" + recording_datetime[-2:]
+            meas_date = datetime.fromisoformat(recording_datetime)
+        meas_date = meas_date.astimezone(UTC)
+    annotations = mne.Annotations(
+        onsets,
+        np.zeros(len(onsets)),
+        descriptions,
+        orig_time=meas_date,
+    )
+    return NativeXDFRecording(
+        selected,
+        annotations=annotations,
+        meas_date=meas_date,
+        gap_threshold=gap_threshold,
+    )
+
+
+def _segment_bounds(length, break_indices):
+    starts = np.r_[0, np.asarray(break_indices, dtype=int) + 1]
+    stops = np.r_[np.asarray(break_indices, dtype=int), length - 1]
+    return tuple(
+        (int(start), int(stop))
+        for start, stop in zip(starts, stops, strict=True)
+        if stop >= start
+    )
+
+
+def _measured_srate(timestamps, segments):
+    sample_intervals = 0
+    duration = 0.0
+    for start, stop in segments:
+        if stop <= start:
+            continue
+        segment_duration = float(timestamps[stop] - timestamps[start])
+        if segment_duration <= 0:
+            continue
+        sample_intervals += stop - start
+        duration += segment_duration
+    return float(sample_intervals / duration) if duration > 0 else 0.0
+
+
+def _timestamp_gap_breaks(timestamps):
+    intervals = np.diff(timestamps)
+    positive = intervals[intervals > 0]
+    if not len(positive):
+        return np.arange(len(intervals), dtype=int)
+    typical = float(np.median(positive))
+    gap_limit = max(_DEJITTER_GAP_SECONDS, 5.0 * typical)
+    return np.flatnonzero((intervals <= 0) | (intervals > gap_limit))
+
+
+def _recover_buffered_timestamps(timestamps):
+    """Interpolate legacy repeated-stamp buffers from their measured endpoints."""
+    same_buffer = (
+        np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
+    )
+    group_starts = np.r_[0, np.flatnonzero(~same_buffer) + 1]
+    group_stops = np.r_[np.flatnonzero(~same_buffer), len(timestamps) - 1]
+    counts = group_stops - group_starts + 1
+    endpoints = timestamps[group_stops]
+    endpoint_intervals = np.diff(endpoints)
+    interval_counts = counts[1:]
+    observed_periods = np.divide(
+        endpoint_intervals,
+        interval_counts,
+        out=np.full_like(endpoint_intervals, np.nan, dtype=float),
+        where=interval_counts > 0,
+    )
+    usable_periods = observed_periods[
+        np.isfinite(observed_periods) & (observed_periods > 0)
+    ]
+    if not len(usable_periods):
+        raise ValueError(
+            "Buffered timestamps contain no advancing endpoint pair from which "
+            "sample timing can be measured."
+        )
+    typical_period = float(np.median(usable_periods))
+    deviations = endpoint_intervals - interval_counts * typical_period
+    group_breaks = (endpoint_intervals <= 0) | (
+        deviations > _DEJITTER_GAP_SECONDS
+    )
+    # A delayed transport buffer is followed by shorter intervals that repay its
+    # lateness. Only a sustained offset becomes an acquisition segment boundary.
+    for index in np.flatnonzero(group_breaks & (endpoint_intervals > 0)):
+        following = deviations[index + 1 : index + 4]
+        repaid = -float(np.sum(following[following < 0]))
+        if repaid >= 0.5 * float(deviations[index]):
+            group_breaks[index] = False
+
+    corrected = np.empty_like(timestamps)
+    segment_group_starts = np.r_[0, np.flatnonzero(group_breaks) + 1]
+    segment_group_stops = np.r_[
+        np.flatnonzero(group_breaks),
+        len(group_starts) - 1,
+    ]
+    segments = []
+    for group_start, group_stop in zip(
+        segment_group_starts,
+        segment_group_stops,
+        strict=True,
+    ):
+        local_periods = observed_periods[group_start:group_stop]
+        local_periods = local_periods[
+            np.isfinite(local_periods) & (local_periods > 0)
+        ]
+        period = (
+            float(np.median(local_periods))
+            if len(local_periods)
+            else typical_period
+        )
+        first_start = int(group_starts[group_start])
+        first_stop = int(group_stops[group_start])
+        first_count = int(counts[group_start])
+        corrected[first_start : first_stop + 1] = (
+            endpoints[group_start]
+            - period * np.arange(first_count - 1, -1, -1, dtype=float)
+        )
+        previous_endpoint = float(endpoints[group_start])
+        for group_index in range(group_start + 1, group_stop + 1):
+            start = int(group_starts[group_index])
+            stop = int(group_stops[group_index])
+            count = int(counts[group_index])
+            endpoint = float(endpoints[group_index])
+            corrected[start : stop + 1] = previous_endpoint + (
+                endpoint - previous_endpoint
+            ) * np.arange(1, count + 1, dtype=float) / count
+            previous_endpoint = endpoint
+        segments.append((first_start, int(group_stops[group_stop])))
+
+    buffered_runs = int(np.count_nonzero(counts > 1))
+    buffered_samples = int(np.sum(counts[counts > 1] - 1))
+    return (
+        corrected,
+        tuple(segments),
+        _measured_srate(corrected, segments),
+        buffered_runs,
+        buffered_samples,
+        "legacy buffer-endpoint interpolation",
+        "medium",
+    )
+
+
+def _recover_linear_timestamps(timestamps):
+    """Apply a robust measured-clock fit when legacy buffer boundaries are lost."""
+    intervals = np.diff(timestamps)
+    positive = intervals[intervals > _DEJITTER_BATCH_TOLERANCE_SECONDS]
+    if not len(positive):
+        raise ValueError("Legacy timestamps contain no measurable positive interval.")
+    observed_period = float(np.median(positive))
+    clear_gap_limit = max(1.0, 10.0 * observed_period)
+    breaks = np.flatnonzero(
+        (intervals < -_DEJITTER_BATCH_TOLERANCE_SECONDS)
+        | (intervals > clear_gap_limit)
+    )
+    segments = _segment_bounds(len(timestamps), breaks)
+    fitted = []
+    for start, stop in segments:
+        if stop <= start:
+            continue
+        indices = np.arange(stop - start + 1, dtype=float)
+        design = np.column_stack((np.ones_like(indices), indices))
+        _intercept, slope = np.linalg.lstsq(
+            design,
+            timestamps[start : stop + 1],
+            rcond=None,
+        )[0]
+        if slope > 0:
+            fitted.append(float(slope))
+    if not fitted:
+        raise ValueError("Legacy timestamp fitting produced no positive clock slope.")
+    robust_period = float(np.median(fitted))
+
+    corrected = timestamps.copy()
+    for start, stop in segments:
+        if stop <= start:
+            continue
+        indices = np.arange(stop - start + 1, dtype=float)
+        design = np.column_stack((np.ones_like(indices), indices))
+        intercept, slope = np.linalg.lstsq(
+            design,
+            corrected[start : stop + 1],
+            rcond=None,
+        )[0]
+        if not 0.8 * robust_period <= slope <= 1.2 * robust_period:
+            slope = robust_period
+            intercept = float(
+                np.median(corrected[start : stop + 1] - slope * indices)
+            )
+        corrected[start : stop + 1] = intercept + slope * indices
+    return (
+        corrected,
+        segments,
+        _measured_srate(corrected, segments),
+        0,
+        0,
+        "legacy robust measured-clock segments",
+        "low",
+    )
+
+
+def _recover_native_timestamps(timestamps, *, explicit=False):
+    """Preserve authoritative timestamps or recover legacy timing from evidence."""
+    timestamps = np.asarray(timestamps, dtype=float)
+    if not len(timestamps):
+        return timestamps.copy(), (), 0.0, 0, 0, "empty", "low"
+    if not np.all(np.isfinite(timestamps)):
+        raise ValueError("XDF timestamps must be finite.")
+    if len(timestamps) == 1:
+        return timestamps.copy(), ((0, 0),), 0.0, 0, 0, "single sample", "low"
+
+    if explicit:
+        if np.any(np.diff(timestamps) <= 0):
+            raise ValueError(
+                "Version-2 explicit sample timestamps must be strictly increasing."
+            )
+        segments = _segment_bounds(
+            len(timestamps),
+            _timestamp_gap_breaks(timestamps),
+        )
+        return (
+            timestamps.copy(),
+            segments,
+            _measured_srate(timestamps, segments),
+            0,
+            0,
+            "explicit buffer-endpoint timestamps",
+            "high",
+        )
+
+    repeated = (
+        np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
+    )
+    if float(np.mean(repeated)) >= 0.5:
+        return _recover_buffered_timestamps(timestamps)
+    return _recover_linear_timestamps(timestamps)
 
 
 def _nearest_sample_indices(source_times, target_times):

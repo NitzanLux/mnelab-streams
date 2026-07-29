@@ -52,6 +52,7 @@ from PySide6.QtWidgets import (
 )
 
 from mnelab import IS_DEV_VERSION, __version__
+from mnelab.crash_logging import crash_log_path, record_exception
 from mnelab.dialogs import *  # noqa: F403
 from mnelab.dialogs.channel_stats import ChannelStats
 from mnelab.model import (
@@ -80,6 +81,7 @@ from mnelab.viz import (
     plot_evoked_topomaps,
 )
 from mnelab.widgets import EmptyWidget, InfoWidget, SidebarWidget
+from mnelab.xdf import NativeXDFRecording, concatenate_native_xdf_recordings
 
 SIDEBAR_MIN_WIDTH = 150
 INFOWIDGET_MIN_WIDTH = 200
@@ -168,6 +170,64 @@ def _resolve_xdf_rows(fname):
             "or incomplete."
         )
     return rows
+
+
+def _unified_xdf_stream_rows(file_rows):
+    """Return one display row per logical stream plus per-file ID mappings."""
+    aggregates = {}
+    identities_by_file = {}
+    for fname, rows in file_rows:
+        occurrences = {}
+        identities = {}
+        for row in rows:
+            base = (
+                str(row[1] or "").strip().casefold(),
+                str(row[2] or "").strip().casefold(),
+                str(row[4] or "").strip().casefold(),
+            )
+            occurrence = occurrences.get(base, 0)
+            occurrences[base] = occurrence + 1
+            identity = (*base, occurrence)
+            identities[row[0]] = identity
+            if identity not in aggregates:
+                aggregates[identity] = {
+                    "name": row[1],
+                    "type": row[2],
+                    "channels": int(row[3]),
+                    "format": row[4],
+                    "rates": [float(row[5])],
+                    "files": {str(fname)},
+                }
+            else:
+                aggregate = aggregates[identity]
+                aggregate["channels"] = max(
+                    aggregate["channels"],
+                    int(row[3]),
+                )
+                aggregate["rates"].append(float(row[5]))
+                aggregate["files"].add(str(fname))
+        identities_by_file[str(fname)] = identities
+
+    unified_rows = []
+    identity_by_id = {}
+    presence_counts = {}
+    for synthetic_id, (identity, aggregate) in enumerate(
+        aggregates.items(),
+        start=1,
+    ):
+        identity_by_id[synthetic_id] = identity
+        presence_counts[synthetic_id] = len(aggregate["files"])
+        unified_rows.append(
+            [
+                synthetic_id,
+                aggregate["name"],
+                aggregate["type"],
+                aggregate["channels"],
+                aggregate["format"],
+                max(aggregate["rates"]),
+            ]
+        )
+    return unified_rows, identity_by_id, identities_by_file, presence_counts
 
 
 def _chronological_xdf_groups(
@@ -1191,8 +1251,10 @@ class MainWindow(QMainWindow):
             return
         exception_text = str(value)
         traceback_text = "".join(traceback.format_exception(type, value, traceback_))
+        log_saved = record_exception(type, value, traceback_)
         print(traceback_text, file=sys.stderr)
-        ErrorMessageBox(self, exception_text, "", traceback_text).show()
+        log_message = f"Crash log saved to {crash_log_path()}" if log_saved else ""
+        ErrorMessageBox(self, exception_text, log_message, traceback_text).show()
 
     def _sidebar_item_changed(self, item, column):
         """
@@ -1375,6 +1437,27 @@ class MainWindow(QMainWindow):
                 for ext in raw_writers:
                     action = "export_data" + ext.replace(".", "_")
                     self.all_actions[action].setEnabled(ext in epochs_writers)
+            if isinstance(self.model.current["data"], NativeXDFRecording):
+                native_safe_actions = {
+                    "annotation_colors",
+                    "annotations",
+                    "close_all",
+                    "close_file",
+                    "export_annotations",
+                    "export_bads",
+                    "history",
+                    "plot_data",
+                    "resample",
+                    "statusbar",
+                    "xdf_chunks",
+                    "xdf_metadata",
+                }
+                for name, action in self.all_actions.items():
+                    if (
+                        name not in self.always_enabled
+                        and name not in native_safe_actions
+                    ):
+                        action.setEnabled(False)
         # add to recent files
         if len(self.model) > 0:
             self._add_recent(self.model.current["fname"])
@@ -1396,14 +1479,23 @@ class MainWindow(QMainWindow):
 
         while True:
             try:
-                model.load(
-                    fname,
-                    stream_ids=stream_ids.copy(),
-                    marker_ids=marker_ids,
-                    prefix_markers=prefix_markers,
-                    fs_new=fs_new,
-                    gap_threshold=gap_threshold,
-                )
+                if fs_new is None and (len(stream_ids) > 1 or gap_threshold > 0):
+                    model.load_native_xdf(
+                        fname,
+                        stream_ids=stream_ids.copy(),
+                        marker_ids=marker_ids,
+                        prefix_markers=prefix_markers,
+                        gap_threshold=gap_threshold,
+                    )
+                else:
+                    model.load(
+                        fname,
+                        stream_ids=stream_ids.copy(),
+                        marker_ids=marker_ids,
+                        prefix_markers=prefix_markers,
+                        fs_new=fs_new,
+                        gap_threshold=gap_threshold,
+                    )
             except ValueError as error:
                 match = re.fullmatch(r"Stream (\d+) contains no samples\.", str(error))
                 if match is None:
@@ -1433,8 +1525,8 @@ class MainWindow(QMainWindow):
         gap_threshold = 0.0
         if dialog.resample.isChecked():
             fs_new = float(dialog.fs_new.value())
-            if dialog.gap_threshold_checkbox.isChecked():
-                gap_threshold = float(dialog.gap_threshold.value())
+        if dialog.gap_threshold_checkbox.isChecked():
+            gap_threshold = float(dialog.gap_threshold.value())
         return {
             "fname": fname,
             "rows": rows,
@@ -1444,6 +1536,81 @@ class MainWindow(QMainWindow):
             "fs_new": fs_new,
             "gap_threshold": gap_threshold,
         }
+
+    def _configure_xdfs(self, fnames, *, skip_unreadable):
+        """Inspect a batch and apply one logical stream selection to every file."""
+        file_rows = []
+        failures = []
+        for fname in fnames:
+            self._set_last_dir(fname)
+            try:
+                rows = _resolve_xdf_rows(fname)
+            except Exception as error:
+                if not skip_unreadable:
+                    raise
+                failures.append((fname, error))
+                continue
+            file_rows.append((fname, rows))
+
+        if not file_rows:
+            return [], failures
+
+        (
+            unified_rows,
+            identity_by_id,
+            identities_by_file,
+            presence_counts,
+        ) = _unified_xdf_stream_rows(file_rows)
+        selection = XDFStreamsDialog(
+            self,
+            unified_rows,
+            fname=None,
+            presence_counts=presence_counts,
+            file_count=len(file_rows),
+        )
+        if not selection.exec():
+            return None, failures
+
+        selected_data = {
+            identity_by_id[stream_id] for stream_id in selection.selected_streams
+        }
+        selected_markers = {
+            identity_by_id[stream_id] for stream_id in selection.selected_markers
+        }
+        fs_new = (
+            float(selection.fs_new.value())
+            if selection.resample.isChecked()
+            else None
+        )
+        gap_threshold = (
+            float(selection.gap_threshold.value())
+            if selection.gap_threshold_checkbox.isChecked()
+            else 0.0
+        )
+
+        configurations = []
+        for fname, rows in file_rows:
+            identities = identities_by_file[str(fname)]
+            configurations.append(
+                {
+                    "fname": fname,
+                    "rows": rows,
+                    "stream_ids": [
+                        row[0]
+                        for row in rows
+                        if identities[row[0]] in selected_data
+                    ],
+                    "marker_ids": [
+                        row[0]
+                        for row in rows
+                        if identities[row[0]] in selected_markers
+                    ],
+                    "prefix_markers": selection.prefix_markers,
+                    "fs_new": fs_new,
+                    "gap_threshold": gap_threshold,
+                }
+            )
+        return configurations, failures
 
     def _load_xdf_configuration(self, configuration, model=None):
         """Load one configured XDF and attach its source-stream metadata."""
@@ -1536,7 +1703,8 @@ class MainWindow(QMainWindow):
                 failures.append((configuration["fname"], error))
                 continue
             fnames.append(configuration["fname"])
-            raws.append(temporary_model.current["data"])
+            data = temporary_model.current["data"]
+            raws.append(data)
             source_streams.append(temporary_model.current["source_streams"])
             marker_streams.append(temporary_model.current["marker_streams"] or [])
             if skipped_stream_ids:
@@ -1577,11 +1745,33 @@ class MainWindow(QMainWindow):
             qualified_channels.extend(
                 _qualify_xdf_duplicate_channels(group_raws, group_streams, group_fnames)
             )
-            if allow_channel_union:
+            native_group = all(
+                isinstance(raw, NativeXDFRecording) for raw in group_raws
+            )
+            if any(
+                isinstance(raw, NativeXDFRecording) for raw in group_raws
+            ) and not native_group:
+                raise XDFImportError(
+                    "Cannot merge native multi-rate and resampled XDF files together. "
+                    "Use the same Resample selection for every file."
+                )
+            if allow_channel_union and not native_group:
                 filled_channels.extend(
                     _align_xdf_channel_union(group_raws, group_fnames)
                 )
-            merged = _merge_xdf_raws(group_raws, group_fnames)
+            try:
+                merged = (
+                    concatenate_native_xdf_recordings(
+                        group_raws,
+                        allow_channel_union=allow_channel_union,
+                    )
+                    if native_group
+                    else _merge_xdf_raws(group_raws, group_fnames)
+                )
+            except (TypeError, ValueError) as error:
+                raise XDFImportError(
+                    f"Cannot merge native XDF streams: {error}"
+                ) from error
             unified_streams = _unify_xdf_streams(
                 group_streams,
                 group_fnames,
@@ -1634,7 +1824,14 @@ class MainWindow(QMainWindow):
                 source_files=group_fnames,
                 is_xdf_merge=len(group_fnames) > 1,
             )
-            self.model.history.append("data = mne.concatenate_raws(raws, preload=True)")
+            if isinstance(merged, NativeXDFRecording):
+                self.model.history.append(
+                    "data = concatenate_native_xdf_recordings(recordings)"
+                )
+            else:
+                self.model.history.append(
+                    "data = mne.concatenate_raws(raws, preload=True)"
+                )
 
         if len(groups) > 1:
             QMessageBox.information(
@@ -1691,21 +1888,13 @@ class MainWindow(QMainWindow):
                 self._open_xdf(fname)
             return
 
-        configurations = []
-        unreadable_failures = []
         try:
-            for fname in fnames:
-                self._set_last_dir(fname)
-                try:
-                    configuration = self._configure_xdf(fname)
-                except Exception as error:
-                    if not dialog.skip_unreadable_files:
-                        raise
-                    unreadable_failures.append((fname, error))
-                    continue
-                if configuration is None:
-                    return
-                configurations.append(configuration)
+            configurations, unreadable_failures = self._configure_xdfs(
+                fnames,
+                skip_unreadable=dialog.skip_unreadable_files,
+            )
+            if configurations is None:
+                return
             self._merge_xdfs(
                 configurations,
                 auto_order_by_time=dialog.auto_order_by_time,
