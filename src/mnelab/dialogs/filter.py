@@ -911,11 +911,20 @@ class FilterDialog(QDialog):
         for stream in streams:
             stream_fmax = fmax
             try:
+                filter_sfreq = float(stream.get("filter_sfreq"))
+            except (TypeError, ValueError):
+                filter_sfreq = 0
+            try:
                 nominal_srate = float(stream.get("nominal_srate"))
             except (TypeError, ValueError):
                 nominal_srate = 0
-            if nominal_srate > 0 and math.isfinite(nominal_srate):
-                nominal_nyquist = nominal_srate / 2
+            panel_sfreq = (
+                filter_sfreq
+                if filter_sfreq > 0 and math.isfinite(filter_sfreq)
+                else nominal_srate
+            )
+            if panel_sfreq > 0 and math.isfinite(panel_sfreq):
+                nominal_nyquist = panel_sfreq / 2
                 stream_fmax = (
                     nominal_nyquist
                     if stream_fmax is None
@@ -925,7 +934,11 @@ class FilterDialog(QDialog):
                 StreamFilterPanel(
                     stream,
                     fmax=stream_fmax,
-                    response_sfreq=None if fmax is None else 2 * float(fmax),
+                    response_sfreq=(
+                        filter_sfreq
+                        if filter_sfreq > 0 and math.isfinite(filter_sfreq)
+                        else (None if fmax is None else 2 * float(fmax))
+                    ),
                     parent=self.panel_container,
                 )
             )

@@ -244,6 +244,13 @@ def normalize_streams(raw, streams=None, *, add_unassigned=True):
                 "nominal_srate": raw.info["sfreq"],
             }
         )
+    if isinstance(raw, NativeXDFRecording):
+        for stream in normalized:
+            entry = _native_entry_for_stream(raw, stream)
+            if entry is not None:
+                # Filtering is performed on the source Raw object, not on the
+                # shared display timeline or the descriptive nominal rate.
+                stream["filter_sfreq"] = float(entry["raw"].info["sfreq"])
     return normalized
 
 
@@ -265,9 +272,7 @@ def _native_entry_for_stream(raw, stream):
             return entry
 
     channel_matches = [
-        entry
-        for entry in raw.streams
-        if requested.intersection(entry["raw"].ch_names)
+        entry for entry in raw.streams if requested.intersection(entry["raw"].ch_names)
     ]
     if channel_matches:
         return max(

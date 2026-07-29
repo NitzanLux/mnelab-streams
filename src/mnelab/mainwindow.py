@@ -1445,6 +1445,7 @@ class MainWindow(QMainWindow):
                     "close_file",
                     "export_annotations",
                     "export_bads",
+                    "filter",
                     "history",
                     "plot_data",
                     "resample",
@@ -1578,9 +1579,7 @@ class MainWindow(QMainWindow):
             identity_by_id[stream_id] for stream_id in selection.selected_markers
         }
         fs_new = (
-            float(selection.fs_new.value())
-            if selection.resample.isChecked()
-            else None
+            float(selection.fs_new.value()) if selection.resample.isChecked() else None
         )
         gap_threshold = (
             float(selection.gap_threshold.value())
@@ -1596,14 +1595,10 @@ class MainWindow(QMainWindow):
                     "fname": fname,
                     "rows": rows,
                     "stream_ids": [
-                        row[0]
-                        for row in rows
-                        if identities[row[0]] in selected_data
+                        row[0] for row in rows if identities[row[0]] in selected_data
                     ],
                     "marker_ids": [
-                        row[0]
-                        for row in rows
-                        if identities[row[0]] in selected_markers
+                        row[0] for row in rows if identities[row[0]] in selected_markers
                     ],
                     "prefix_markers": selection.prefix_markers,
                     "fs_new": fs_new,
@@ -1748,9 +1743,10 @@ class MainWindow(QMainWindow):
             native_group = all(
                 isinstance(raw, NativeXDFRecording) for raw in group_raws
             )
-            if any(
-                isinstance(raw, NativeXDFRecording) for raw in group_raws
-            ) and not native_group:
+            if (
+                any(isinstance(raw, NativeXDFRecording) for raw in group_raws)
+                and not native_group
+            ):
                 raise XDFImportError(
                     "Cannot merge native multi-rate and resampled XDF files together. "
                     "Use the same Resample selection for every file."
@@ -2900,11 +2896,25 @@ class MainWindow(QMainWindow):
 
     def resample_data(self):
         """Resample data."""
+        from mnelab.widgets.stream_viewer import normalize_streams
+
+        data = self.model.current["data"]
         current_sfreq = self.model.current["data"].info["sfreq"]
-        dialog = ResampleDialog(self, current_sfreq)
+        streams = (
+            normalize_streams(data, self.model.current["source_streams"])
+            if isinstance(data, NativeXDFRecording)
+            else None
+        )
+        dialog = ResampleDialog(self, current_sfreq, streams=streams)
         if dialog.exec():
             self.auto_duplicate()
-            self.model.resample(dialog.new_sfreq)
+            selected_ids = dialog.selected_stream_ids
+            stream_ids = (
+                selected_ids
+                if streams is not None and len(selected_ids) < len(streams)
+                else None
+            )
+            self.model.resample(dialog.new_sfreq, stream_ids=stream_ids)
 
     def find_events(self):
         info = self.model.current["data"].info

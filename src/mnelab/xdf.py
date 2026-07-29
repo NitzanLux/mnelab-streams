@@ -204,6 +204,80 @@ class NativeXDFRecording:
         self.annotations = annotations.copy()
         return self
 
+    def apply_function(self, function, picks=None, **kwargs):
+        """Apply a channel-wise function without crossing stream timestamp gaps.
+
+        Each source stream keeps its own sample grid.  ``timestamp_segments`` use
+        inclusive sample bounds and identify independently acquired runs; filter
+        state is therefore restarted for every run.  Results are staged before
+        assignment so a failing function does not partially modify the recording.
+        """
+        if picks is None or (isinstance(picks, str) and picks == "all"):
+            picks = list(self.ch_names)
+        elif isinstance(picks, (str, int, np.integer)):
+            picks = [picks]
+        else:
+            picks = list(picks)
+
+        names = []
+        for pick in picks:
+            if isinstance(pick, str):
+                if pick not in self.ch_names:
+                    raise ValueError(f"Unknown channel: {pick!r}.")
+                names.append(pick)
+            else:
+                index = int(pick)
+                if index < 0:
+                    index += len(self.ch_names)
+                if not 0 <= index < len(self.ch_names):
+                    raise IndexError(f"Channel index {pick!r} is out of range.")
+                names.append(self.ch_names[index])
+        names = list(dict.fromkeys(names))
+
+        staged = []
+        for entry in self.streams:
+            raw = entry["raw"]
+            local_names = [name for name in names if name in raw.ch_names]
+            if not local_names:
+                continue
+            n_times = raw.n_times
+            segments = entry.get("timestamp_segments")
+            if not segments:
+                segments = ((0, n_times - 1),)
+
+            expected_start = 0
+            normalized_segments = []
+            for start, stop in segments:
+                start, stop = int(start), int(stop)
+                if start != expected_start or stop < start or stop >= n_times:
+                    raise ValueError(
+                        f"Invalid timestamp segments for stream "
+                        f"{entry.get('name', entry.get('id'))!r}."
+                    )
+                normalized_segments.append((start, stop + 1))
+                expected_start = stop + 1
+            if expected_start != n_times:
+                raise ValueError(
+                    f"Timestamp segments do not cover stream "
+                    f"{entry.get('name', entry.get('id'))!r}."
+                )
+
+            for name in local_names:
+                index = raw.ch_names.index(name)
+                result = raw._data[index].copy()
+                for start, stop in normalized_segments:
+                    filtered = np.asarray(function(result[start:stop], **kwargs))
+                    if filtered.shape != result[start:stop].shape:
+                        raise ValueError(
+                            "A native-stream function must preserve channel length."
+                        )
+                    result[start:stop] = filtered
+                staged.append((raw, index, result))
+
+        for raw, index, result in staged:
+            raw._data[index] = result
+        return self
+
     def rename_channels(self, mapping):
         """Rename channels in both the combined metadata and source streams."""
         for entry in self.streams:
@@ -323,9 +397,7 @@ class NativeXDFRecording:
         nominal_rates = [
             float(entry.get("nominal_srate", np.nan)) for entry in self.streams
         ]
-        measured_rates = [
-            float(entry["raw"].info["sfreq"]) for entry in self.streams
-        ]
+        measured_rates = [float(entry["raw"].info["sfreq"]) for entry in self.streams]
         valid_nominal_rates = all(
             np.isfinite(rate) and rate > 0 for rate in nominal_rates
         )
@@ -496,6 +568,74 @@ class NativeXDFRecording:
         raw.set_annotations(self.annotations)
         return raw
 
+    def resample_streams(self, stream_ids, sfreq):
+        """Resample selected streams while retaining all other native grids."""
+        selected = set(stream_ids)
+        unknown = selected.difference(self._by_id)
+        if unknown:
+            raise ValueError(f"Unknown native XDF stream identifiers: {unknown!r}.")
+        if not selected:
+            raise ValueError("At least one native XDF stream must be selected.")
+
+        sfreq = float(sfreq)
+        if not np.isfinite(sfreq) or sfreq <= 0:
+            raise ValueError("The target sampling rate must be positive.")
+
+        for entry in self.streams:
+            if entry["id"] not in selected:
+                continue
+            temporary = type(self)(
+                [deepcopy(entry)],
+                meas_date=self.meas_date,
+                gap_threshold=self.gap_threshold,
+            )
+            converted = temporary.materialize(sfreq)
+            grid = converted.times
+            timestamps = np.asarray(entry["timestamps"], dtype=float)
+            source_rate = float(entry["raw"].info["sfreq"])
+            gap_limit = (
+                self.gap_threshold
+                if self.gap_threshold > 0
+                else max(0.1, 1.5 / source_rate)
+            )
+            gaps = np.flatnonzero(np.diff(timestamps) > gap_limit)
+            starts = np.r_[0, gaps + 1]
+            stops = np.r_[gaps, len(timestamps) - 1]
+            keep = np.zeros(len(grid), dtype=bool)
+            for start, stop in zip(starts, stops, strict=True):
+                keep |= (grid >= timestamps[start]) & (grid <= timestamps[stop])
+
+            values = converted.get_data()[:, keep]
+            channel_types = entry["raw"].get_channel_types()
+            raw = mne.io.RawArray(
+                values,
+                mne.create_info(entry["raw"].ch_names, sfreq, channel_types),
+                verbose=False,
+            )
+            raw.info["bads"] = list(entry["raw"].info["bads"])
+            entry["raw"] = raw
+            entry["timestamps"] = grid[keep]
+            entry["nominal_srate"] = sfreq
+            boundaries = np.flatnonzero(np.diff(entry["timestamps"]) > 1.5 / sfreq)
+            segment_starts = np.r_[0, boundaries + 1]
+            segment_stops = np.r_[boundaries, len(entry["timestamps"]) - 1]
+            entry["timestamp_segments"] = tuple(
+                (int(start), int(stop))
+                for start, stop in zip(
+                    segment_starts, segment_stops, strict=True
+                )
+            )
+
+        self.native_sfreqs = {
+            entry["id"]: float(entry["raw"].info["sfreq"]) for entry in self.streams
+        }
+        self.timeline_sfreq = max(self.native_sfreqs.values())
+        with self.info._unlock():
+            self.info["sfreq"] = self.timeline_sfreq
+            self.info["lowpass"] = self.timeline_sfreq / 2
+        self.n_times = max(1, int(np.ceil(self.duration * self.timeline_sfreq)) + 1)
+        return self
+
 
 def concatenate_native_xdf_recordings(recordings, *, allow_channel_union=False):
     """Concatenate native streams, optionally filling unavailable data with NaN."""
@@ -543,8 +683,7 @@ def concatenate_native_xdf_recordings(recordings, *, allow_channel_union=False):
             return times
         intervals = np.diff(times)
         boundaries = {
-            int(stop)
-            for _start, stop in entry.get("timestamp_segments", ())[:-1]
+            int(stop) for _start, stop in entry.get("timestamp_segments", ())[:-1]
         }
         invalid = np.flatnonzero(intervals <= 0)
         if any(int(index) not in boundaries for index in invalid):
@@ -634,9 +773,7 @@ def concatenate_native_xdf_recordings(recordings, *, allow_channel_union=False):
         source_timestamp_blocks = []
         segments = []
         sample_offset = 0
-        for recording, entry, offset in zip(
-            recordings, entries, offsets, strict=True
-        ):
+        for recording, entry, offset in zip(recordings, entries, offsets, strict=True):
             if entry is None:
                 sample_count = max(
                     1,
@@ -771,9 +908,7 @@ def read_native_xdf(
         timestamps = np.asarray(stream["time_stamps"], dtype=float)
         if not len(timestamps):
             raise ValueError(f"Stream {stream_id} contains no samples.")
-        source_effective = float(
-            np.asarray(stream["info"]["effective_srate"]).item()
-        )
+        source_effective = float(np.asarray(stream["info"]["effective_srate"]).item())
         metadata = _xdf_synchronization_metadata(stream)
         (
             corrected,
@@ -933,9 +1068,7 @@ def _timestamp_gap_breaks(timestamps):
 
 def _recover_buffered_timestamps(timestamps):
     """Interpolate legacy repeated-stamp buffers from their measured endpoints."""
-    same_buffer = (
-        np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
-    )
+    same_buffer = np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
     group_starts = np.r_[0, np.flatnonzero(~same_buffer) + 1]
     group_stops = np.r_[np.flatnonzero(~same_buffer), len(timestamps) - 1]
     counts = group_stops - group_starts + 1
@@ -958,9 +1091,7 @@ def _recover_buffered_timestamps(timestamps):
         )
     typical_period = float(np.median(usable_periods))
     deviations = endpoint_intervals - interval_counts * typical_period
-    group_breaks = (endpoint_intervals <= 0) | (
-        deviations > _DEJITTER_GAP_SECONDS
-    )
+    group_breaks = (endpoint_intervals <= 0) | (deviations > _DEJITTER_GAP_SECONDS)
     # A delayed transport buffer is followed by shorter intervals that repay its
     # lateness. Only a sustained offset becomes an acquisition segment boundary.
     for index in np.flatnonzero(group_breaks & (endpoint_intervals > 0)):
@@ -982,30 +1113,28 @@ def _recover_buffered_timestamps(timestamps):
         strict=True,
     ):
         local_periods = observed_periods[group_start:group_stop]
-        local_periods = local_periods[
-            np.isfinite(local_periods) & (local_periods > 0)
-        ]
+        local_periods = local_periods[np.isfinite(local_periods) & (local_periods > 0)]
         period = (
-            float(np.median(local_periods))
-            if len(local_periods)
-            else typical_period
+            float(np.median(local_periods)) if len(local_periods) else typical_period
         )
         first_start = int(group_starts[group_start])
         first_stop = int(group_stops[group_start])
         first_count = int(counts[group_start])
-        corrected[first_start : first_stop + 1] = (
-            endpoints[group_start]
-            - period * np.arange(first_count - 1, -1, -1, dtype=float)
-        )
+        corrected[first_start : first_stop + 1] = endpoints[
+            group_start
+        ] - period * np.arange(first_count - 1, -1, -1, dtype=float)
         previous_endpoint = float(endpoints[group_start])
         for group_index in range(group_start + 1, group_stop + 1):
             start = int(group_starts[group_index])
             stop = int(group_stops[group_index])
             count = int(counts[group_index])
             endpoint = float(endpoints[group_index])
-            corrected[start : stop + 1] = previous_endpoint + (
-                endpoint - previous_endpoint
-            ) * np.arange(1, count + 1, dtype=float) / count
+            corrected[start : stop + 1] = (
+                previous_endpoint
+                + (endpoint - previous_endpoint)
+                * np.arange(1, count + 1, dtype=float)
+                / count
+            )
             previous_endpoint = endpoint
         segments.append((first_start, int(group_stops[group_stop])))
 
@@ -1031,8 +1160,7 @@ def _recover_linear_timestamps(timestamps):
     observed_period = float(np.median(positive))
     clear_gap_limit = max(1.0, 10.0 * observed_period)
     breaks = np.flatnonzero(
-        (intervals < -_DEJITTER_BATCH_TOLERANCE_SECONDS)
-        | (intervals > clear_gap_limit)
+        (intervals < -_DEJITTER_BATCH_TOLERANCE_SECONDS) | (intervals > clear_gap_limit)
     )
     segments = _segment_bounds(len(timestamps), breaks)
     fitted = []
@@ -1065,9 +1193,7 @@ def _recover_linear_timestamps(timestamps):
         )[0]
         if not 0.8 * robust_period <= slope <= 1.2 * robust_period:
             slope = robust_period
-            intercept = float(
-                np.median(corrected[start : stop + 1] - slope * indices)
-            )
+            intercept = float(np.median(corrected[start : stop + 1] - slope * indices))
         corrected[start : stop + 1] = intercept + slope * indices
     return (
         corrected,
@@ -1109,9 +1235,7 @@ def _recover_native_timestamps(timestamps, *, explicit=False):
             "high",
         )
 
-    repeated = (
-        np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
-    )
+    repeated = np.abs(np.diff(timestamps)) <= _DEJITTER_BATCH_TOLERANCE_SECONDS
     if float(np.mean(repeated)) >= 0.5:
         return _recover_buffered_timestamps(timestamps)
     return _recover_linear_timestamps(timestamps)

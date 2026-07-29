@@ -15,6 +15,8 @@ from mnelab.dialogs import FilterDialog
 from mnelab.filter_preset import FilterPresetError
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model, _finite_span_iir_filter
+from mnelab.widgets.stream_viewer import normalize_streams
+from mnelab.xdf import NativeXDFRecording
 
 
 def _raw_and_streams():
@@ -967,6 +969,65 @@ def test_filter_action_passes_plot_view_stream_groups(qtbot, tmp_path):
         ["Aux"],
     ]
     filter_mock.assert_called_once_with(stream_filters=selected)
+
+
+def test_native_filter_action_and_dialog_use_source_sampling_rates(qtbot, tmp_path):
+    """Native filtering stays enabled and exposes each source stream's Nyquist."""
+    slow = mne.io.RawArray(
+        np.zeros((1, 20)),
+        mne.create_info(["Slow"], 20.0, ["misc"]),
+        verbose=False,
+    )
+    fast = mne.io.RawArray(
+        np.zeros((1, 100)),
+        mne.create_info(["Fast"], 100.0, ["misc"]),
+        verbose=False,
+    )
+    recording = NativeXDFRecording(
+        [
+            {
+                "id": 1,
+                "name": "Slow",
+                "raw": slow,
+                "timestamps": np.arange(20) / 20.0,
+                "nominal_srate": 1000.0,
+            },
+            {
+                "id": 2,
+                "name": "Fast",
+                "raw": fast,
+                "timestamps": np.arange(100) / 100.0,
+                "nominal_srate": 1000.0,
+            },
+        ]
+    )
+    descriptors = [
+        {
+            "id": entry["id"],
+            "name": entry["name"],
+            "type": "Data",
+            "channel_names": list(entry["raw"].ch_names),
+            "nominal_srate": entry["nominal_srate"],
+        }
+        for entry in recording.streams
+    ]
+    normalized = normalize_streams(recording, descriptors)
+    assert [stream["filter_sfreq"] for stream in normalized] == [20.0, 100.0]
+
+    dialog = FilterDialog(fmax=500.0, streams=normalized)
+    qtbot.addWidget(dialog)
+    assert [panel.upper_edit.maximum() for panel in dialog.panels] == [10.0, 50.0]
+    assert [panel._response_sfreq for panel in dialog.panels] == [20.0, 100.0]
+
+    path = tmp_path / "native.xdf"
+    path.write_bytes(b"x")
+    model = Model()
+    window = MainWindow(model)
+    model.view = window
+    qtbot.addWidget(window)
+    model.load_data(recording, path, source_streams=descriptors)
+
+    assert window.all_actions["filter"].isEnabled()
 
 
 def test_filter_action_rebinds_open_stream_viewer_to_filtered_copy(qtbot, tmp_path):

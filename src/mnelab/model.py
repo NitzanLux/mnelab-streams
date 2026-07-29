@@ -1044,6 +1044,199 @@ class Model:
         """Apply filters to the current data based on provided parameters."""
         data = self.current["data"]
 
+        def filter_native_streams(filters):
+            """Plan and apply filters on each source stream's own sample grid."""
+            if filters is None:
+                raise ValueError(
+                    "Native-rate recordings require channel-scoped stream filters."
+                )
+
+            plans = []
+            planned_history = []
+            applied = []
+            model_names = {
+                "butterworth": "butter",
+                "chebyshev": "cheby1",
+                "bessel": "bessel",
+            }
+
+            for stream_filter in filters:
+                if "kind" not in stream_filter:
+                    raise ValueError(
+                        "This filter specification predates native-rate filtering. "
+                        "Open Filter Data and configure the stream again."
+                    )
+                picks = list(dict.fromkeys(stream_filter.get("picks", ())))
+                if not picks:
+                    raise ValueError("A native-rate filter needs at least one channel.")
+                unknown = [name for name in picks if name not in data.ch_names]
+                if unknown:
+                    raise ValueError(
+                        "Unknown native-rate filter channel(s): "
+                        + ", ".join(map(repr, unknown))
+                    )
+
+                groups = [
+                    (
+                        entry,
+                        [name for name in picks if name in entry["raw"].ch_names],
+                    )
+                    for entry in data.streams
+                ]
+                groups = [(entry, local) for entry, local in groups if local]
+                kind = stream_filter["kind"]
+                filter_model = stream_filter["model"]
+
+                if filter_model == "moving_average":
+                    if kind not in {"highpass", "lowpass"}:
+                        raise ValueError(
+                            "Moving average is only available as a highpass or "
+                            "lowpass filter."
+                        )
+                    samples = int(stream_filter["samples"])
+                    if samples < 1:
+                        raise ValueError(
+                            "Moving-average length must be at least one sample."
+                        )
+                    highpass = kind == "highpass"
+                    for _entry, local_picks in groups:
+                        plans.append(
+                            (
+                                _moving_average_filter,
+                                local_picks,
+                                {"samples": samples, "highpass": highpass},
+                            )
+                        )
+                        planned_history.append(
+                            "data.apply_function(_moving_average_filter"
+                            f", picks={local_picks!r}, samples={samples}, "
+                            f"highpass={highpass})"
+                        )
+                    description = f"{kind} moving average ({samples} samples)"
+
+                elif kind == "notch":
+                    frequencies = stream_filter["notch"]
+                    if not isinstance(frequencies, (list, tuple, np.ndarray)):
+                        frequencies = [frequencies]
+                    frequencies = [float(frequency) for frequency in frequencies]
+                    if not frequencies:
+                        raise ValueError("Select at least one notch frequency.")
+                    q_factor = int(stream_filter["q_factor"])
+                    if q_factor <= 0:
+                        raise ValueError("The notch Q factor must be positive.")
+                    for entry, local_picks in groups:
+                        sfreq = float(entry["raw"].info["sfreq"])
+                        for frequency in frequencies:
+                            b, a = scipy.signal.iirnotch(
+                                frequency,
+                                q_factor,
+                                fs=sfreq,
+                            )
+                            plans.append(
+                                (
+                                    _finite_span_iir_filter,
+                                    local_picks,
+                                    {"b": b, "a": a},
+                                )
+                            )
+                            planned_history.append(
+                                "b, a = scipy.signal.iirnotch("
+                                f"{frequency}, {q_factor}, fs={sfreq})"
+                            )
+                            planned_history.append(
+                                "data.apply_function(_finite_span_iir_filter"
+                                f", picks={local_picks!r}, b=b, a=a)"
+                            )
+                    frequency_text = ", ".join(
+                        f"{frequency:g}" for frequency in frequencies
+                    )
+                    description = f"notch {frequency_text}\u2009Hz (Q {q_factor})"
+
+                else:
+                    if kind not in {
+                        "highpass",
+                        "lowpass",
+                        "bandpass",
+                        "bandstop",
+                    }:
+                        raise ValueError(f"Unsupported filter type: {kind!r}.")
+                    if filter_model not in model_names:
+                        raise ValueError(f"Unsupported filter model: {filter_model!r}.")
+                    order = int(stream_filter["order"])
+                    if order < 1:
+                        raise ValueError("The filter order must be positive.")
+                    design_order = (
+                        order // 2 if kind in {"bandpass", "bandstop"} else order
+                    )
+                    if design_order < 1:
+                        raise ValueError("Band filters need an order of at least two.")
+                    cutoff = {
+                        "highpass": stream_filter["lower"],
+                        "lowpass": stream_filter["upper"],
+                        "bandpass": [
+                            stream_filter["lower"],
+                            stream_filter["upper"],
+                        ],
+                        "bandstop": [
+                            stream_filter["lower"],
+                            stream_filter["upper"],
+                        ],
+                    }[kind]
+                    for entry, local_picks in groups:
+                        design_kwargs = {
+                            "N": design_order,
+                            "Wn": cutoff,
+                            "btype": kind,
+                            "ftype": model_names[filter_model],
+                            "output": "sos",
+                            "fs": float(entry["raw"].info["sfreq"]),
+                        }
+                        if filter_model == "chebyshev":
+                            design_kwargs["rp"] = float(stream_filter["ripple"])
+                        sos = scipy.signal.iirfilter(**design_kwargs)
+                        plans.append(
+                            (
+                                _finite_span_iir_filter,
+                                local_picks,
+                                {"sos": sos},
+                            )
+                        )
+                        planned_history.append(
+                            f"sos = scipy.signal.iirfilter(**{design_kwargs!r})"
+                        )
+                        planned_history.append(
+                            "data.apply_function(_finite_span_iir_filter"
+                            f", picks={local_picks!r}, sos=sos)"
+                        )
+                    if kind in {"bandpass", "bandstop"}:
+                        description = (
+                            f"{kind} {stream_filter['lower']}-"
+                            f"{stream_filter['upper']}\u2009Hz"
+                        )
+                    else:
+                        cutoff_text = (
+                            stream_filter["lower"]
+                            if kind == "highpass"
+                            else stream_filter["upper"]
+                        )
+                        description = f"{kind} {cutoff_text}\u2009Hz"
+
+                applied.append(
+                    f"{stream_filter.get('stream_name', 'Data')}: {description}"
+                )
+
+            # All rates, cutoffs, models, and channel names have been validated
+            # before the first sample is changed.
+            for function, picks, kwargs in plans:
+                data.apply_function(function, picks=picks, **kwargs)
+            self.history.extend(planned_history)
+            if applied:
+                self.current["name"] += " (filtered per stream)"
+
+        if isinstance(data, NativeXDFRecording):
+            filter_native_streams(stream_filters)
+            return
+
         def apply_filter(filter_method, *args, picks=None, **method_kwargs):
             kwargs = dict(method_kwargs)
             if picks is not None:
@@ -1206,13 +1399,32 @@ class Model:
             self.current["name"] += " (filtered per stream)"
 
     @data_changed
-    def resample(self, sfreq):
-        if isinstance(self.current["data"], NativeXDFRecording):
-            self.current["data"] = self.current["data"].materialize(sfreq)
+    def resample(self, sfreq, stream_ids=None):
+        data = self.current["data"]
+        if isinstance(data, NativeXDFRecording):
+            if stream_ids is None:
+                self.current["data"] = data.materialize(sfreq)
+            else:
+                data.resample_streams(stream_ids, sfreq)
+                selected = set(stream_ids)
+                for stream in self.current["source_streams"] or ():
+                    if stream.get("id") in selected:
+                        stream["nominal_srate"] = float(sfreq)
         else:
-            self.current["data"].resample(sfreq)
-        self.current["name"] += f" ({sfreq}\u2009Hz)"
-        self.history.append(f"data.resample({sfreq})")
+            if stream_ids is not None:
+                raise ValueError(
+                    "Individual streams can only be resampled while they retain "
+                    "their native XDF sampling grids."
+                )
+            data.resample(sfreq)
+        if stream_ids is None:
+            self.current["name"] += f" ({sfreq}\u2009Hz)"
+            self.history.append(f"data.resample({sfreq})")
+        else:
+            self.current["name"] += f" (selected streams {sfreq}\u2009Hz)"
+            self.history.append(
+                f"data.resample_streams({list(stream_ids)!r}, {sfreq})"
+            )
 
     @data_changed
     def crop(self, start, stop):
