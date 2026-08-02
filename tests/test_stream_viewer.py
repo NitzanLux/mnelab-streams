@@ -268,7 +268,7 @@ def test_streams_tab_defaults_on_and_toggles_source_traces(viewer):
     assert [
         viewer.sidebar_tabs.tabText(index)
         for index in range(viewer.sidebar_tabs.count())
-    ] == ["Annotations", "Streams"]
+    ] == ["Annotations", "Streams", "Settings"]
     assert viewer.stream_list.count() == 2
     assert [
         viewer.stream_list.item(index).checkState()
@@ -286,6 +286,55 @@ def test_streams_tab_defaults_on_and_toggles_source_traces(viewer):
 
     assert viewer.panels[1].isVisibleTo(viewer.panel_container)
     assert viewer.panels[1].visible_channel_names == ["Audio L"]
+
+
+def test_view_menu_stream_toggles_and_unified_layout_stay_interactive(viewer):
+    """View-menu toggles mirror the browser and unified mode keeps all sources."""
+    viewer.stream_visibility_actions[1].setChecked(False)
+
+    assert viewer.stream_list.item(1).checkState() == Qt.CheckState.Unchecked
+    assert viewer._stream_visibility[22] is False
+    assert viewer.panels[1].isHidden()
+
+    viewer.stream_visibility_actions[1].setChecked(True)
+    viewer.set_view_mode("Unified")
+
+    assert viewer.view_mode == "Unified"
+    assert viewer.display_groups == ((11, 22),)
+    assert len(viewer.panels) == 1
+    assert viewer.panels[0].source_ids == (11, 22)
+    assert viewer.layout_controls.isHidden()
+
+    viewer.set_view_mode("Standard")
+
+    assert viewer.display_groups == ((11,), (22,))
+    assert len(viewer.panels) == 2
+
+
+def test_discrete_threshold_uses_held_steps_and_sample_dots(qtbot):
+    """Low-cardinality channels switch between discrete and continuous styles."""
+    discrete = np.tile([0.0, 1.0], 50)
+    continuous = np.linspace(0.0, 1.0, 100)
+    raw = mne.io.RawArray(
+        np.vstack((discrete, continuous)),
+        mne.create_info(["State", "Ramp"], 100.0, ["misc", "misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=1.0, discrete_threshold=3)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    step_x, _step_y = panel._curves[0].getData()
+    line_x, _line_y = panel._curves[1].getData()
+    assert len(step_x) > len(line_x)
+    assert panel._curves[0].opts["symbol"] == "o"
+    assert panel._curves[1].opts["symbol"] is None
+
+    window.discrete_threshold_spin.setValue(2)
+
+    assert window.discrete_threshold == 2
+    assert panel.discrete_threshold == 2
+    assert panel._curves[0].opts["symbol"] is None
 
 
 def test_stream_toggle_filters_a_joined_panel_by_source(viewer):
@@ -824,6 +873,52 @@ def test_overlapping_marker_text_is_packed_into_chronological_rows(qtbot, raw, s
     second = lane._visible_annotations[1]
     assert first[7] > second[6]
     assert first[9] != second[9]
+
+
+def test_dense_marker_streams_cycle_rows_and_receive_distinct_colors(
+    qtbot, raw, streams
+):
+    """Adaptive marker lanes stagger dense labels and color sources consistently."""
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[1.0, 1.01, 1.02, 1.5],
+            duration=[0, 0, 0, 0],
+            description=[
+                "Keyboard â€” first",
+                "Keyboard â€” second",
+                "Keyboard â€” third",
+                "Foot Pedal â€” pressed",
+            ],
+        )
+    )
+    marker_streams = [
+        {"id": 2, "name": "Keyboard", "annotation_prefix": "Keyboard â€” "},
+        {"id": 8, "name": "Foot Pedal", "annotation_prefix": "Foot Pedal â€” "},
+    ]
+    window = StreamViewerWindow(
+        raw, streams=streams, marker_streams=marker_streams, duration=2.0
+    )
+    qtbot.addWidget(window)
+    annotations = window.annotation_stream._visible_annotations
+
+    assert len({annotation[9] for annotation in annotations[:3]}) == 3
+    assert len({annotation[4] for annotation in annotations[:3]}) == 1
+    assert annotations[0][4] != annotations[3][4]
+
+    menu = window.annotation_stream.create_marker_row_menu(0)
+    next(action for action in menu.actions() if action.text() == "2").trigger()
+    annotations = window.annotation_stream._visible_annotations
+
+    assert window.annotation_stream.marker_row_counts == {0: 2}
+    assert window.annotation_stream._lane_row_counts == [2, 1]
+    assert annotations[0][9] == annotations[2][9]
+    assert annotations[0][9] != annotations[1][9]
+
+    menu = window.annotation_stream.create_marker_row_menu(0)
+    next(
+        action for action in menu.actions() if action.text() == "Auto (adaptive)"
+    ).trigger()
+    assert window.annotation_stream.marker_row_counts == {}
 
 
 def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):

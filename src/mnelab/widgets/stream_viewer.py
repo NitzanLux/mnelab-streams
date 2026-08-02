@@ -22,6 +22,7 @@ from PySide6.QtCore import (
     Signal,
 )
 from PySide6.QtGui import (
+    QActionGroup,
     QColor,
     QCursor,
     QDrag,
@@ -36,13 +37,17 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
     QComboBox,
+    QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
+    QFormLayout,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
+    QKeySequenceEdit,
     QLabel,
     QListWidget,
     QListWidgetItem,
@@ -56,6 +61,7 @@ from PySide6.QtWidgets import (
     QSlider,
     QSpinBox,
     QTabWidget,
+    QTextBrowser,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -150,6 +156,38 @@ AUTOMATIC_TRACE_VALUE = 0.95
 ACTIVATION_NAN_COLOR = "#9aa0a6"
 ACTIVATION_AXIS_MIN_WIDTH = 150
 ACTIVATION_AXIS_MAX_WIDTH = 360
+MARKER_ROW_LIMIT = 8
+
+
+def _automatic_color(index):
+    """Return a stable, high-contrast color for a zero-based stream index."""
+    hue = (AUTOMATIC_TRACE_HUE_START + index * AUTOMATIC_TRACE_HUE_STEP) % 1.0
+    color = QColor.fromHsvF(
+        hue,
+        AUTOMATIC_TRACE_SATURATION,
+        AUTOMATIC_TRACE_VALUE,
+    )
+    return color.name()
+
+
+DEFAULT_VIEWER_SHORTCUTS = OrderedDict(
+    (
+        ("Pan left", "Left"),
+        ("Pan right", "Right"),
+        ("Previous page", "Shift+Left"),
+        ("Next page", "Shift+Right"),
+        ("Increase gain", "+"),
+        ("Decrease gain", "-"),
+        ("Zoom in", "Ctrl++"),
+        ("Zoom out", "Ctrl+-"),
+        ("Zoom back", "Ctrl+Z"),
+        ("Zoom forward", "Ctrl+Y"),
+        ("Start", "Home"),
+        ("End", "End"),
+        ("Full screen", "F11"),
+        ("Clear measurement", "Escape"),
+    )
+)
 
 
 def peak_envelope(times, values, max_points):
@@ -181,6 +219,33 @@ def peak_envelope(times, values, max_points):
         x = np.concatenate((x, times[-1:]))
         y = np.concatenate((y, values[-1:]))
     return x, y
+
+
+def discrete_step_trace(times, values, max_points):
+    """Return bounded held-step coordinates and representative sample points."""
+    times = np.asarray(times)
+    values = np.asarray(values)
+    if not len(times):
+        return times, values, times, values
+    changed = np.r_[
+        True,
+        (values[1:] != values[:-1]) | (np.isnan(values[1:]) != np.isnan(values[:-1])),
+    ]
+    change_indices = np.flatnonzero(changed)
+    indices = np.unique(
+        np.clip(
+            np.r_[0, change_indices - 1, change_indices, len(times) - 1],
+            0,
+            len(times) - 1,
+        )
+    )
+    if len(indices) > max_points:
+        indices = indices[np.linspace(0, len(indices) - 1, max_points, dtype=np.int64)]
+    sample_x = times[indices]
+    sample_y = values[indices]
+    step_x = np.repeat(sample_x, 2)[1:]
+    step_y = np.repeat(sample_y, 2)[:-1]
+    return step_x, step_y, sample_x, sample_y
 
 
 def _finite_peak(values):
@@ -999,6 +1064,7 @@ class StreamPanel(QFrame):
         channels_per_page=20,
         event_overlays_visible=True,
         annotation_overlays_visible=True,
+        discrete_threshold=16,
         parent=None,
     ):
         super().__init__(parent)
@@ -1010,6 +1076,7 @@ class StreamPanel(QFrame):
         self.annotation_colors = annotation_colors or {}
         self.event_overlays_visible = bool(event_overlays_visible)
         self.annotation_overlays_visible = bool(annotation_overlays_visible)
+        self.discrete_threshold = max(2, int(discrete_threshold))
         self.selected_annotation_index = None
         self.display_scales = display_scales
         self.channel_settings = channel_settings
@@ -2238,6 +2305,18 @@ class StreamPanel(QFrame):
                 self.plot.plot([], [], pen=pg.mkPen("#4c78a8", width=1))
             )
 
+    def set_discrete_threshold(self, threshold):
+        """Set the unique-value threshold used for held-step rendering."""
+        self.discrete_threshold = max(2, int(threshold))
+        self.redraw(self._visible_start, self._visible_duration)
+
+    def _is_discrete(self, values):
+        """Return whether finite samples contain fewer than the configured values."""
+        finite = np.asarray(values)[np.isfinite(values)]
+        if not finite.size:
+            return False
+        return len(np.unique(finite)) < self.discrete_threshold
+
     def _update_page_controls(self):
         paged = self.page_count > 1
         self.previous_page_button.setVisible(paged)
@@ -2648,9 +2727,22 @@ class StreamPanel(QFrame):
             normalized = (
                 transformed + offsets[index] + settings["offset"] * self._lane_step
             )
-            x, y = peak_envelope(self._times, normalized, max_points)
             color = self._channel_color(name)
-            curve.setData(x, y)
+            if self._is_discrete(values):
+                x, y, _sample_x, _sample_y = discrete_step_trace(
+                    self._times, normalized, max_points
+                )
+                curve.setData(
+                    x,
+                    y,
+                    symbol="o",
+                    symbolSize=4,
+                    symbolPen=pg.mkPen(color),
+                    symbolBrush=pg.mkBrush(color),
+                )
+            else:
+                x, y = peak_envelope(self._times, normalized, max_points)
+                curve.setData(x, y, symbol=None)
             curve.setPen(pg.mkPen(color, width=1))
             curve.show()
 
@@ -2877,6 +2969,8 @@ class AnnotationStream(QFrame):
         self.marker_streams = list(marker_streams or [])
         self.smart_label_layout = bool(smart_label_layout)
         self._lane_specs = self._build_lane_specs()
+        self.marker_row_counts = {}
+        self._lane_row_counts = [1] * len(self._lane_specs)
         self._regions = []
         self._labels = []
         self._last_window = None
@@ -2926,25 +3020,41 @@ class AnnotationStream(QFrame):
         self.plot.showGrid(x=True, y=False, alpha=0.15)
         self.plot.getPlotItem().setClipToView(True)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.plot.setToolTip(
+            "Left-click a marker to select it, or an empty lane to choose its rows"
+        )
         layout.addWidget(self.plot, 1)
 
     def _build_lane_specs(self):
         """Return marker lanes plus a fallback for non-XDF annotations."""
         if len(self.marker_streams) < 2:
-            return [{"name": "Annotations", "annotation_prefix": None}]
+            return [
+                {
+                    "name": "Annotations",
+                    "annotation_prefix": None,
+                    "color": _automatic_color(0),
+                }
+            ]
         lanes = [
             {
                 "name": str(stream["name"]),
                 "annotation_prefix": str(stream["annotation_prefix"]),
+                "color": str(stream.get("color") or _automatic_color(index)),
             }
-            for stream in self.marker_streams
+            for index, stream in enumerate(self.marker_streams)
         ]
         prefixes = tuple(lane["annotation_prefix"] for lane in lanes)
         if any(
             not str(description).startswith(prefixes)
             for description in self.raw.annotations.description
         ):
-            lanes.append({"name": "Other annotations", "annotation_prefix": None})
+            lanes.append(
+                {
+                    "name": "Other annotations",
+                    "annotation_prefix": None,
+                    "color": _automatic_color(len(lanes)),
+                }
+            )
         return lanes
 
     @property
@@ -2995,8 +3105,13 @@ class AnnotationStream(QFrame):
                     or not self.annotation_visible(annotation_index, description)
                 ):
                     continue
-                color = self.annotation_colors.get(description, "#4c78a8")
                 lane_index, display_description = self._annotation_lane(description)
+                # An explicit annotation color wins. Otherwise provenance gives
+                # every marker stream a stable, readily distinguishable color.
+                color = self.annotation_colors.get(
+                    description,
+                    self._lane_specs[lane_index]["color"],
+                )
                 visible_annotations.append(
                     (
                         annotation_index,
@@ -3030,16 +3145,21 @@ class AnnotationStream(QFrame):
                 lane_index,
             ) = annotation
             label = self._labels[index]
-            label.setText(description, color=color)
+            metrics = QFontMetricsF(label.textItem.font())
+            display_text = metrics.elidedText(
+                description,
+                Qt.TextElideMode.ElideRight,
+                max(1, int(plot_width - 16)),
+            )
+            label.setText(display_text, color=color)
+            natural_width = metrics.horizontalAdvance(display_text)
             if self.smart_label_layout:
-                natural_width = QFontMetricsF(label.textItem.font()).horizontalAdvance(
-                    description
-                )
                 text_width = min(
                     plot_width, max(72.0, min(360.0, natural_width + 16.0))
                 )
             else:
-                text_width = min(plot_width, 220.0)
+                # Keep marker text on one line whenever it fits in the plot.
+                text_width = min(plot_width, max(72.0, natural_width + 16.0))
             text_duration = duration * text_width / plot_width
             label_start = max(
                 visible_start,
@@ -3093,13 +3213,63 @@ class AnnotationStream(QFrame):
                         row_ends[row_index] = annotation[7]
                     annotation[9] = row_index
                 lane_row_counts[lane_index] = max(1, len(row_ends))
+        else:
+            # Sparse streams stay on one compact row. Dense streams receive only
+            # as many rows as their cadence needs, and markers cycle through
+            # those rows in chronological top-to-bottom order.
+            for lane_index in range(lane_count):
+                lane_annotations = sorted(
+                    (
+                        annotation
+                        for annotation in placed_annotations
+                        if annotation[5] == lane_index
+                    ),
+                    key=lambda annotation: (annotation[1], annotation[0]),
+                )
+                if len(lane_annotations) < 2:
+                    continue
+                gaps = np.diff([annotation[1] for annotation in lane_annotations])
+                positive_gaps = gaps[gaps > np.finfo(float).eps]
+                if not positive_gaps.size:
+                    required_rows = len(lane_annotations)
+                else:
+                    typical_gap = float(np.median(positive_gaps))
+                    typical_width = float(
+                        np.median(
+                            [
+                                annotation[7] - annotation[6]
+                                for annotation in lane_annotations
+                            ]
+                        )
+                    )
+                    required_rows = int(np.ceil(typical_width / typical_gap))
+                row_count = max(
+                    1,
+                    min(MARKER_ROW_LIMIT, len(lane_annotations), required_rows),
+                )
+                lane_row_counts[lane_index] = row_count
+                for ordinal, annotation in enumerate(lane_annotations):
+                    annotation[9] = ordinal % row_count
+
+        # A manual lane setting takes precedence over both adaptive algorithms.
+        for lane_index, requested_rows in self.marker_row_counts.items():
+            row_count = max(1, int(requested_rows))
+            lane_row_counts[lane_index] = row_count
+            lane_annotations = sorted(
+                (
+                    annotation
+                    for annotation in placed_annotations
+                    if annotation[5] == lane_index
+                ),
+                key=lambda annotation: (annotation[1], annotation[0]),
+            )
+            for ordinal, annotation in enumerate(lane_annotations):
+                annotation[9] = ordinal % row_count
 
         total_rows = sum(lane_row_counts)
+        self._lane_row_counts = lane_row_counts
         self.plot.setYRange(0, total_rows, padding=0)
-        if self.smart_label_layout:
-            height = max(150, min(500, 42 * total_rows + 35))
-        else:
-            height = max(150, min(360, 58 * lane_count + 35))
+        height = max(150, min(500, 42 * total_rows + 35))
         self.plot.setFixedHeight(height)
         for index, row_count in enumerate(lane_row_counts):
             self._label_layout.setStretch(index + 1, row_count)
@@ -3168,12 +3338,88 @@ class AnnotationStream(QFrame):
             _text_width,
             lane_bottom,
         ) in reversed(self._visible_annotations):
-            label_clicked = (
-                self.smart_label_layout and label_start <= time <= label_stop
-            )
+            label_clicked = label_start <= time <= label_stop
             if lane_bottom == row and (start <= time <= stop or label_clicked):
                 self.annotation_clicked.emit(annotation_index)
                 return
+        lane_index = self._lane_at_plot_row(row)
+        if lane_index is not None:
+            self._marker_row_menu = self.create_marker_row_menu(lane_index)
+            self._marker_row_menu.popup(QCursor.pos())
+
+    def _lane_at_plot_row(self, row):
+        """Return the logical top-to-bottom marker lane at a plotted row."""
+        total_rows = sum(self._lane_row_counts)
+        top_rows = 0
+        for lane_index, row_count in enumerate(self._lane_row_counts):
+            lane_bottom = total_rows - top_rows - row_count
+            if lane_bottom <= row < lane_bottom + row_count:
+                return lane_index
+            top_rows += row_count
+        return None
+
+    def create_marker_row_menu(self, lane_index):
+        """Create the row-count menu for one marker stream lane."""
+        lane_index = int(lane_index)
+        if not 0 <= lane_index < len(self._lane_specs):
+            raise IndexError("Marker lane index is out of range.")
+        menu = QMenu(self)
+        heading = menu.addAction(f"{self._lane_specs[lane_index]['name']} rows")
+        heading.setEnabled(False)
+        menu.addSeparator()
+        current = self.marker_row_counts.get(lane_index, 0)
+        choices = QActionGroup(menu)
+        choices.setExclusive(True)
+        for row_count, text in [(0, "Auto (adaptive)")] + [
+            (count, str(count)) for count in range(1, 13)
+        ]:
+            action = menu.addAction(text)
+            action.setCheckable(True)
+            action.setChecked(current == row_count)
+            choices.addAction(action)
+            action.triggered.connect(
+                lambda _checked=False, lane_index=lane_index, row_count=row_count: (
+                    self.set_marker_row_count(lane_index, row_count)
+                )
+            )
+        menu.addSeparator()
+        custom = menu.addAction("Custom...")
+        custom.triggered.connect(
+            lambda _checked=False, lane_index=lane_index: (
+                self._choose_custom_marker_rows(lane_index)
+            )
+        )
+        return menu
+
+    def _choose_custom_marker_rows(self, lane_index):
+        current = self.marker_row_counts.get(
+            lane_index, self._lane_row_counts[lane_index]
+        )
+        rows, accepted = QInputDialog.getInt(
+            self,
+            "Marker rows",
+            f"Rows for {self._lane_specs[lane_index]['name']}:",
+            current,
+            1,
+            32,
+        )
+        if accepted:
+            self.set_marker_row_count(lane_index, rows)
+
+    def set_marker_row_count(self, lane_index, row_count):
+        """Set a fixed row count for a marker lane, or zero for Auto."""
+        lane_index = int(lane_index)
+        row_count = int(row_count)
+        if not 0 <= lane_index < len(self._lane_specs):
+            raise IndexError("Marker lane index is out of range.")
+        if not 0 <= row_count <= 32:
+            raise ValueError("Marker row count must be between 0 and 32.")
+        if row_count:
+            self.marker_row_counts[lane_index] = row_count
+        else:
+            self.marker_row_counts.pop(lane_index, None)
+        if self._last_window is not None:
+            self.refresh(*self._last_window)
 
     def set_smart_label_layout(self, enabled):
         """Enable or disable collision-aware marker-label placement."""
@@ -3452,6 +3698,9 @@ class StreamViewerWindow(QMainWindow):
         annotation_colors=None,
         duration=10.0,
         max_channels=20,
+        discrete_threshold=16,
+        view_mode="Standard",
+        shortcuts=None,
         dataset_id=None,
         title=None,
         parent=None,
@@ -3471,8 +3720,10 @@ class StreamViewerWindow(QMainWindow):
         self._stream_visibility = {stream["id"]: True for stream in self.source_streams}
         self.marker_streams = list(marker_streams or [])
         self.events = events
-        self.annotation_colors = annotation_colors or {}
+        self.annotation_colors = dict(annotation_colors or {})
+        self._add_marker_stream_colors()
         self.max_channels = max(1, int(max_channels))
+        self.discrete_threshold = max(2, int(discrete_threshold))
         self._groups = [[stream] for stream in self.source_streams]
         self._settings = {
             (stream["id"],): {"unit": "Auto", "gain": 1.0}
@@ -3510,15 +3761,17 @@ class StreamViewerWindow(QMainWindow):
         self._zoom_history = []
         self._zoom_forward = []
         self._navigation_shortcuts = []
-        for sequence, callback in (
-            (QKeySequence("Ctrl+Z"), self.zoom_back),
-            (QKeySequence("Ctrl+Y"), self.zoom_forward),
-            (QKeySequence("Ctrl+Shift+Z"), self.zoom_forward),
-        ):
-            shortcut = QShortcut(sequence, self)
-            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
-            shortcut.activated.connect(callback)
-            self._navigation_shortcuts.append(shortcut)
+        self.shortcut_sequences = dict(DEFAULT_VIEWER_SHORTCUTS)
+        if shortcuts:
+            self.shortcut_sequences.update(
+                {
+                    name: str(sequence)
+                    for name, sequence in shortcuts.items()
+                    if name in DEFAULT_VIEWER_SHORTCUTS and str(sequence)
+                }
+            )
+        self._view_mode = "Standard"
+        self._groups_before_unified = None
         self._pending_slider_value = None
         self._navigation_timer = QTimer(self)
         self._navigation_timer.setSingleShot(True)
@@ -3554,10 +3807,33 @@ class StreamViewerWindow(QMainWindow):
             )
             self.stream_list.addItem(item)
         self.stream_list.itemChanged.connect(self._stream_item_changed)
+
+        self.viewer_settings = QWidget()
+        viewer_settings_layout = QVBoxLayout(self.viewer_settings)
+        viewer_settings_layout.setContentsMargins(8, 8, 8, 8)
+        threshold_label = QLabel("Discrete values:")
+        threshold_label.setWordWrap(True)
+        viewer_settings_layout.addWidget(threshold_label)
+        self.discrete_threshold_spin = QSpinBox()
+        self.discrete_threshold_spin.setRange(2, 10000)
+        self.discrete_threshold_spin.setValue(self.discrete_threshold)
+        self.discrete_threshold_spin.setToolTip(
+            "A channel with fewer unique values is drawn as held steps with dots"
+        )
+        self.discrete_threshold_spin.valueChanged.connect(self.set_discrete_threshold)
+        viewer_settings_layout.addWidget(self.discrete_threshold_spin)
+        viewer_settings_note = QLabel(
+            "Signals below this number of unique values are shown without "
+            "interpolation. Use 2 to classify only constant-valued signals."
+        )
+        viewer_settings_note.setWordWrap(True)
+        viewer_settings_layout.addWidget(viewer_settings_note)
+        viewer_settings_layout.addStretch()
         self.sidebar_tabs = QTabWidget()
         self.sidebar_tabs.setObjectName("streamViewerSidebarTabs")
         self.sidebar_tabs.addTab(self.annotation_sidebar, "Annotations")
         self.sidebar_tabs.addTab(self.stream_list, "Streams")
+        self.sidebar_tabs.addTab(self.viewer_settings, "Settings")
         self.annotation_dock = QDockWidget("Annotations", self)
         self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
         self.annotation_dock.setAllowedAreas(
@@ -3718,16 +3994,50 @@ class StreamViewerWindow(QMainWindow):
 
         self._rebuild_panels()
         self._create_view_menu()
+        self._create_help_menu()
+        self._install_viewer_shortcuts()
         self._sync_navigation()
+        self.set_view_mode(view_mode)
         self.refresh()
         self._display_montage_path = None
         self._display_montage_baseline = self.display_montage_state()
         self._default_display_montage = deepcopy(self._display_montage_baseline)
         self._create_display_montage_menu()
 
+    def _add_marker_stream_colors(self):
+        """Fill unspecified annotation colors from their marker-stream origin."""
+        if len(self.marker_streams) < 2 or not hasattr(self.raw, "annotations"):
+            return
+        streams = [
+            (
+                str(stream.get("annotation_prefix", "")),
+                str(stream.get("color") or _automatic_color(index)),
+            )
+            for index, stream in enumerate(self.marker_streams)
+        ]
+        for description in self.raw.annotations.description:
+            description = str(description)
+            for prefix, color in streams:
+                if prefix and description.startswith(prefix):
+                    self.annotation_colors.setdefault(description, color)
+                    break
+
     def _create_view_menu(self):
         """Add optional plot interaction and marker-layout controls."""
         menu = self.menuBar().addMenu("&View")
+        streams_menu = menu.addMenu("Visible &Streams")
+        self.stream_visibility_actions = []
+        for index, stream in enumerate(self.source_streams):
+            action = streams_menu.addAction(str(stream["name"]))
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.toggled.connect(
+                lambda checked, index=index: self._set_stream_visible_from_action(
+                    index, checked
+                )
+            )
+            self.stream_visibility_actions.append(action)
+        menu.addSeparator()
         self.crosshair_action = menu.addAction("&Crosshair")
         self.crosshair_action.setCheckable(True)
         self.crosshair_action.setChecked(False)
@@ -3747,7 +4057,232 @@ class StreamViewerWindow(QMainWindow):
         smart_labels.toggled.connect(self.annotation_stream.set_smart_label_layout)
         self.view_actions = {"smart_marker_labels": smart_labels}
         menu.addSeparator()
+        self.stream_controls_action = menu.addAction("Stream &Controls")
+        self.stream_controls_action.setCheckable(True)
+        self.stream_controls_action.setChecked(True)
+        self.stream_controls_action.toggled.connect(self._set_stream_controls_visible)
+        self.channel_lists_action = menu.addAction("&Channel Menus")
+        self.channel_lists_action.setCheckable(True)
+        self.channel_lists_action.setChecked(True)
+        self.channel_lists_action.toggled.connect(self._set_channel_lists_visible)
+        self.event_overlays_action = menu.addAction("&Event Overlays")
+        self.event_overlays_action.setCheckable(True)
+        self.event_overlays_action.setChecked(True)
+        self.event_overlays_action.toggled.connect(self._set_event_overlays_visible)
+        self.annotation_overlays_action = menu.addAction("&Annotation Overlays")
+        self.annotation_overlays_action.setCheckable(True)
+        self.annotation_overlays_action.setChecked(True)
+        self.annotation_overlays_action.toggled.connect(
+            self._set_annotation_overlays_visible
+        )
+        self.marker_timeline_action = menu.addAction("Marker &Timeline")
+        self.marker_timeline_action.setCheckable(True)
+        self.marker_timeline_action.setChecked(True)
+        self.marker_timeline_action.toggled.connect(self._set_marker_timeline_visible)
+        menu.addSeparator()
+        layout_menu = menu.addMenu("Trace &Layout")
+        self.layout_action_group = QActionGroup(self)
+        self.layout_action_group.setExclusive(True)
+        self.layout_mode_actions = {}
+        for mode in ("Standard", "Tight", "Unified"):
+            action = layout_menu.addAction(mode)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda _checked=False, mode=mode: self.set_view_mode(mode)
+            )
+            self.layout_action_group.addAction(action)
+            self.layout_mode_actions[mode] = action
+        self.layout_mode_actions[self._view_mode].setChecked(True)
+        menu.addSeparator()
         menu.addAction("Activation &Map…", self.show_activation_map)
+
+    def _set_stream_visible_from_action(self, index, visible):
+        """Mirror a View-menu stream toggle into the stream browser."""
+        item = self.stream_list.item(int(index))
+        if item is None:
+            return
+        state = Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
+        if item.checkState() != state:
+            item.setCheckState(state)
+
+    def set_view_mode(self, mode):
+        """Apply Standard, Tight, or Unified trace-view layout."""
+        mode = str(mode).title()
+        # Preserve layouts saved while this option was named Compact.
+        if mode == "Compact":
+            mode = "Tight"
+        if mode not in {"Standard", "Tight", "Unified"}:
+            mode = "Standard"
+        old_mode = self._view_mode
+        if mode == old_mode:
+            if hasattr(self, "layout_mode_actions"):
+                self.layout_mode_actions[mode].setChecked(True)
+            return
+        self._view_mode = mode
+        if mode == "Unified" and old_mode != "Unified":
+            self._groups_before_unified = deepcopy(self._groups)
+            if not isinstance(self.raw, NativeXDFRecording):
+                self._groups = [list(self.source_streams)]
+            self._columns = 1
+            self._rebuild_panels(preserve_floating=False)
+        elif old_mode == "Unified" and mode != "Unified":
+            self._groups = self._groups_before_unified or [
+                [stream] for stream in self.source_streams
+            ]
+            self._groups_before_unified = None
+            self._rebuild_panels(preserve_floating=False)
+        tight = mode in {"Tight", "Unified"}
+        self.layout_controls.setVisible(not tight)
+        self.panel_layout.setSpacing(0 if mode == "Unified" else 6)
+        for panel in self.panels:
+            margins = (2, 2, 2, 2) if tight else (6, 4, 6, 6)
+            panel.layout().setContentsMargins(*margins)
+            panel.layout().setSpacing(2 if tight else 4)
+        if hasattr(self, "layout_mode_actions"):
+            self.layout_mode_actions[mode].setChecked(True)
+        self._reflow_panels()
+        self.refresh()
+
+    @property
+    def view_mode(self):
+        return self._view_mode
+
+    def _create_help_menu(self):
+        """Add discoverable viewer documentation and shortcut editing."""
+        menu = self.menuBar().addMenu("&Help")
+        menu.addAction("Plot Traces &Help...", self.show_help)
+
+    def _shortcut_callbacks(self):
+        return {
+            "Pan left": lambda: self.set_start_time(
+                self._start_time - self._duration * 0.25
+            ),
+            "Pan right": lambda: self.set_start_time(
+                self._start_time + self._duration * 0.25
+            ),
+            "Previous page": lambda: self.set_start_time(
+                self._start_time - self._duration
+            ),
+            "Next page": lambda: self.set_start_time(self._start_time + self._duration),
+            "Increase gain": lambda: self._change_visible_gain(AMPLITUDE_STEP),
+            "Decrease gain": lambda: self._change_visible_gain(1.0 / AMPLITUDE_STEP),
+            "Zoom in": lambda: self.zoom_time(0.5),
+            "Zoom out": lambda: self.zoom_time(2.0),
+            "Zoom back": self.zoom_back,
+            "Zoom forward": self.zoom_forward,
+            "Start": lambda: self.set_start_time(0),
+            "End": lambda: self.set_start_time(self.max_start),
+            "Full screen": lambda: (
+                self.showNormal() if self.isFullScreen() else self.showFullScreen()
+            ),
+            "Clear measurement": self._clear_measurements,
+        }
+
+    def _change_visible_gain(self, factor):
+        targets = [panel for panel in self.panels if panel.selected.isChecked()]
+        for panel in targets or self.panels:
+            panel.change_amplitude(factor)
+
+    def _install_viewer_shortcuts(self):
+        for shortcut in self._navigation_shortcuts:
+            shortcut.setParent(None)
+            shortcut.deleteLater()
+        self._navigation_shortcuts = []
+        callbacks = self._shortcut_callbacks()
+        for name, callback in callbacks.items():
+            sequence = self.shortcut_sequences.get(name, "")
+            if not sequence:
+                continue
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+            shortcut.activated.connect(callback)
+            self._navigation_shortcuts.append(shortcut)
+        # Keep the common alternate redo spelling without cluttering the editor.
+        redo_alias = QShortcut(QKeySequence("Ctrl+Shift+Z"), self)
+        redo_alias.setContext(Qt.ShortcutContext.WindowShortcut)
+        redo_alias.activated.connect(self.zoom_forward)
+        self._navigation_shortcuts.append(redo_alias)
+
+    def _shortcut_edited(self, name, sequence):
+        text = sequence.toString(QKeySequence.SequenceFormat.PortableText)
+        if not text:
+            return
+        self.shortcut_sequences[name] = text
+        self._install_viewer_shortcuts()
+        try:
+            from mnelab.settings import write_settings
+
+            write_settings(trace_shortcuts=self.shortcut_sequences)
+        except Exception:
+            # Live customization remains useful if platform settings are read-only.
+            pass
+
+    def _restore_default_shortcuts(self):
+        self.shortcut_sequences = dict(DEFAULT_VIEWER_SHORTCUTS)
+        self._install_viewer_shortcuts()
+        for name, editor in self.shortcut_editors.items():
+            editor.blockSignals(True)
+            editor.setKeySequence(QKeySequence(self.shortcut_sequences[name]))
+            editor.blockSignals(False)
+        try:
+            from mnelab.settings import write_settings
+
+            write_settings(trace_shortcuts={})
+        except Exception:
+            pass
+
+    def show_help(self):
+        """Show a reusable tabbed guide with live-editable shortcuts."""
+        dialog = getattr(self, "help_dialog", None)
+        if dialog is not None:
+            dialog.show()
+            dialog.raise_()
+            return
+        dialog = QDialog(self)
+        dialog.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dialog.setWindowTitle("Plot Traces Help")
+        dialog.resize(720, 560)
+        outer = QVBoxLayout(dialog)
+        tabs = QTabWidget()
+        guide = QTextBrowser()
+        guide.setHtml(
+            "<h2>Plot Traces</h2>"
+            "<p><b>Streams</b> - use View -&gt; Visible Streams or the Streams "
+            "side tab to hide a complete source without changing the data.</p>"
+            "<p><b>Channels</b> - click a channel name to hide it, drag names "
+            "to reorder, and right-click for display options.</p>"
+            "<p><b>Navigation</b> - drag to zoom, Shift-drag to measure, "
+            "middle-drag to pan, and use the wheel to move through time.</p>"
+            "<p><b>Markers</b> - each marker source has its own color and lane; "
+            "dense labels stagger into adaptive rows. Left-click an empty part "
+            "of a marker lane to choose Auto or a fixed row count.</p>"
+            "<p><b>Layouts</b> - Standard keeps separate stream panels, Tight "
+            "reduces chrome, and Unified places every source in one plot.</p>"
+        )
+        tabs.addTab(guide, "Functionality")
+        shortcut_page = QWidget()
+        form = QFormLayout(shortcut_page)
+        self.shortcut_editors = {}
+        for name, sequence in self.shortcut_sequences.items():
+            editor = QKeySequenceEdit(QKeySequence(sequence))
+            editor.keySequenceChanged.connect(
+                lambda value, name=name: self._shortcut_edited(name, value)
+            )
+            form.addRow(f"{name}:", editor)
+            self.shortcut_editors[name] = editor
+        restore = QPushButton("Restore Default Shortcuts")
+        restore.clicked.connect(self._restore_default_shortcuts)
+        form.addRow("", restore)
+        tabs.addTab(shortcut_page, "Shortcuts")
+        outer.addWidget(tabs)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(dialog.close)
+        outer.addWidget(buttons)
+        dialog.destroyed.connect(
+            lambda _object=None: setattr(self, "help_dialog", None)
+        )
+        self.help_dialog = dialog
+        dialog.show()
 
     def _set_crosshair_visible(self, visible):
         """Apply the crosshair option to attached and floating signal panels."""
@@ -4212,6 +4747,11 @@ class StreamViewerWindow(QMainWindow):
             return
         stream = self.source_streams[int(index)]
         visible = item.checkState() == Qt.CheckState.Checked
+        if hasattr(self, "stream_visibility_actions"):
+            action = self.stream_visibility_actions[int(index)]
+            action.blockSignals(True)
+            action.setChecked(visible)
+            action.blockSignals(False)
         if self._stream_visibility.get(stream["id"], True) == visible:
             return
         affected_panels = [
@@ -4226,6 +4766,22 @@ class StreamViewerWindow(QMainWindow):
             panel._update_page_controls()
         self._reflow_panels()
         self.refresh()
+
+    def set_discrete_threshold(self, threshold):
+        """Apply the discrete unique-value threshold to every trace panel."""
+        self.discrete_threshold = max(2, int(threshold))
+        if self.discrete_threshold_spin.value() != self.discrete_threshold:
+            self.discrete_threshold_spin.blockSignals(True)
+            self.discrete_threshold_spin.setValue(self.discrete_threshold)
+            self.discrete_threshold_spin.blockSignals(False)
+        for panel in self.panels:
+            panel.set_discrete_threshold(self.discrete_threshold)
+        try:
+            from mnelab.settings import write_settings
+
+            write_settings(trace_discrete_threshold=self.discrete_threshold)
+        except Exception:
+            pass
 
     def _center_on_annotation(self, onset):
         """Center a selected whole-recording annotation in the shared view."""
@@ -4364,9 +4920,14 @@ class StreamViewerWindow(QMainWindow):
                 unit=settings["unit"],
                 gain=settings["gain"],
                 channel_order=settings.get("channel_order"),
-                channels_per_page=self.max_channels,
+                channels_per_page=(
+                    sum(len(stream["channel_names"]) for stream in group)
+                    if self._view_mode == "Unified"
+                    else self.max_channels
+                ),
                 event_overlays_visible=self._event_overlays_visible,
                 annotation_overlays_visible=self._annotation_overlays_visible,
+                discrete_threshold=self.discrete_threshold,
                 parent=self.panel_container,
             )
             panel.selected_annotation_index = self._selected_annotation_index

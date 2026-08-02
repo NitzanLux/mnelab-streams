@@ -64,6 +64,9 @@ _DEFAULTS = {
     "annotation_colors": {},
     "memory_saving": False,
     "scalings": "auto",
+    "trace_viewer_layout": "Standard",
+    "trace_discrete_threshold": 16,
+    "trace_shortcuts": {},
     "toolbar_actions": [
         "open_file",
         "---",
@@ -82,7 +85,7 @@ _DEFAULTS = {
     ],
 }
 
-_JSON_KEYS = {"annotation_colors", "toolbar_actions"}
+_JSON_KEYS = {"annotation_colors", "toolbar_actions", "trace_shortcuts"}
 
 
 def _get_value(key):
@@ -246,6 +249,31 @@ class SettingsDialog(QDialog):
         self.scalings.setCurrentText(read_settings("scalings").title())
         plotting_form.addRow("Channel Scaling:", self.scalings)
 
+        self.trace_viewer_layout = QComboBox()
+        self.trace_viewer_layout.addItems(["Standard", "Tight", "Unified"])
+        layout_mode = read_settings("trace_viewer_layout").title()
+        if layout_mode == "Compact":
+            layout_mode = "Tight"
+        if self.trace_viewer_layout.findText(layout_mode) < 0:
+            layout_mode = _DEFAULTS["trace_viewer_layout"]
+        self.trace_viewer_layout.setCurrentText(layout_mode)
+        self.trace_viewer_layout.setToolTip(
+            "Default arrangement used when Plot Traces opens"
+        )
+        plotting_form.addRow("Trace Viewer Layout:", self.trace_viewer_layout)
+
+        self.trace_discrete_threshold = FlatSpinBox()
+        self.trace_discrete_threshold.setRange(2, 10000)
+        self.trace_discrete_threshold.setValue(
+            read_settings("trace_discrete_threshold")
+        )
+        self.trace_discrete_threshold.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.trace_discrete_threshold.setFixedWidth(100)
+        self.trace_discrete_threshold.setToolTip(
+            "Channels with fewer unique values use held steps and sample dots"
+        )
+        plotting_form.addRow("Discrete Value Threshold:", self.trace_discrete_threshold)
+
         self._stack.addWidget(plotting_page)
 
         # Toolbar page
@@ -392,6 +420,8 @@ class SettingsDialog(QDialog):
             menu_icons=self.menu_icons.isChecked(),
             memory_saving=self.memory_saving.isChecked(),
             scalings=self.scalings.currentText().lower(),
+            trace_viewer_layout=self.trace_viewer_layout.currentText(),
+            trace_discrete_threshold=self.trace_discrete_threshold.value(),
             toolbar_actions=toolbar_keys,
         )
         self.parent().recent = self.parent().recent[: read_settings("max_recent")]
@@ -411,6 +441,8 @@ class SettingsDialog(QDialog):
             self.plot_backend.findText(_DEFAULTS["plot_backend"])
         )
         self.scalings.setCurrentText(_DEFAULTS["scalings"].title())
+        self.trace_viewer_layout.setCurrentText(_DEFAULTS["trace_viewer_layout"])
+        self.trace_discrete_threshold.setValue(_DEFAULTS["trace_discrete_threshold"])
         self.parent().resize(_DEFAULTS["size"])
         self.parent().move(_DEFAULTS["pos"])
         self.parent().recent = []
