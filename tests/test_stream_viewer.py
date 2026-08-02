@@ -11,7 +11,7 @@ import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QDockWidget, QMessageBox
+from PySide6.QtWidgets import QDockWidget, QInputDialog, QMessageBox
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
@@ -20,7 +20,6 @@ from mnelab.widgets.stream_viewer import (
     ACTIVATION_AXIS_MIN_WIDTH,
     ACTIVATION_NAN_COLOR,
     CHANNEL_LABEL_WIDTH,
-    CHANNEL_LANE_HEIGHT,
     CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
     ActivationMapWindow,
@@ -263,36 +262,34 @@ def test_annotation_dock_cannot_float(viewer):
     assert not features & QDockWidget.DockWidgetFeature.DockWidgetFloatable
 
 
-def test_streams_tab_defaults_on_and_toggles_source_traces(viewer):
-    """The Streams tab lists every source and displays each one by default."""
+def test_plot_traces_menus_are_organized_and_streams_default_on(viewer):
+    """Streams and settings are top-level menus, outside the annotation dock."""
     assert [
-        viewer.sidebar_tabs.tabText(index)
-        for index in range(viewer.sidebar_tabs.count())
-    ] == ["Annotations", "Streams", "Settings"]
-    assert viewer.stream_list.count() == 2
-    assert [
-        viewer.stream_list.item(index).checkState()
-        for index in range(viewer.stream_list.count())
-    ] == [Qt.CheckState.Checked, Qt.CheckState.Checked]
+        action.text().replace("&", "") for action in viewer.menuBar().actions()
+    ] == ["View", "Streams", "Settings", "Montage", "Help"]
+    assert viewer.annotation_dock.widget() is viewer.annotation_sidebar
+    assert [action.isChecked() for action in viewer.stream_visibility_actions] == [
+        True,
+        True,
+    ]
     assert all(panel.isVisibleTo(viewer.panel_container) for panel in viewer.panels)
 
-    viewer.stream_list.item(1).setCheckState(Qt.CheckState.Unchecked)
+    viewer.stream_visibility_actions[1].setChecked(False)
 
     assert viewer.panels[0].isVisibleTo(viewer.panel_container)
     assert viewer.panels[1].isHidden()
     assert viewer.panels[1].visible_channel_names == []
 
-    viewer.stream_list.item(1).setCheckState(Qt.CheckState.Checked)
+    viewer.stream_visibility_actions[1].setChecked(True)
 
     assert viewer.panels[1].isVisibleTo(viewer.panel_container)
     assert viewer.panels[1].visible_channel_names == ["Audio L"]
 
 
 def test_view_menu_stream_toggles_and_unified_layout_stay_interactive(viewer):
-    """View-menu toggles mirror the browser and unified mode keeps all sources."""
+    """Top-level stream toggles and unified mode keep all sources interactive."""
     viewer.stream_visibility_actions[1].setChecked(False)
 
-    assert viewer.stream_list.item(1).checkState() == Qt.CheckState.Unchecked
     assert viewer._stream_visibility[22] is False
     assert viewer.panels[1].isHidden()
 
@@ -311,7 +308,50 @@ def test_view_menu_stream_toggles_and_unified_layout_stay_interactive(viewer):
     assert len(viewer.panels) == 2
 
 
-def test_discrete_threshold_uses_held_steps_and_sample_dots(qtbot):
+def test_tight_layout_combines_streams_with_side_and_channel_controls(viewer):
+    """Tight mode puts every trace in one figure without losing selectors."""
+    viewer.set_view_mode("Tight")
+
+    assert viewer.view_mode == "Tight"
+    assert viewer.display_groups == ((11, 22),)
+    assert len(viewer.panels) == 1
+    assert viewer.panels[0].visible_channel_names == [
+        "EEG A",
+        "EEG B",
+        "Audio L",
+    ]
+    assert viewer.tight_stream_sidebar.isVisibleTo(viewer.trace_workspace)
+    panel = viewer.panels[0]
+    assert panel.channel_list.isVisibleTo(panel)
+    assert panel.tight_display_controls.isVisibleTo(panel)
+    for control in (
+        panel.unit_combo,
+        panel.amplitude,
+        panel.fit_to_pane_button,
+        panel.zero_offset_button,
+    ):
+        assert control.parentWidget() is panel.tight_display_controls
+    assert viewer.layout_controls.isHidden()
+
+    viewer.tight_stream_buttons[1].setChecked(False)
+
+    assert not viewer.stream_visibility_actions[1].isChecked()
+    assert viewer.panels[0].visible_channel_names == ["EEG A", "EEG B"]
+
+    viewer.set_view_mode("Standard")
+
+    assert viewer.display_groups == ((11,), (22,))
+    assert len(viewer.panels) == 2
+    assert viewer.tight_stream_sidebar.isHidden()
+    for panel in viewer.panels:
+        assert panel.tight_display_controls.isHidden()
+        assert panel.unit_combo.parentWidget() is panel.header_widget
+        assert panel.amplitude.parentWidget() is panel.header_widget
+        assert panel.fit_to_pane_button.parentWidget() is panel.header_widget
+        assert panel.zero_offset_button.parentWidget() is panel.header_widget
+
+
+def test_discrete_threshold_uses_held_steps_and_sample_dots(qtbot, monkeypatch):
     """Low-cardinality channels switch between discrete and continuous styles."""
     discrete = np.tile([0.0, 1.0], 50)
     continuous = np.linspace(0.0, 1.0, 100)
@@ -330,11 +370,32 @@ def test_discrete_threshold_uses_held_steps_and_sample_dots(qtbot):
     assert panel._curves[0].opts["symbol"] == "o"
     assert panel._curves[1].opts["symbol"] is None
 
-    window.discrete_threshold_spin.setValue(2)
+    monkeypatch.setattr(QInputDialog, "getInt", lambda *args: (2, True))
+    window.discrete_threshold_action.trigger()
 
     assert window.discrete_threshold == 2
     assert panel.discrete_threshold == 2
     assert panel._curves[0].opts["symbol"] is None
+
+
+def test_discrete_classification_uses_the_whole_channel_trace(qtbot):
+    """Values outside the visible window determine the channel's plot style."""
+    values = np.concatenate((np.tile([0.0, 1.0], 51), np.arange(102, 200)))
+    raw = mne.io.RawArray(
+        values[np.newaxis],
+        mne.create_info(["State"], 100.0, ["misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=1.0, discrete_threshold=3)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    assert set(np.unique(panel._values[0])) == {0.0, 1.0}
+    assert panel._curves[0].opts["symbol"] is None
+
+    window.set_discrete_threshold(101)
+
+    assert panel._curves[0].opts["symbol"] == "o"
 
 
 def test_stream_toggle_filters_a_joined_panel_by_source(viewer):
@@ -343,7 +404,7 @@ def test_stream_toggle_filters_a_joined_panel_by_source(viewer):
         panel.selected.setChecked(True)
     viewer.join_selected()
 
-    viewer.stream_list.item(0).setCheckState(Qt.CheckState.Unchecked)
+    viewer.stream_visibility_actions[0].setChecked(False)
 
     assert len(viewer.panels) == 1
     assert viewer.panels[0].isVisibleTo(viewer.panel_container)
@@ -785,6 +846,26 @@ def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
     assert label.pos().x() == pytest.approx(8.0)
 
 
+def test_annotation_stream_height_does_not_follow_visible_marker_count(viewer, raw):
+    """Dense marker windows add internal rows without resizing the timeline."""
+    timeline = viewer.annotation_stream
+    fixed_height = timeline.plot.height()
+    raw.set_annotations(
+        mne.Annotations(
+            onset=np.linspace(1.0, 1.07, 8),
+            duration=np.zeros(8),
+            description=[f"Dense marker {index}" for index in range(8)],
+        )
+    )
+
+    timeline.refresh(0.0, 2.0)
+
+    assert timeline._lane_row_counts == [8]
+    assert timeline.plot.height() == fixed_height
+    assert timeline.plot.minimumHeight() == fixed_height
+    assert timeline.plot.maximumHeight() == fixed_height
+
+
 def test_multiple_xdf_marker_streams_use_separate_named_lanes(qtbot, raw, streams):
     """Marker provenance controls lane labels, text, and vertical placement."""
     raw.set_annotations(
@@ -950,6 +1031,35 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     np.testing.assert_array_equal(
         raw.annotations.description, annotations_before.description
     )
+
+
+def test_annotation_type_filter_has_clear_action_and_grouped_sections(viewer):
+    """Type filtering clears directly and is visually separated from results."""
+    sidebar = viewer.annotation_sidebar
+
+    assert sidebar.filter_group.title() == "Filter"
+    assert sidebar.results_group.title() == "Annotations"
+    assert sidebar.type_combo.currentIndex() == -1
+    assert [
+        sidebar.type_combo.itemText(index)
+        for index in range(sidebar.type_combo.count())
+    ] == ["Outside", "Visible"]
+    assert not sidebar.clear_type_button.isEnabled()
+
+    sidebar.type_combo.setCurrentText("Visible")
+
+    assert sidebar.list.count() == 1
+    assert sidebar.clear_type_button.isEnabled()
+
+    sidebar.clear_type_button.click()
+
+    assert sidebar.type_combo.currentIndex() == -1
+    assert sidebar.list.count() == 2
+    assert not sidebar.clear_type_button.isEnabled()
+
+    sidebar.set_state({"type": "All types"})
+    assert sidebar.type_combo.currentIndex() == -1
+    assert sidebar.list.count() == 2
 
 
 def test_annotation_browser_suppresses_and_restores_individual_annotations(viewer, raw):
@@ -1430,6 +1540,7 @@ def test_zero_offset_removes_dc_before_amplitude_scaling(qtbot):
     window = StreamViewerWindow(raw, duration=1.0)
     qtbot.addWidget(window)
     panel = window.panels[0]
+    panel.use_raw_scale()
     original = raw.get_data().copy()
 
     _, before = panel._curves[0].getData()
@@ -1476,36 +1587,6 @@ def test_hidden_channel_remains_restorable_and_is_not_fetched(viewer, raw):
     assert panel.visible_channel_names == ["EEG A", "EEG B"]
     assert panel.channel_list.count() == 2
     assert panel._axis_channels == ("EEG A", "EEG B")
-
-
-def test_hiding_channel_reduces_stream_plot_by_one_lane(viewer):
-    """Hiding and restoring a channel removes and restores its plot lane."""
-    panel = viewer.panels[0]
-    initial_height = panel.plot.height()
-
-    panel.set_channel_visible("EEG A", False)
-
-    assert panel.plot.height() == initial_height - CHANNEL_LANE_HEIGHT
-
-    panel.set_channel_visible("EEG A", True)
-
-    assert panel.plot.height() == initial_height
-
-
-def test_each_stream_has_independent_drag_resize_handle(viewer):
-    """A panel's bottom grip resizes only that stream plot."""
-    first, second = viewer.panels
-    first_height = first.plot.height()
-    second_height = second.plot.height()
-    first_hint = first.sizeHint().height()
-
-    first.resize_handle.resize_requested.emit(47)
-
-    assert first.plot.height() == first_height + 47
-    assert first.sizeHint().height() == first_hint + 47
-    assert second.plot.height() == second_height
-    assert first.resize_handle.cursor().shape() == Qt.CursorShape.SizeVerCursor
-    assert "Drag to resize" in first.resize_handle.toolTip()
 
 
 def test_swap_selected_exchanges_panel_locations(viewer):
@@ -2156,6 +2237,34 @@ def test_fit_to_pane_scales_every_lane_independently(qtbot):
     assert len(window._channel_fits) == channel_count
 
 
+def test_traces_start_in_full_signal_standard_deviation_units(qtbot):
+    """Initial per-trace transforms use every sample, not just the first view."""
+    values = np.vstack(
+        (
+            np.arange(10, dtype=float),
+            100.0 + 4.0 * np.arange(10, dtype=float),
+        )
+    )
+    raw = mne.io.RawArray(
+        values,
+        mne.create_info(["First", "Second"], 2.0, ["misc", "misc"]),
+        verbose=False,
+    )
+    window = StreamViewerWindow(raw, duration=2.0)
+    qtbot.addWidget(window)
+    panel = window.panels[0]
+
+    assert window._channel_fits["First"] == pytest.approx(
+        {"center": np.mean(values[0]), "scale": np.std(values[0])}
+    )
+    assert window._channel_fits["Second"] == pytest.approx(
+        {"center": np.mean(values[1]), "scale": np.std(values[1])}
+    )
+    assert panel.amplitude.minimum() == pytest.approx(0.000001)
+    assert panel.amplitude.decimals() == 6
+    assert panel.amplitude.singleStep() == pytest.approx(0.000001)
+
+
 def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
     """Navigation preserves scale until Fit uses the currently cached samples."""
     sfreq = 100.0
@@ -2170,6 +2279,7 @@ def test_fit_to_pane_uses_only_the_current_time_window(qtbot):
     window = StreamViewerWindow(raw, duration=2.0)
     qtbot.addWidget(window)
     panel = window.panels[0]
+    panel.use_raw_scale()
     source_id = panel.source_ids[0]
     initial_scale = window._display_scales[source_id]
 
@@ -2215,6 +2325,7 @@ def test_raw_and_fit_buttons_switch_and_show_scale_mode(qtbot):
     window = StreamViewerWindow(raw, duration=0.5)
     qtbot.addWidget(window)
     panel = window.panels[0]
+    panel.use_raw_scale()
 
     assert panel.raw_scale_button.isChecked()
     assert not panel.fit_to_pane_button.isChecked()
@@ -2245,6 +2356,7 @@ def test_scale_mode_shows_mixed_after_single_channel_fit(qtbot):
     window = StreamViewerWindow(raw, duration=0.5)
     qtbot.addWidget(window)
     panel = window.panels[0]
+    panel.use_raw_scale()
 
     panel.fit_channel_to_pane("One")
 

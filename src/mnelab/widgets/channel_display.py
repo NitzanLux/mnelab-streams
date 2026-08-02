@@ -58,9 +58,9 @@ class ChannelDisplayDialog(QDialog):
 
         self.amplitude_spin = QDoubleSpinBox()
         self.amplitude_spin.setObjectName("amplitudeMultiplier")
-        self.amplitude_spin.setRange(0.001, 1000.0)
-        self.amplitude_spin.setDecimals(3)
-        self.amplitude_spin.setSingleStep(0.1)
+        self.amplitude_spin.setRange(0.000001, 1000.0)
+        self.amplitude_spin.setDecimals(6)
+        self.amplitude_spin.setSingleStep(0.000001)
         self.amplitude_spin.setSuffix("×")
         self.amplitude_spin.setValue(amplitude)
         self.amplitude_spin.setToolTip("Display amplitude multiplier")

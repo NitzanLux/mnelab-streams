@@ -20,8 +20,10 @@ def test_dialog_exposes_channel_and_display_values(dialog):
     assert dialog.channel_label.text() == "C3"
     assert dialog.amplitude == pytest.approx(2.0)
     assert dialog.offset == pytest.approx(-0.5)
-    assert dialog.amplitude_spin.minimum() == pytest.approx(0.001)
+    assert dialog.amplitude_spin.minimum() == pytest.approx(0.000001)
     assert dialog.amplitude_spin.maximum() == pytest.approx(1000.0)
+    assert dialog.amplitude_spin.decimals() == 6
+    assert dialog.amplitude_spin.singleStep() == pytest.approx(0.000001)
     assert dialog.offset_spin.minimum() == pytest.approx(-1.0)
     assert dialog.offset_spin.maximum() == pytest.approx(1.0)
 

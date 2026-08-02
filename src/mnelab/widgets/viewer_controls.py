@@ -9,12 +9,14 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,34 +44,54 @@ class AnnotationSidebar(QWidget):
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
 
+        self.filter_group = QGroupBox("Filter")
+        filter_layout = QVBoxLayout(self.filter_group)
+        filter_layout.setContentsMargins(6, 6, 6, 6)
+        filter_layout.setSpacing(4)
+
+        filter_layout.addWidget(QLabel("Description"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.setPlaceholderText("Filter descriptions…")
         self.filter_edit.setToolTip("Case-insensitive annotation text filter")
-        layout.addWidget(self.filter_edit)
+        filter_layout.addWidget(self.filter_edit)
 
-        filter_row = QHBoxLayout()
+        filter_layout.addWidget(QLabel("By type"))
+        type_row = QHBoxLayout()
         self.type_combo = QComboBox()
         self.type_combo.setToolTip("Show one annotation type")
-        layout.addWidget(self.type_combo)
+        self.type_combo.setPlaceholderText("Select type…")
+        type_row.addWidget(self.type_combo, 1)
+        self.clear_type_button = QPushButton("Clear")
+        self.clear_type_button.setToolTip("Clear the annotation type filter")
+        self.clear_type_button.setEnabled(False)
+        type_row.addWidget(self.clear_type_button)
+        filter_layout.addLayout(type_row)
+
+        match_row = QHBoxLayout()
         self.regex_checkbox = QCheckBox("Regex")
         self.regex_checkbox.setToolTip(
             "Interpret the text filter as a case-insensitive regular expression"
         )
-        filter_row.addWidget(self.regex_checkbox)
+        match_row.addWidget(self.regex_checkbox)
         self.invert_checkbox = QCheckBox("Invert")
         self.invert_checkbox.setToolTip("Show annotations that do not match")
-        filter_row.addWidget(self.invert_checkbox)
-        filter_row.addStretch()
-        layout.addLayout(filter_row)
+        match_row.addWidget(self.invert_checkbox)
+        match_row.addStretch()
+        filter_layout.addLayout(match_row)
 
         self.apply_to_plots = QCheckBox("Apply filter to plots")
         self.apply_to_plots.setChecked(True)
         self.apply_to_plots.setToolTip(
             "Hide filtered annotations from signal and annotation plots"
         )
-        layout.addWidget(self.apply_to_plots)
+        filter_layout.addWidget(self.apply_to_plots)
+        layout.addWidget(self.filter_group)
 
+        self.results_group = QGroupBox("Annotations")
+        results_layout = QVBoxLayout(self.results_group)
+        results_layout.setContentsMargins(6, 6, 6, 6)
+        results_layout.setSpacing(4)
         self.list = QListWidget()
         self.list.setAlternatingRowColors(True)
         self.list.setWordWrap(True)
@@ -78,22 +100,27 @@ class AnnotationSidebar(QWidget):
             "Click an annotation to center it; right-click to suppress or restore it"
         )
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        layout.addWidget(self.list, 1)
+        results_layout.addWidget(self.list, 1)
 
         self.count_label = QLabel()
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        layout.addWidget(self.count_label)
+        results_layout.addWidget(self.count_label)
+        layout.addWidget(self.results_group, 1)
 
         descriptions = (
             sorted({str(value) for value in raw.annotations.description})
             if hasattr(raw, "annotations")
             else []
         )
-        self.type_combo.addItem("All types")
         self.type_combo.addItems(descriptions)
+        self.type_combo.setCurrentIndex(-1)
 
         self.filter_edit.textChanged.connect(self._filter_updated)
         self.type_combo.currentTextChanged.connect(self._filter_updated)
+        self.type_combo.currentIndexChanged.connect(self._type_filter_changed)
+        self.clear_type_button.clicked.connect(
+            lambda: self.type_combo.setCurrentIndex(-1)
+        )
         self.regex_checkbox.toggled.connect(self._filter_updated)
         self.invert_checkbox.toggled.connect(self._filter_updated)
         self.apply_to_plots.toggled.connect(self.filter_changed)
@@ -125,15 +152,15 @@ class AnnotationSidebar(QWidget):
         for widget in widgets:
             widget.blockSignals(True)
         self.filter_edit.setText(str(state.get("text", "")))
-        annotation_type = str(state.get("type", "All types"))
-        if self.type_combo.findText(annotation_type) < 0:
-            annotation_type = "All types"
-        self.type_combo.setCurrentText(annotation_type)
+        annotation_type = str(state.get("type", ""))
+        type_index = self.type_combo.findText(annotation_type)
+        self.type_combo.setCurrentIndex(type_index)
         self.regex_checkbox.setChecked(bool(state.get("regex", False)))
         self.invert_checkbox.setChecked(bool(state.get("invert", False)))
         self.apply_to_plots.setChecked(bool(state.get("apply_to_plots", True)))
         for widget in widgets:
             widget.blockSignals(False)
+        self.clear_type_button.setEnabled(type_index >= 0)
         self._compile_regex()
         self.refresh_list()
         self.filter_changed.emit()
@@ -151,7 +178,7 @@ class AnnotationSidebar(QWidget):
             query = query.strip().casefold()
             text_matches = not query or query in description.casefold()
         matches = text_matches and (
-            selected_type == "All types" or description == selected_type
+            not selected_type or description == selected_type
         )
         return not matches if self.invert_checkbox.isChecked() else matches
 
@@ -316,6 +343,10 @@ class AnnotationSidebar(QWidget):
         self._compile_regex()
         self.refresh_list()
         self.filter_changed.emit()
+
+    def _type_filter_changed(self, index):
+        """Keep the adjacent Clear action synchronized with type selection."""
+        self.clear_type_button.setEnabled(index >= 0)
 
     def _item_selected(self, item):
         self.annotation_highlighted.emit(

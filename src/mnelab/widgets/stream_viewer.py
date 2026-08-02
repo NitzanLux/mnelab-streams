@@ -15,7 +15,6 @@ from PySide6.QtCore import (
     QPoint,
     QRectF,
     QRunnable,
-    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -62,6 +61,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QTabWidget,
     QTextBrowser,
+    QToolButton,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -135,7 +135,7 @@ SENSOR_UNIT_CHOICES = ["g", "m/s²", "rad/s", "°/s", "N", "Pa", "%"]
 MAX_ACTIVATION_ELEMENTS = 2_000_000
 STREAM_PANEL_MIME = "application/x-mnelab-stream-panel"
 AMPLITUDE_STEP = 1.25
-MIN_AMPLITUDE = 0.001
+MIN_AMPLITUDE = 0.000001
 MAX_AMPLITUDE = 1000.0
 # Keep the interactive channel list roomy enough for short sensor names, while the
 # duplicate plot-axis labels only need a compact lane marker. Long names remain
@@ -143,9 +143,6 @@ MAX_AMPLITUDE = 1000.0
 CHANNEL_LIST_WIDTH = 96
 CHANNEL_LABEL_WIDTH = 64
 PANEL_BODY_SPACING = 2
-CHANNEL_LANE_HEIGHT = 32
-MIN_STREAM_PLOT_HEIGHT = 64
-MAX_STREAM_PLOT_HEIGHT = 2000
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
@@ -157,6 +154,36 @@ ACTIVATION_NAN_COLOR = "#9aa0a6"
 ACTIVATION_AXIS_MIN_WIDTH = 150
 ACTIVATION_AXIS_MAX_WIDTH = 360
 MARKER_ROW_LIMIT = 8
+
+
+def _full_signal_standard_deviation_fits(raw):
+    """Return per-channel mean/SD transforms computed over the full recording."""
+    source_raws = {}
+    if isinstance(raw, NativeXDFRecording):
+        source_raws = {
+            name: entry["raw"]
+            for entry in raw.streams
+            for name in entry["raw"].ch_names
+        }
+
+    fits = {}
+    for name in raw.ch_names:
+        channel_raw = source_raws.get(name, raw)
+        if channel_raw.preload:
+            channel_index = channel_raw.ch_names.index(name)
+            values = np.asarray(channel_raw._data[channel_index], dtype=float)
+        else:
+            values = np.asarray(channel_raw.get_data(picks=[name])[0], dtype=float)
+        finite = values[np.isfinite(values)]
+        if finite.size:
+            center = float(np.mean(finite))
+            scale = float(np.std(finite))
+            if not np.isfinite(scale) or scale <= 0:
+                scale = 1.0
+        else:
+            center, scale = 0.0, 1.0
+        fits[name] = {"center": center, "scale": scale}
+    return fits
 
 
 def _automatic_color(index):
@@ -616,49 +643,6 @@ class StreamDragHandle(QLabel):
         super().mouseReleaseEvent(event)
 
 
-class StreamResizeHandle(QFrame):
-    """Bottom-edge mouse handle that changes one stream panel's plot height."""
-
-    resize_requested = Signal(int)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self._last_global_y = None
-        self.setFixedHeight(8)
-        self.setCursor(Qt.CursorShape.SizeVerCursor)
-        self.setToolTip("Drag to resize this stream")
-        self.setFrameShape(QFrame.Shape.HLine)
-        self.setFrameShadow(QFrame.Shadow.Sunken)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._last_global_y = int(round(event.globalPosition().y()))
-            event.accept()
-            return
-        super().mousePressEvent(event)
-
-    def mouseMoveEvent(self, event):
-        if (
-            self._last_global_y is not None
-            and event.buttons() & Qt.MouseButton.LeftButton
-        ):
-            global_y = int(round(event.globalPosition().y()))
-            delta = global_y - self._last_global_y
-            if delta:
-                self._last_global_y = global_y
-                self.resize_requested.emit(delta)
-            event.accept()
-            return
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._last_global_y = None
-            event.accept()
-            return
-        super().mouseReleaseEvent(event)
-
-
 class DetachedStreamWindow(QMainWindow):
     """Top-level owner for a stream panel detached from the viewer grid."""
 
@@ -1115,6 +1099,7 @@ class StreamPanel(QFrame):
         self.unit_family = self._unit_family()
         self._times = np.empty(0)
         self._values = np.empty((len(self.visible_channel_names), 0))
+        self._discrete_channels = {}
         self._visible_start = 0.0
         self._visible_duration = 0.0
         self._display_unit = "Raw"
@@ -1123,7 +1108,6 @@ class StreamPanel(QFrame):
         self._lane_step = 3.0
         self._axis_channels = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 4, 6, 6)
@@ -1131,6 +1115,7 @@ class StreamPanel(QFrame):
 
         self.header_widget = QWidget()
         header = QHBoxLayout(self.header_widget)
+        self.header_layout = header
         header.setContentsMargins(0, 0, 0, 0)
         self.drag_handle = StreamDragHandle(self)
         self.drag_handle.detach_requested.connect(self.float_requested.emit)
@@ -1171,7 +1156,8 @@ class StreamPanel(QFrame):
         self.next_page_button.clicked.connect(self.next_page)
         header.addWidget(self.next_page_button)
         header.addStretch()
-        header.addWidget(QLabel("Unit:"))
+        self.unit_label = QLabel("Unit:")
+        header.addWidget(self.unit_label)
         self.unit_combo = QComboBox()
         self.unit_combo.addItems(UNIT_CHOICES[self.unit_family])
         self.unit_combo.setCurrentText(unit)
@@ -1180,7 +1166,8 @@ class StreamPanel(QFrame):
         )
         self.unit_combo.currentTextChanged.connect(self._settings_updated)
         header.addWidget(self.unit_combo)
-        header.addWidget(QLabel("Gain:"))
+        self.gain_label = QLabel("Gain:")
+        header.addWidget(self.gain_label)
         self.amplitude_down_button = QPushButton("−")
         self.amplitude_down_button.setFixedWidth(28)
         self.amplitude_down_button.setToolTip("Decrease amplitude by 1.25×")
@@ -1190,8 +1177,8 @@ class StreamPanel(QFrame):
         header.addWidget(self.amplitude_down_button)
         self.amplitude = QDoubleSpinBox()
         self.amplitude.setRange(MIN_AMPLITUDE, MAX_AMPLITUDE)
-        self.amplitude.setDecimals(3)
-        self.amplitude.setSingleStep(0.25)
+        self.amplitude.setDecimals(6)
+        self.amplitude.setSingleStep(MIN_AMPLITUDE)
         self.amplitude.setValue(gain)
         self.amplitude.setSuffix("×")
         self.amplitude.setToolTip(
@@ -1233,7 +1220,8 @@ class StreamPanel(QFrame):
         )
         self.zero_offset_button.clicked.connect(self.zero_visible_offsets)
         header.addWidget(self.zero_offset_button)
-        header.addWidget(QLabel("Scale:"))
+        self.scale_title_label = QLabel("Scale:")
+        header.addWidget(self.scale_title_label)
         self.scale_label = QLabel()
         self.scale_label.setMinimumWidth(110)
         self.scale_label.setMaximumWidth(320)
@@ -1265,15 +1253,36 @@ class StreamPanel(QFrame):
         )
         body.addWidget(self.channel_list)
 
+        self.tight_display_controls = QWidget()
+        self.tight_display_controls.setObjectName("tightDisplayControls")
+        self.tight_display_controls.setMaximumWidth(130)
+        self.tight_display_layout = QVBoxLayout(self.tight_display_controls)
+        self.tight_display_layout.setContentsMargins(4, 0, 4, 0)
+        self.tight_display_layout.setSpacing(4)
+        self.tight_display_controls.hide()
+        body.addWidget(self.tight_display_controls)
+
+        self._display_control_widgets = (
+            self.unit_label,
+            self.unit_combo,
+            self.gain_label,
+            self.amplitude_down_button,
+            self.amplitude,
+            self.amplitude_up_button,
+            self.raw_scale_button,
+            self.autoscale_button,
+            self.scale_mode_label,
+            self.zero_offset_button,
+            self.scale_title_label,
+            self.scale_label,
+        )
+        self._tight_layout_enabled = False
+
         self.plot = StreamPlotWidget(
             axisItems={"left": TraceLabelAxis(orientation="left")}
         )
         visible_count = len(self.visible_channel_names)
-        self._plot_height = max(
-            150,
-            MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * visible_count,
-        )
-        self.plot.setFixedHeight(self._plot_height)
+        self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showAxis("left")
@@ -1291,9 +1300,6 @@ class StreamPanel(QFrame):
         self.plot.measurement_changed.connect(self._measurement_changed)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
-        self.resize_handle = StreamResizeHandle(self)
-        self.resize_handle.resize_requested.connect(self.resize_plot_by)
-        outer.addWidget(self.resize_handle)
         self._curves = [
             self.plot.plot([], [], pen=pg.mkPen("#4c78a8", width=1))
             for _ in range(visible_count)
@@ -1304,17 +1310,6 @@ class StreamPanel(QFrame):
         self._update_channel_list()
         self._update_page_controls()
         self._update_scale_mode_controls()
-        self._size_hint_chrome_height = max(
-            0, super().sizeHint().height() - self._plot_height
-        )
-
-    def sizeHint(self):
-        """Return a panel height that follows its independently resized plot."""
-        hint = super().sizeHint()
-        chrome_height = getattr(self, "_size_hint_chrome_height", None)
-        if chrome_height is None:
-            return hint
-        return QSize(hint.width(), chrome_height + self._plot_height)
 
     @property
     def title(self):
@@ -1391,9 +1386,7 @@ class StreamPanel(QFrame):
         index = int(np.clip(index, 0, self.page_count - 1))
         if index == self._page:
             return
-        previous_visible_count = len(self.visible_channel_names)
         self._page = index
-        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1406,6 +1399,20 @@ class StreamPanel(QFrame):
 
     def next_page(self):
         self.set_page(self._page + 1)
+
+    def set_tight_layout(self, enabled):
+        """Move display controls between the header and Tight-mode side strip."""
+        enabled = bool(enabled)
+        if enabled == self._tight_layout_enabled:
+            return
+        self._tight_layout_enabled = enabled
+        target_layout = self.tight_display_layout if enabled else self.header_layout
+        for widget in self._display_control_widgets:
+            target_layout.addWidget(widget)
+        self.tight_display_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.tight_display_controls.setVisible(enabled)
+        self.header_widget.updateGeometry()
+        self.updateGeometry()
 
     def set_floating(self, floating):
         """Update controls for the panel's attached or floating state."""
@@ -1690,14 +1697,11 @@ class StreamPanel(QFrame):
         visible = bool(visible)
         if self.channel_settings[name]["visible"] == visible:
             return
-        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name]["visible"] = visible
-        self._visibility_changed(previous_visible_count)
+        self._visibility_changed()
 
-    def _visibility_changed(self, previous_visible_count=None):
+    def _visibility_changed(self):
         """Refresh labels, lanes, and fetched rows after a visibility change."""
-        if previous_visible_count is not None:
-            self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1705,37 +1709,8 @@ class StreamPanel(QFrame):
         self.page_changed.emit()
         self._settings_updated()
 
-    def _adjust_height_for_channel_count(self, previous_visible_count):
-        """Add or remove exactly one plot lane for each visibility-count change."""
-        lane_delta = len(self.visible_channel_names) - int(previous_visible_count)
-        if lane_delta:
-            self.resize_plot_by(CHANNEL_LANE_HEIGHT * lane_delta)
-
-    def resize_plot_by(self, delta):
-        """Resize this panel's plot by a mouse-drag or channel-lane delta."""
-        height = int(
-            np.clip(
-                self._plot_height + int(delta),
-                MIN_STREAM_PLOT_HEIGHT,
-                MAX_STREAM_PLOT_HEIGHT,
-            )
-        )
-        if height == self._plot_height:
-            return
-        self._plot_height = height
-        self.plot.setFixedHeight(height)
-        if self.layout() is not None:
-            self.layout().invalidate()
-        self.updateGeometry()
-        if self.parentWidget() is not None:
-            parent_layout = self.parentWidget().layout()
-            if parent_layout is not None:
-                parent_layout.invalidate()
-            self.parentWidget().updateGeometry()
-
     def reset_channel_display(self, name):
         """Restore one channel's display-only properties."""
-        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name] = {
             "gain": 1.0,
             "offset": 0.0,
@@ -1744,7 +1719,6 @@ class StreamPanel(QFrame):
             "visible": True,
         }
         self.channel_fits.pop(name, None)
-        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -2307,15 +2281,46 @@ class StreamPanel(QFrame):
 
     def set_discrete_threshold(self, threshold):
         """Set the unique-value threshold used for held-step rendering."""
-        self.discrete_threshold = max(2, int(threshold))
+        threshold = max(2, int(threshold))
+        if threshold != self.discrete_threshold:
+            self.discrete_threshold = threshold
+            self._discrete_channels.clear()
         self.redraw(self._visible_start, self._visible_duration)
 
-    def _is_discrete(self, values):
-        """Return whether finite samples contain fewer than the configured values."""
-        finite = np.asarray(values)[np.isfinite(values)]
-        if not finite.size:
-            return False
-        return len(np.unique(finite)) < self.discrete_threshold
+    def _is_discrete(self, name):
+        """Classify a channel using its complete trace, independent of the view."""
+        cached = self._discrete_channels.get(name)
+        if cached is not None:
+            return cached
+
+        if isinstance(self.raw, NativeXDFRecording):
+            source_raw = self.raw.stream_for_channel(name)["raw"]
+        else:
+            source_raw = self.raw
+        channel_index = source_raw.ch_names.index(name)
+        seen = set()
+        has_finite = False
+        chunk_size = 1_000_000
+        for start in range(0, source_raw.n_times, chunk_size):
+            stop = min(source_raw.n_times, start + chunk_size)
+            if source_raw.preload:
+                values = source_raw._data[channel_index, start:stop]
+            else:
+                values = source_raw.get_data(
+                    picks=[name], start=start, stop=stop
+                )[0]
+            finite = np.asarray(values)[np.isfinite(values)]
+            if not finite.size:
+                continue
+            has_finite = True
+            seen.update(np.unique(finite).tolist())
+            if len(seen) >= self.discrete_threshold:
+                self._discrete_channels[name] = False
+                return False
+
+        result = has_finite and len(seen) < self.discrete_threshold
+        self._discrete_channels[name] = result
+        return result
 
     def _update_page_controls(self):
         paged = self.page_count > 1
@@ -2728,7 +2733,7 @@ class StreamPanel(QFrame):
                 transformed + offsets[index] + settings["offset"] * self._lane_step
             )
             color = self._channel_color(name)
-            if self._is_discrete(values):
+            if self._is_discrete(name):
                 x, y, _sample_x, _sample_y = discrete_step_trace(
                     self._times, normalized, max_points
                 )
@@ -3011,7 +3016,11 @@ class AnnotationStream(QFrame):
         layout.addWidget(label_gutter)
 
         self.plot = pg.PlotWidget()
-        self.plot.setFixedHeight(max(150, min(360, 58 * len(self._lane_specs) + 35)))
+        # Size the timeline from its logical lanes only. Label packing can change
+        # whenever the visible window changes, so using its transient row count
+        # here would make the whole viewer jump as markers enter or leave view.
+        self._plot_height = max(150, min(360, 58 * len(self._lane_specs) + 35))
+        self.plot.setFixedHeight(self._plot_height)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showAxis("left")
@@ -3269,8 +3278,6 @@ class AnnotationStream(QFrame):
         total_rows = sum(lane_row_counts)
         self._lane_row_counts = lane_row_counts
         self.plot.setYRange(0, total_rows, padding=0)
-        height = max(150, min(500, 42 * total_rows + 35))
-        self.plot.setFixedHeight(height)
         for index, row_count in enumerate(lane_row_counts):
             self._label_layout.setStretch(index + 1, row_count)
 
@@ -3730,7 +3737,10 @@ class StreamViewerWindow(QMainWindow):
             for stream in self.source_streams
         }
         self._display_scales = {}
-        self._channel_fits = {}
+        # Start every trace in standard-deviation units.  Using all samples keeps
+        # its scale stable while navigating between time windows: y = -1 and +1
+        # represent one full-recording standard deviation below/above the mean.
+        self._channel_fits = _full_signal_standard_deviation_fits(raw)
         self._channel_settings = {
             name: {
                 "gain": 1.0,
@@ -3790,50 +3800,6 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_sidebar.annotation_highlighted.connect(
             self._highlight_annotation
         )
-        self.stream_list = QListWidget()
-        self.stream_list.setObjectName("streamVisibilityList")
-        self.stream_list.setAlternatingRowColors(True)
-        self.stream_list.setToolTip(
-            "Check a source stream to display it in the trace viewer"
-        )
-        for index, stream in enumerate(self.source_streams):
-            item = QListWidgetItem(str(stream["name"]))
-            item.setData(Qt.ItemDataRole.UserRole, index)
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
-            item.setToolTip(
-                f"{stream['name']} ({stream.get('type') or 'Data'})\n"
-                f"{len(stream['channel_names'])} channel(s)"
-            )
-            self.stream_list.addItem(item)
-        self.stream_list.itemChanged.connect(self._stream_item_changed)
-
-        self.viewer_settings = QWidget()
-        viewer_settings_layout = QVBoxLayout(self.viewer_settings)
-        viewer_settings_layout.setContentsMargins(8, 8, 8, 8)
-        threshold_label = QLabel("Discrete values:")
-        threshold_label.setWordWrap(True)
-        viewer_settings_layout.addWidget(threshold_label)
-        self.discrete_threshold_spin = QSpinBox()
-        self.discrete_threshold_spin.setRange(2, 10000)
-        self.discrete_threshold_spin.setValue(self.discrete_threshold)
-        self.discrete_threshold_spin.setToolTip(
-            "A channel with fewer unique values is drawn as held steps with dots"
-        )
-        self.discrete_threshold_spin.valueChanged.connect(self.set_discrete_threshold)
-        viewer_settings_layout.addWidget(self.discrete_threshold_spin)
-        viewer_settings_note = QLabel(
-            "Signals below this number of unique values are shown without "
-            "interpolation. Use 2 to classify only constant-valued signals."
-        )
-        viewer_settings_note.setWordWrap(True)
-        viewer_settings_layout.addWidget(viewer_settings_note)
-        viewer_settings_layout.addStretch()
-        self.sidebar_tabs = QTabWidget()
-        self.sidebar_tabs.setObjectName("streamViewerSidebarTabs")
-        self.sidebar_tabs.addTab(self.annotation_sidebar, "Annotations")
-        self.sidebar_tabs.addTab(self.stream_list, "Streams")
-        self.sidebar_tabs.addTab(self.viewer_settings, "Settings")
         self.annotation_dock = QDockWidget("Annotations", self)
         self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
         self.annotation_dock.setAllowedAreas(
@@ -3843,7 +3809,7 @@ class StreamViewerWindow(QMainWindow):
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
-        self.annotation_dock.setWidget(self.sidebar_tabs)
+        self.annotation_dock.setWidget(self.annotation_sidebar)
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
         self._annotation_dock_sized = False
 
@@ -3909,6 +3875,43 @@ class StreamViewerWindow(QMainWindow):
         controls.addStretch()
         layout.addWidget(self.layout_controls)
 
+        self.trace_workspace = QWidget()
+        trace_workspace_layout = QHBoxLayout(self.trace_workspace)
+        trace_workspace_layout.setContentsMargins(0, 0, 0, 0)
+        trace_workspace_layout.setSpacing(6)
+        self.tight_stream_sidebar = QWidget()
+        self.tight_stream_sidebar.setObjectName("tightStreamSidebar")
+        self.tight_stream_sidebar.setMaximumWidth(180)
+        tight_stream_layout = QVBoxLayout(self.tight_stream_sidebar)
+        tight_stream_layout.setContentsMargins(4, 4, 4, 4)
+        tight_stream_layout.setSpacing(4)
+        tight_stream_title = QLabel("Streams")
+        tight_stream_title_font = tight_stream_title.font()
+        tight_stream_title_font.setBold(True)
+        tight_stream_title.setFont(tight_stream_title_font)
+        tight_stream_layout.addWidget(tight_stream_title)
+        self.tight_stream_buttons = []
+        for index, stream in enumerate(self.source_streams):
+            button = QToolButton()
+            button.setText(str(stream["name"]))
+            button.setCheckable(True)
+            button.setChecked(True)
+            button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+            button.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            )
+            button.setToolTip(
+                f"Show or hide {stream['name']} in the combined trace figure"
+            )
+            button.toggled.connect(
+                lambda checked, index=index: self._set_stream_visible(index, checked)
+            )
+            tight_stream_layout.addWidget(button)
+            self.tight_stream_buttons.append(button)
+        tight_stream_layout.addStretch()
+        self.tight_stream_sidebar.hide()
+        trace_workspace_layout.addWidget(self.tight_stream_sidebar)
+
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.panel_container = QWidget()
@@ -3928,7 +3931,8 @@ class StreamViewerWindow(QMainWindow):
                 0, self._align_annotation_stream
             )
         )
-        layout.addWidget(self.scroll, 1)
+        trace_workspace_layout.addWidget(self.scroll, 1)
+        layout.addWidget(self.trace_workspace, 1)
 
         self.annotation_container = QWidget()
         self.annotation_layout = QHBoxLayout(self.annotation_container)
@@ -3993,8 +3997,6 @@ class StreamViewerWindow(QMainWindow):
         self.statusBar().showMessage("Right-click a trace panel for channel actions")
 
         self._rebuild_panels()
-        self._create_view_menu()
-        self._create_help_menu()
         self._install_viewer_shortcuts()
         self._sync_navigation()
         self.set_view_mode(view_mode)
@@ -4002,7 +4004,11 @@ class StreamViewerWindow(QMainWindow):
         self._display_montage_path = None
         self._display_montage_baseline = self.display_montage_state()
         self._default_display_montage = deepcopy(self._display_montage_baseline)
+        self._create_view_menu()
+        self._create_streams_menu()
+        self._create_settings_menu()
         self._create_display_montage_menu()
+        self._create_help_menu()
 
     def _add_marker_stream_colors(self):
         """Fill unspecified annotation colors from their marker-stream origin."""
@@ -4025,19 +4031,6 @@ class StreamViewerWindow(QMainWindow):
     def _create_view_menu(self):
         """Add optional plot interaction and marker-layout controls."""
         menu = self.menuBar().addMenu("&View")
-        streams_menu = menu.addMenu("Visible &Streams")
-        self.stream_visibility_actions = []
-        for index, stream in enumerate(self.source_streams):
-            action = streams_menu.addAction(str(stream["name"]))
-            action.setCheckable(True)
-            action.setChecked(True)
-            action.toggled.connect(
-                lambda checked, index=index: self._set_stream_visible_from_action(
-                    index, checked
-                )
-            )
-            self.stream_visibility_actions.append(action)
-        menu.addSeparator()
         self.crosshair_action = menu.addAction("&Crosshair")
         self.crosshair_action.setCheckable(True)
         self.crosshair_action.setChecked(False)
@@ -4096,14 +4089,48 @@ class StreamViewerWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Activation &Map…", self.show_activation_map)
 
-    def _set_stream_visible_from_action(self, index, visible):
-        """Mirror a View-menu stream toggle into the stream browser."""
-        item = self.stream_list.item(int(index))
-        if item is None:
-            return
-        state = Qt.CheckState.Checked if visible else Qt.CheckState.Unchecked
-        if item.checkState() != state:
-            item.setCheckState(state)
+    def _create_streams_menu(self):
+        """Add top-level source visibility controls, enabled by default."""
+        menu = self.menuBar().addMenu("&Streams")
+        self.stream_visibility_actions = []
+        for index, stream in enumerate(self.source_streams):
+            action = menu.addAction(str(stream["name"]))
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.setToolTip(
+                f"{stream['name']} ({stream.get('type') or 'Data'}): "
+                f"{len(stream['channel_names'])} channel(s)"
+            )
+            action.toggled.connect(
+                lambda checked, index=index: self._set_stream_visible(index, checked)
+            )
+            self.stream_visibility_actions.append(action)
+
+    def _create_settings_menu(self):
+        """Add top-level viewer preferences that affect trace rendering."""
+        menu = self.menuBar().addMenu("Se&ttings")
+        self.discrete_threshold_action = menu.addAction(
+            "Discrete Value &Threshold…", self._edit_discrete_threshold
+        )
+        self.discrete_threshold_action.setToolTip(
+            "Choose how few unique values make a channel render as held steps"
+        )
+        menu.addSeparator()
+        menu.addAction("Keyboard &Shortcuts…", self.show_shortcuts)
+
+    def _edit_discrete_threshold(self):
+        """Prompt for the discrete-channel rendering threshold."""
+        threshold, accepted = QInputDialog.getInt(
+            self,
+            "Discrete Value Threshold",
+            "Channels with fewer unique values are drawn as held steps with dots:\n"
+            "(Use 2 to classify only constant-valued signals.)",
+            self.discrete_threshold,
+            2,
+            10000,
+        )
+        if accepted:
+            self.set_discrete_threshold(threshold)
 
     def set_view_mode(self, mode):
         """Apply Standard, Tight, or Unified trace-view layout."""
@@ -4119,13 +4146,15 @@ class StreamViewerWindow(QMainWindow):
                 self.layout_mode_actions[mode].setChecked(True)
             return
         self._view_mode = mode
-        if mode == "Unified" and old_mode != "Unified":
+        combined_modes = {"Tight", "Unified"}
+        entering_combined = mode in combined_modes and old_mode not in combined_modes
+        leaving_combined = mode not in combined_modes and old_mode in combined_modes
+        if entering_combined:
             self._groups_before_unified = deepcopy(self._groups)
-            if not isinstance(self.raw, NativeXDFRecording):
-                self._groups = [list(self.source_streams)]
+            self._groups = [list(self.source_streams)]
             self._columns = 1
             self._rebuild_panels(preserve_floating=False)
-        elif old_mode == "Unified" and mode != "Unified":
+        elif leaving_combined:
             self._groups = self._groups_before_unified or [
                 [stream] for stream in self.source_streams
             ]
@@ -4133,8 +4162,15 @@ class StreamViewerWindow(QMainWindow):
             self._rebuild_panels(preserve_floating=False)
         tight = mode in {"Tight", "Unified"}
         self.layout_controls.setVisible(not tight)
+        self.tight_stream_sidebar.setVisible(mode == "Tight")
+        if mode == "Tight":
+            # This remains the per-trace control beside the combined figure.
+            if hasattr(self, "channel_lists_action"):
+                self.channel_lists_action.setChecked(True)
+            self._set_channel_lists_visible(True)
         self.panel_layout.setSpacing(0 if mode == "Unified" else 6)
         for panel in self.panels:
+            panel.set_tight_layout(mode == "Tight")
             margins = (2, 2, 2, 2) if tight else (6, 4, 6, 6)
             panel.layout().setContentsMargins(*margins)
             panel.layout().setSpacing(2 if tight else 4)
@@ -4247,8 +4283,8 @@ class StreamViewerWindow(QMainWindow):
         guide = QTextBrowser()
         guide.setHtml(
             "<h2>Plot Traces</h2>"
-            "<p><b>Streams</b> - use View -&gt; Visible Streams or the Streams "
-            "side tab to hide a complete source without changing the data.</p>"
+            "<p><b>Streams</b> - use the Streams menu to hide a complete source "
+            "without changing the data.</p>"
             "<p><b>Channels</b> - click a channel name to hide it, drag names "
             "to reorder, and right-click for display options.</p>"
             "<p><b>Navigation</b> - drag to zoom, Shift-drag to measure, "
@@ -4256,8 +4292,10 @@ class StreamViewerWindow(QMainWindow):
             "<p><b>Markers</b> - each marker source has its own color and lane; "
             "dense labels stagger into adaptive rows. Left-click an empty part "
             "of a marker lane to choose Auto or a fixed row count.</p>"
-            "<p><b>Layouts</b> - Standard keeps separate stream panels, Tight "
-            "reduces chrome, and Unified places every source in one plot.</p>"
+            "<p><b>Layouts</b> - Standard keeps separate stream panels; Tight "
+            "combines every source and moves stream, channel, unit, gain, fit, "
+            "and offset controls beside the plot; Unified keeps the combined "
+            "figure with its display controls in the header.</p>"
         )
         tabs.addTab(guide, "Functionality")
         shortcut_page = QWidget()
@@ -4274,6 +4312,7 @@ class StreamViewerWindow(QMainWindow):
         restore.clicked.connect(self._restore_default_shortcuts)
         form.addRow("", restore)
         tabs.addTab(shortcut_page, "Shortcuts")
+        self.help_tabs = tabs
         outer.addWidget(tabs)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
         buttons.rejected.connect(dialog.close)
@@ -4283,6 +4322,11 @@ class StreamViewerWindow(QMainWindow):
         )
         self.help_dialog = dialog
         dialog.show()
+
+    def show_shortcuts(self):
+        """Open the shortcut editor from the Settings menu."""
+        self.show_help()
+        self.help_tabs.setCurrentIndex(1)
 
     def _set_crosshair_visible(self, visible):
         """Apply the crosshair option to attached and floating signal panels."""
@@ -4740,29 +4784,33 @@ class StreamViewerWindow(QMainWindow):
         for panel in self.panels:
             panel.redraw(self._start_time, self._duration)
 
-    def _stream_item_changed(self, item):
+    def _set_stream_visible(self, index, visible):
         """Apply one source-stream toggle without changing channel preferences."""
-        index = item.data(Qt.ItemDataRole.UserRole)
-        if index is None or not 0 <= int(index) < len(self.source_streams):
+        if not 0 <= int(index) < len(self.source_streams):
             return
         stream = self.source_streams[int(index)]
-        visible = item.checkState() == Qt.CheckState.Checked
+        visible = bool(visible)
         if hasattr(self, "stream_visibility_actions"):
             action = self.stream_visibility_actions[int(index)]
-            action.blockSignals(True)
-            action.setChecked(visible)
-            action.blockSignals(False)
+            if action.isChecked() != visible:
+                action.blockSignals(True)
+                action.setChecked(visible)
+                action.blockSignals(False)
+        if hasattr(self, "tight_stream_buttons"):
+            button = self.tight_stream_buttons[int(index)]
+            if button.isChecked() != visible:
+                button.blockSignals(True)
+                button.setChecked(visible)
+                button.blockSignals(False)
         if self._stream_visibility.get(stream["id"], True) == visible:
             return
         affected_panels = [
-            (panel, len(panel.visible_channel_names))
-            for panel in self.panels
-            if stream["id"] in panel.source_ids
+            panel for panel in self.panels if stream["id"] in panel.source_ids
         ]
         self._stream_visibility[stream["id"]] = visible
-        for panel, previous_visible_count in affected_panels:
+        for panel in affected_panels:
             panel._page = min(panel._page, panel.page_count - 1)
-            panel._visibility_changed(previous_visible_count)
+            panel._visibility_changed()
             panel._update_page_controls()
         self._reflow_panels()
         self.refresh()
@@ -4770,10 +4818,6 @@ class StreamViewerWindow(QMainWindow):
     def set_discrete_threshold(self, threshold):
         """Apply the discrete unique-value threshold to every trace panel."""
         self.discrete_threshold = max(2, int(threshold))
-        if self.discrete_threshold_spin.value() != self.discrete_threshold:
-            self.discrete_threshold_spin.blockSignals(True)
-            self.discrete_threshold_spin.setValue(self.discrete_threshold)
-            self.discrete_threshold_spin.blockSignals(False)
         for panel in self.panels:
             panel.set_discrete_threshold(self.discrete_threshold)
         try:
@@ -4869,9 +4913,7 @@ class StreamViewerWindow(QMainWindow):
             )
         for index, panel in enumerate(attached):
             row, column = divmod(index, self._columns)
-            self.panel_layout.addWidget(
-                panel, row, column, alignment=Qt.AlignmentFlag.AlignTop
-            )
+            self.panel_layout.addWidget(panel, row, column)
             panel.show()
         for column in range(max(1, len(self.panels))):
             self.panel_layout.setColumnStretch(
@@ -4922,7 +4964,7 @@ class StreamViewerWindow(QMainWindow):
                 channel_order=settings.get("channel_order"),
                 channels_per_page=(
                     sum(len(stream["channel_names"]) for stream in group)
-                    if self._view_mode == "Unified"
+                    if self._view_mode in {"Tight", "Unified"}
                     else self.max_channels
                 ),
                 event_overlays_visible=self._event_overlays_visible,
@@ -4950,6 +4992,7 @@ class StreamViewerWindow(QMainWindow):
                 lambda target, panel=panel: self.swap_panels(panel, target)
             )
             self.panels.append(panel)
+            panel.set_tight_layout(self._view_mode == "Tight")
             if hasattr(self, "crosshair_action"):
                 panel.plot.set_crosshair_enabled(self.crosshair_action.isChecked())
         self._update_column_control()
@@ -5354,14 +5397,7 @@ class StreamViewerWindow(QMainWindow):
         if isinstance(self.raw, NativeXDFRecording):
             stop_time = self._start_time + self._duration
             for panel in panels:
-                if len(panel.sources) != 1:
-                    continue
-                times, values = self.raw.window(
-                    panel.sources[0]["id"],
-                    panel.visible_channel_names,
-                    self._start_time,
-                    stop_time,
-                )
+                times, values = self._native_panel_window(panel, stop_time)
                 panel.refresh(
                     self._start_time,
                     self._duration,
@@ -5397,6 +5433,76 @@ class StreamViewerWindow(QMainWindow):
                 times,
                 values[rows],
             )
+
+    def _native_panel_window(self, panel, stop_time):
+        """Align native-rate sources onto one display-only trace timeline."""
+        visible_names = panel.visible_channel_names
+        if not visible_names:
+            return np.empty(0), np.empty((0, 0))
+
+        source_windows = {}
+        all_times = []
+        for source in panel.sources:
+            names = [
+                name
+                for name in visible_names
+                if panel._source_id_by_channel[name] == source["id"]
+            ]
+            if not names:
+                continue
+            times, values = self.raw.window(
+                source["id"], names, self._start_time, stop_time
+            )
+            source_windows[source["id"]] = (names, times, values, source)
+            if len(times):
+                all_times.append(np.asarray(times, dtype=float))
+        if not all_times:
+            return np.empty(0), np.empty((len(visible_names), 0))
+
+        display_times = np.unique(np.concatenate(all_times))
+        rows = []
+        for name in visible_names:
+            source_id = panel._source_id_by_channel[name]
+            names, times, values, source = source_windows[source_id]
+            row = values[names.index(name)]
+            entry = _native_entry_for_stream(self.raw, source)
+            sfreq = float(entry["raw"].info["sfreq"]) if entry is not None else 1.0
+            rows.append(
+                self._interpolate_native_display_row(
+                    np.asarray(times, dtype=float), row, display_times, sfreq
+                )
+            )
+        return display_times, np.vstack(rows)
+
+    @staticmethod
+    def _interpolate_native_display_row(times, values, display_times, sfreq):
+        """Interpolate only within finite, gap-free native sample runs."""
+        result = np.full(len(display_times), np.nan, dtype=float)
+        values = np.asarray(values, dtype=float)
+        if not len(times):
+            return result
+        valid = np.isfinite(values)
+        gap_limit = max(0.1, 1.5 / max(float(sfreq), np.finfo(float).eps))
+        indices = np.flatnonzero(valid)
+        if not len(indices):
+            return result
+        split_after = np.flatnonzero(
+            (np.diff(indices) > 1) | (np.diff(times[indices]) > gap_limit)
+        ) + 1
+        for run in np.split(indices, split_after):
+            run_times = times[run]
+            run_values = values[run]
+            if len(run_times) == 1:
+                matches = np.isclose(display_times, run_times[0], rtol=0, atol=1e-12)
+                result[matches] = run_values[0]
+                continue
+            inside = (display_times >= run_times[0]) & (
+                display_times <= run_times[-1]
+            )
+            result[inside] = np.interp(
+                display_times[inside], run_times, run_values
+            )
+        return result
 
     def _panels_in_viewport(self):
         floating = {
