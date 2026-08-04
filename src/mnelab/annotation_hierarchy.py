@@ -10,7 +10,6 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-
 _REQUIRED_MARKER_FIELDS = {
     "schema_version",
     "event_uid",
@@ -86,8 +85,7 @@ class HierarchicalAnnotation:
             str(self.payload.get("source", "")),
         ]
         parts.extend(
-            f"{node.get('level', '')} {node.get('id', '')}"
-            for node in self.hierarchy
+            f"{node.get('level', '')} {node.get('id', '')}" for node in self.hierarchy
         )
         try:
             parts.append(json.dumps(self.payload.get("data", {}), ensure_ascii=False))
@@ -255,8 +253,7 @@ def hierarchical_annotation_intervals(raw, marker_streams=None, visible=None):
     for lifecycle in grouped.values():
         lifecycle.sort(key=lambda marker: (marker.onset, marker.annotation_index))
         if visible is not None and not any(
-            visible(marker.annotation_index, marker.description)
-            for marker in lifecycle
+            visible(marker.annotation_index, marker.description) for marker in lifecycle
         ):
             continue
         identity = next(

@@ -40,6 +40,9 @@ and application command are `mnelab-streams`; the internal Python import package
   time, split at discontinuities, skip unreadable files, merge heterogeneous channel
   sets with NaN padding, preserve source identities, and export a merged dataset back
   to XDF.
+- **Hierarchical JSON annotations:** browse supported LSL markers as a collapsible
+  hierarchy, hide or reveal UUIDs, and inspect reconstructed start/end lifecycles in
+  an annotation-only overview.
 
 The complete implementation audit, including the exact fork comparison range and
 behavioral details, is in [FORK_CHANGES.md](FORK_CHANGES.md). The current full product
@@ -61,11 +64,14 @@ PyQtGraph. Exact minimum versions are declared in [pyproject.toml](pyproject.tom
 Clone the repository:
 
 ```shell
-git clone https://github.com/NitzanLux/mnelab-streams.git
+git clone --recurse-submodules https://github.com/NitzanLux/mnelab-streams.git
 cd mnelab-streams
 uv sync --locked --all-extras
 uv run mnelab-streams
 ```
+
+For an existing checkout, initialize or update the nested annotation specification
+with `git submodule update --init --remote vendor/lsl-json-annotation-guide`.
 
 For development, install all dependency groups and run the warning-strict test suite:
 
