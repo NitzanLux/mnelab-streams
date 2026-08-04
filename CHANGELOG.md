@@ -18,6 +18,8 @@
 - Add an optional stream-viewer crosshair, Shift-drag measurement statistics showing time
   and value differences, and keyboard navigation through time-window history (by
   [NitzanLux](https://github.com/NitzanLux))
+- Add marker-stream filtering and visibility controls, wrapped annotation labels, and
+  Ctrl+wheel annotation text sizing in the stream viewer
 
 ### 🔧 Fixed
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and

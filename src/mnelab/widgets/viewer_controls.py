@@ -31,9 +31,10 @@ class AnnotationSidebar(QWidget):
     annotation_selected = Signal(float)
     annotation_highlighted = Signal(int)
 
-    def __init__(self, raw, parent=None):
+    def __init__(self, raw, marker_streams=None, parent=None):
         super().__init__(parent)
         self.raw = raw
+        self.marker_streams = list(marker_streams or [])
         self._suppressed_indices = set()
         self._regex_pattern = None
         self._regex_error = None
@@ -67,6 +68,25 @@ class AnnotationSidebar(QWidget):
         self.clear_type_button.setEnabled(False)
         type_row.addWidget(self.clear_type_button)
         filter_layout.addLayout(type_row)
+
+        filter_layout.addWidget(QLabel("By marker stream"))
+        marker_row = QHBoxLayout()
+        self.marker_combo = QComboBox()
+        self.marker_combo.setToolTip("Show annotations from one marker stream")
+        self.marker_combo.setPlaceholderText("Select marker stream…")
+        for stream in self.marker_streams:
+            self.marker_combo.addItem(
+                str(stream.get("name") or "Markers"),
+                str(stream.get("annotation_prefix") or ""),
+            )
+        self.marker_combo.setCurrentIndex(-1)
+        self.marker_combo.setEnabled(bool(self.marker_streams))
+        marker_row.addWidget(self.marker_combo, 1)
+        self.clear_marker_button = QPushButton("Clear")
+        self.clear_marker_button.setToolTip("Clear the marker stream filter")
+        self.clear_marker_button.setEnabled(False)
+        marker_row.addWidget(self.clear_marker_button)
+        filter_layout.addLayout(marker_row)
 
         match_row = QHBoxLayout()
         self.regex_checkbox = QCheckBox("Regex")
@@ -121,6 +141,11 @@ class AnnotationSidebar(QWidget):
         self.clear_type_button.clicked.connect(
             lambda: self.type_combo.setCurrentIndex(-1)
         )
+        self.marker_combo.currentIndexChanged.connect(self._marker_filter_changed)
+        self.marker_combo.currentTextChanged.connect(self._filter_updated)
+        self.clear_marker_button.clicked.connect(
+            lambda: self.marker_combo.setCurrentIndex(-1)
+        )
         self.regex_checkbox.toggled.connect(self._filter_updated)
         self.invert_checkbox.toggled.connect(self._filter_updated)
         self.apply_to_plots.toggled.connect(self.filter_changed)
@@ -135,6 +160,7 @@ class AnnotationSidebar(QWidget):
         return {
             "text": self.filter_edit.text(),
             "type": self.type_combo.currentText(),
+            "marker_stream": self.marker_combo.currentText(),
             "regex": self.regex_checkbox.isChecked(),
             "invert": self.invert_checkbox.isChecked(),
             "apply_to_plots": self.apply_to_plots.isChecked(),
@@ -145,6 +171,7 @@ class AnnotationSidebar(QWidget):
         widgets = (
             self.filter_edit,
             self.type_combo,
+            self.marker_combo,
             self.regex_checkbox,
             self.invert_checkbox,
             self.apply_to_plots,
@@ -155,12 +182,16 @@ class AnnotationSidebar(QWidget):
         annotation_type = str(state.get("type", ""))
         type_index = self.type_combo.findText(annotation_type)
         self.type_combo.setCurrentIndex(type_index)
+        marker_stream = str(state.get("marker_stream", ""))
+        marker_index = self.marker_combo.findText(marker_stream)
+        self.marker_combo.setCurrentIndex(marker_index)
         self.regex_checkbox.setChecked(bool(state.get("regex", False)))
         self.invert_checkbox.setChecked(bool(state.get("invert", False)))
         self.apply_to_plots.setChecked(bool(state.get("apply_to_plots", True)))
         for widget in widgets:
             widget.blockSignals(False)
         self.clear_type_button.setEnabled(type_index >= 0)
+        self.clear_marker_button.setEnabled(marker_index >= 0)
         self._compile_regex()
         self.refresh_list()
         self.filter_changed.emit()
@@ -170,6 +201,7 @@ class AnnotationSidebar(QWidget):
         description = str(description)
         query = self.filter_edit.text()
         selected_type = self.type_combo.currentText()
+        marker_prefix = self.marker_combo.currentData()
         if self._regex_error is not None:
             return False
         if self.regex_checkbox.isChecked():
@@ -177,8 +209,10 @@ class AnnotationSidebar(QWidget):
         else:
             query = query.strip().casefold()
             text_matches = not query or query in description.casefold()
-        matches = text_matches and (
-            not selected_type or description == selected_type
+        matches = (
+            text_matches
+            and (not selected_type or description == selected_type)
+            and (not marker_prefix or description.startswith(str(marker_prefix)))
         )
         return not matches if self.invert_checkbox.isChecked() else matches
 
@@ -348,8 +382,10 @@ class AnnotationSidebar(QWidget):
         """Keep the adjacent Clear action synchronized with type selection."""
         self.clear_type_button.setEnabled(index >= 0)
 
+    def _marker_filter_changed(self, index):
+        """Keep the marker-stream Clear action synchronized with selection."""
+        self.clear_marker_button.setEnabled(index >= 0)
+
     def _item_selected(self, item):
-        self.annotation_highlighted.emit(
-            int(item.data(ANNOTATION_INDEX_ROLE))
-        )
+        self.annotation_highlighted.emit(int(item.data(ANNOTATION_INDEX_ROLE)))
         self.annotation_selected.emit(float(item.data(Qt.ItemDataRole.UserRole)))

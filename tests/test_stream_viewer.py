@@ -10,8 +10,8 @@ import numpy as np
 import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
-from PySide6.QtGui import QColor
-from PySide6.QtWidgets import QDockWidget, QInputDialog, QMessageBox
+from PySide6.QtGui import QColor, QTextOption, QWheelEvent
+from PySide6.QtWidgets import QApplication, QDockWidget, QInputDialog, QMessageBox
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
@@ -266,11 +266,14 @@ def test_plot_traces_menus_are_organized_and_streams_default_on(viewer):
     """Streams and settings are top-level menus, outside the annotation dock."""
     assert [
         action.text().replace("&", "") for action in viewer.menuBar().actions()
-    ] == ["View", "Streams", "Settings", "Montage", "Help"]
+    ] == ["View", "Streams", "Markers", "Settings", "Montage", "Help"]
     assert viewer.annotation_dock.widget() is viewer.annotation_sidebar
     assert [action.isChecked() for action in viewer.stream_visibility_actions] == [
         True,
         True,
+    ]
+    assert [action.text() for action in viewer.marker_visibility_actions] == [
+        "Annotations"
     ]
     assert all(panel.isVisibleTo(viewer.panel_container) for panel in viewer.panels)
 
@@ -911,6 +914,81 @@ def test_multiple_xdf_marker_streams_use_separate_named_lanes(qtbot, raw, stream
     assert lane.labels[0].pos().y() == pytest.approx(1.5)
     assert lane.labels[1].pos().y() == pytest.approx(0.5)
     assert lane.labels[0].textItem.textWidth() >= 210
+
+
+def test_marker_stream_filter_and_menu_visibility_are_synchronized(qtbot, raw, streams):
+    """Marker sources can filter the browser and independently hide plot lanes."""
+    raw.set_annotations(
+        mne.Annotations(
+            onset=[1.0, 1.2],
+            duration=[0, 0],
+            description=["Keyboard: key A", "Foot Pedal: down"],
+        )
+    )
+    marker_streams = [
+        {"id": 2, "name": "Keyboard", "annotation_prefix": "Keyboard: "},
+        {"id": 8, "name": "Foot Pedal", "annotation_prefix": "Foot Pedal: "},
+    ]
+    window = StreamViewerWindow(
+        raw, streams=streams, marker_streams=marker_streams, duration=2.0
+    )
+    qtbot.addWidget(window)
+    sidebar = window.annotation_sidebar
+
+    assert [
+        sidebar.marker_combo.itemText(index)
+        for index in range(sidebar.marker_combo.count())
+    ] == ["Keyboard", "Foot Pedal"]
+    sidebar.marker_combo.setCurrentText("Keyboard")
+    assert sidebar.list.count() == 1
+    assert "key A" in sidebar.list.item(0).text()
+
+    sidebar.clear_marker_button.click()
+    window.marker_visibility_actions[0].setChecked(False)
+
+    assert sidebar.list.count() == 2
+    assert not window.annotation_stream.labels[1].isVisible()
+    assert window.annotation_stream.labels[0].textItem.toPlainText() == "down"
+    assert all(
+        sum(region.isVisible() for region in panel._annotation_regions) == 1
+        for panel in window.panels
+    )
+
+
+def test_annotation_wrap_menu_and_ctrl_wheel_resize_text(qtbot, raw, streams):
+    """Wrapping preserves long text and Ctrl+wheel scales labels and timeline."""
+    description = "Long marker text " * 80
+    raw.set_annotations(mne.Annotations([1.0], [0], [description]))
+    window = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    qtbot.addWidget(window)
+    timeline = window.annotation_stream
+    original_size = timeline.annotation_font_size
+    original_height = timeline.plot.height()
+
+    window.wrap_marker_text_action.setChecked(True)
+
+    label = timeline.labels[0]
+    assert label.textItem.toPlainText() == description
+    assert (
+        label.textItem.document().defaultTextOption().wrapMode()
+        == QTextOption.WrapMode.WordWrap
+    )
+
+    wheel = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ControlModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    QApplication.sendEvent(timeline.plot.viewport(), wheel)
+
+    assert timeline.annotation_font_size == original_size + 1
+    assert timeline.plot.height() > original_height
+    assert label.textItem.font().pointSize() == original_size + 1
 
 
 def test_overlapping_marker_text_is_packed_into_chronological_rows(qtbot, raw, streams):

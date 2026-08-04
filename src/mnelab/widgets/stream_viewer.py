@@ -29,6 +29,7 @@ from PySide6.QtGui import (
     QKeyEvent,
     QKeySequence,
     QShortcut,
+    QTextOption,
 )
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -154,6 +155,8 @@ ACTIVATION_NAN_COLOR = "#9aa0a6"
 ACTIVATION_AXIS_MIN_WIDTH = 150
 ACTIVATION_AXIS_MAX_WIDTH = 360
 MARKER_ROW_LIMIT = 8
+MIN_ANNOTATION_FONT_SIZE = 6
+MAX_ANNOTATION_FONT_SIZE = 24
 
 
 def _full_signal_standard_deviation_fits(raw):
@@ -2306,9 +2309,7 @@ class StreamPanel(QFrame):
             if source_raw.preload:
                 values = source_raw._data[channel_index, start:stop]
             else:
-                values = source_raw.get_data(
-                    picks=[name], start=start, stop=stop
-                )[0]
+                values = source_raw.get_data(picks=[name], start=start, stop=stop)[0]
             finite = np.asarray(values)[np.isfinite(values)]
             if not finite.size:
                 continue
@@ -2962,6 +2963,7 @@ class AnnotationStream(QFrame):
         annotation_visible=None,
         marker_streams=None,
         smart_label_layout=False,
+        wrap_text=False,
         parent=None,
     ):
         super().__init__(parent)
@@ -2973,6 +2975,8 @@ class AnnotationStream(QFrame):
         )
         self.marker_streams = list(marker_streams or [])
         self.smart_label_layout = bool(smart_label_layout)
+        self.wrap_text = bool(wrap_text)
+        self.annotation_font_size = max(6, round(self.font().pointSizeF()))
         self._lane_specs = self._build_lane_specs()
         self.marker_row_counts = {}
         self._lane_row_counts = [1] * len(self._lane_specs)
@@ -3029,8 +3033,10 @@ class AnnotationStream(QFrame):
         self.plot.showGrid(x=True, y=False, alpha=0.15)
         self.plot.getPlotItem().setClipToView(True)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.plot.viewport().installEventFilter(self)
         self.plot.setToolTip(
-            "Left-click a marker to select it, or an empty lane to choose its rows"
+            "Left-click a marker to select it, or an empty lane to choose its rows; "
+            "Ctrl+wheel changes marker text size"
         )
         layout.addWidget(self.plot, 1)
 
@@ -3137,6 +3143,9 @@ class AnnotationStream(QFrame):
             self.plot.addItem(region)
             self._regions.append(region)
             label = pg.TextItem(anchor=(0, 0.5), angle=0, ensureInBounds=True)
+            font = label.textItem.font()
+            font.setPointSize(self.annotation_font_size)
+            label.textItem.setFont(font)
             label.setZValue(20)
             self.plot.addItem(label)
             self._labels.append(label)
@@ -3155,14 +3164,18 @@ class AnnotationStream(QFrame):
             ) = annotation
             label = self._labels[index]
             metrics = QFontMetricsF(label.textItem.font())
-            display_text = metrics.elidedText(
-                description,
-                Qt.TextElideMode.ElideRight,
-                max(1, int(plot_width - 16)),
-            )
+            display_text = description
+            if not self.wrap_text:
+                display_text = metrics.elidedText(
+                    description,
+                    Qt.TextElideMode.ElideRight,
+                    max(1, int(plot_width - 16)),
+                )
             label.setText(display_text, color=color)
             natural_width = metrics.horizontalAdvance(display_text)
-            if self.smart_label_layout:
+            if self.wrap_text:
+                text_width = min(plot_width, max(72.0, min(360.0, natural_width)))
+            elif self.smart_label_layout:
                 text_width = min(
                     plot_width, max(72.0, min(360.0, natural_width + 16.0))
                 )
@@ -3310,6 +3323,13 @@ class AnnotationStream(QFrame):
             selected = annotation_index == self.selected_annotation_index
             region.set_annotation(start, stop, lane_bottom, color, selected)
             label.setTextWidth(max(1.0, text_width - 8.0))
+            text_option = label.textItem.document().defaultTextOption()
+            text_option.setWrapMode(
+                QTextOption.WrapMode.WordWrap
+                if self.wrap_text
+                else QTextOption.WrapMode.NoWrap
+            )
+            label.textItem.document().setDefaultTextOption(text_option)
             label.setPos(label_start, lane_bottom + 0.5)
             label.setToolTip(description)
             region.show()
@@ -3433,6 +3453,47 @@ class AnnotationStream(QFrame):
         self.smart_label_layout = bool(enabled)
         if self._last_window is not None:
             self.refresh(*self._last_window)
+
+    def set_wrap_text(self, enabled):
+        """Wrap long marker descriptions inside their bounded label width."""
+        self.wrap_text = bool(enabled)
+        if self._last_window is not None:
+            self.refresh(*self._last_window)
+
+    def set_annotation_font_size(self, point_size):
+        """Set marker-label font size and scale the timeline to match."""
+        point_size = max(
+            MIN_ANNOTATION_FONT_SIZE,
+            min(MAX_ANNOTATION_FONT_SIZE, int(point_size)),
+        )
+        if point_size == self.annotation_font_size:
+            return
+        old_size = self.annotation_font_size
+        self.annotation_font_size = point_size
+        for label in self._labels:
+            font = label.textItem.font()
+            font.setPointSize(point_size)
+            label.textItem.setFont(font)
+        scale = point_size / old_size
+        self._plot_height = max(100, min(720, round(self._plot_height * scale)))
+        self.plot.setFixedHeight(self._plot_height)
+        if self._last_window is not None:
+            self.refresh(*self._last_window)
+
+    def eventFilter(self, watched, event):
+        """Use Ctrl+wheel over the marker timeline to resize its labels."""
+        if (
+            watched is self.plot.viewport()
+            and event.type() == QEvent.Type.Wheel
+            and event.modifiers() & Qt.KeyboardModifier.ControlModifier
+        ):
+            delta = event.angleDelta().y()
+            steps = 1 if delta > 0 else -1 if delta < 0 else 0
+            if steps:
+                self.set_annotation_font_size(self.annotation_font_size + steps)
+            event.accept()
+            return True
+        return super().eventFilter(watched, event)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -3726,6 +3787,18 @@ class StreamViewerWindow(QMainWindow):
         self.source_streams = normalize_streams(raw, streams)
         self._stream_visibility = {stream["id"]: True for stream in self.source_streams}
         self.marker_streams = list(marker_streams or [])
+        marker_lane_count = max(1, len(self.marker_streams))
+        if len(self.marker_streams) >= 2:
+            prefixes = tuple(
+                str(stream.get("annotation_prefix") or "")
+                for stream in self.marker_streams
+            )
+            if any(
+                not str(description).startswith(prefixes)
+                for description in raw.annotations.description
+            ):
+                marker_lane_count += 1
+        self._marker_visibility = dict.fromkeys(range(marker_lane_count), True)
         self.events = events
         self.annotation_colors = dict(annotation_colors or {})
         self._add_marker_stream_colors()
@@ -3794,7 +3867,9 @@ class StreamViewerWindow(QMainWindow):
         self.setWindowTitle(title or "Stream Viewer")
         self.resize(1200, 800)
 
-        self.annotation_sidebar = AnnotationSidebar(raw, parent=self)
+        self.annotation_sidebar = AnnotationSidebar(
+            raw, marker_streams=self.marker_streams, parent=self
+        )
         self.annotation_sidebar.filter_changed.connect(self._annotation_filter_changed)
         self.annotation_sidebar.annotation_selected.connect(self._center_on_annotation)
         self.annotation_sidebar.annotation_highlighted.connect(
@@ -3897,9 +3972,7 @@ class StreamViewerWindow(QMainWindow):
             button.setCheckable(True)
             button.setChecked(True)
             button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-            button.setSizePolicy(
-                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
-            )
+            button.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
             button.setToolTip(
                 f"Show or hide {stream['name']} in the combined trace figure"
             )
@@ -3941,7 +4014,7 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_stream = AnnotationStream(
             raw,
             self.annotation_colors,
-            annotation_visible=self.annotation_sidebar.plot_accepts,
+            annotation_visible=self._annotation_visible,
             marker_streams=self.marker_streams,
             parent=self.annotation_container,
         )
@@ -4006,6 +4079,7 @@ class StreamViewerWindow(QMainWindow):
         self._default_display_montage = deepcopy(self._display_montage_baseline)
         self._create_view_menu()
         self._create_streams_menu()
+        self._create_markers_menu()
         self._create_settings_menu()
         self._create_display_montage_menu()
         self._create_help_menu()
@@ -4105,6 +4179,32 @@ class StreamViewerWindow(QMainWindow):
                 lambda checked, index=index: self._set_stream_visible(index, checked)
             )
             self.stream_visibility_actions.append(action)
+
+    def _create_markers_menu(self):
+        """Add marker-source visibility and label formatting controls."""
+        menu = self.menuBar().addMenu("&Markers")
+        self.marker_visibility_actions = []
+        for lane_index, lane in enumerate(self.annotation_stream._lane_specs):
+            action = menu.addAction(str(lane["name"]))
+            action.setCheckable(True)
+            action.setChecked(True)
+            action.setToolTip(f"Show or hide annotations from {lane['name']}")
+            action.toggled.connect(
+                lambda checked, lane_index=lane_index: self._set_marker_stream_visible(
+                    lane_index, checked
+                )
+            )
+            self.marker_visibility_actions.append(action)
+        menu.addSeparator()
+        self.wrap_marker_text_action = menu.addAction("&Wrap Text")
+        self.wrap_marker_text_action.setCheckable(True)
+        self.wrap_marker_text_action.setChecked(False)
+        self.wrap_marker_text_action.setToolTip(
+            "Wrap long annotation descriptions instead of eliding them"
+        )
+        self.wrap_marker_text_action.toggled.connect(
+            self.annotation_stream.set_wrap_text
+        )
 
     def _create_settings_menu(self):
         """Add top-level viewer preferences that affect trace rendering."""
@@ -4784,6 +4884,39 @@ class StreamViewerWindow(QMainWindow):
         for panel in self.panels:
             panel.redraw(self._start_time, self._duration)
 
+    def _marker_lane_index(self, description):
+        """Return the marker-menu lane that owns an annotation description."""
+        if len(self.marker_streams) < 2:
+            return 0
+        description = str(description)
+        for index, stream in enumerate(self.marker_streams):
+            prefix = str(stream.get("annotation_prefix") or "")
+            if prefix and description.startswith(prefix):
+                return index
+        return len(self.marker_streams)
+
+    def _annotation_visible(self, annotation_index, description):
+        """Combine browser filters with top-level marker-source visibility."""
+        lane_index = self._marker_lane_index(description)
+        return self._marker_visibility.get(lane_index, True) and (
+            self.annotation_sidebar.plot_accepts(annotation_index, description)
+        )
+
+    def _set_marker_stream_visible(self, lane_index, visible):
+        """Apply one marker-source toggle across marker and signal plots."""
+        lane_index = int(lane_index)
+        if lane_index not in self._marker_visibility:
+            return
+        visible = bool(visible)
+        self._marker_visibility[lane_index] = visible
+        if hasattr(self, "marker_visibility_actions"):
+            action = self.marker_visibility_actions[lane_index]
+            if action.isChecked() != visible:
+                action.blockSignals(True)
+                action.setChecked(visible)
+                action.blockSignals(False)
+        self._annotation_filter_changed()
+
     def _set_stream_visible(self, index, visible):
         """Apply one source-stream toggle without changing channel preferences."""
         if not 0 <= int(index) < len(self.source_streams):
@@ -4958,7 +5091,7 @@ class StreamViewerWindow(QMainWindow):
                 self._channel_settings,
                 self._channel_fits,
                 stream_visibility=self._stream_visibility,
-                annotation_visible=self.annotation_sidebar.plot_accepts,
+                annotation_visible=self._annotation_visible,
                 unit=settings["unit"],
                 gain=settings["gain"],
                 channel_order=settings.get("channel_order"),
@@ -5486,9 +5619,12 @@ class StreamViewerWindow(QMainWindow):
         indices = np.flatnonzero(valid)
         if not len(indices):
             return result
-        split_after = np.flatnonzero(
-            (np.diff(indices) > 1) | (np.diff(times[indices]) > gap_limit)
-        ) + 1
+        split_after = (
+            np.flatnonzero(
+                (np.diff(indices) > 1) | (np.diff(times[indices]) > gap_limit)
+            )
+            + 1
+        )
         for run in np.split(indices, split_after):
             run_times = times[run]
             run_values = values[run]
@@ -5496,12 +5632,8 @@ class StreamViewerWindow(QMainWindow):
                 matches = np.isclose(display_times, run_times[0], rtol=0, atol=1e-12)
                 result[matches] = run_values[0]
                 continue
-            inside = (display_times >= run_times[0]) & (
-                display_times <= run_times[-1]
-            )
-            result[inside] = np.interp(
-                display_times[inside], run_times, run_values
-            )
+            inside = (display_times >= run_times[0]) & (display_times <= run_times[-1])
+            result[inside] = np.interp(display_times[inside], run_times, run_values)
         return result
 
     def _panels_in_viewport(self):
