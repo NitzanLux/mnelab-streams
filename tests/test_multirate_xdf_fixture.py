@@ -195,12 +195,16 @@ def test_legacy_scalar_chunks_recover_effective_rate():
     while start < len(source):
         stop = min(start + pattern[pattern_index % len(pattern)], len(source))
         count = stop - start
-        source[start:stop] = true_times[stop - 1] - np.arange(
-            count - 1,
-            -1,
-            -1,
-            dtype=float,
-        ) / nominal_rate
+        source[start:stop] = (
+            true_times[stop - 1]
+            - np.arange(
+                count - 1,
+                -1,
+                -1,
+                dtype=float,
+            )
+            / nominal_rate
+        )
         start = stop
         pattern_index += 1
 

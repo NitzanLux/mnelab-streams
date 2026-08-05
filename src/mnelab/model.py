@@ -1422,9 +1422,7 @@ class Model:
             self.history.append(f"data.resample({sfreq})")
         else:
             self.current["name"] += f" (selected streams {sfreq}\u2009Hz)"
-            self.history.append(
-                f"data.resample_streams({list(stream_ids)!r}, {sfreq})"
-            )
+            self.history.append(f"data.resample_streams({list(stream_ids)!r}, {sfreq})")
 
     @data_changed
     def crop(self, start, stop):
