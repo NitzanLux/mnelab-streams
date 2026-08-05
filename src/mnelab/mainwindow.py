@@ -1122,6 +1122,11 @@ class MainWindow(QMainWindow):
         )
         if sys.platform != "darwin":
             help_menu.addSeparator()
+        self.all_actions["whats_new"] = help_menu.addAction(
+            QIcon.fromTheme("documentation"),
+            "What's &New",
+            self.show_whats_new,
+        )
         self.all_actions["check_updates"] = help_menu.addAction(
             QIcon.fromTheme("check-updates"),
             "Check for &Updates",
@@ -1143,6 +1148,7 @@ class MainWindow(QMainWindow):
             "open_xdf_folder",
             "about",
             "about_qt",
+            "whats_new",
             "check_updates",
             "quit",
             "xdf_chunks",
@@ -3150,6 +3156,11 @@ class MainWindow(QMainWindow):
     def show_about_qt(self):
         """Show About Qt dialog."""
         QMessageBox.aboutQt(self, "About Qt")
+
+    def show_whats_new(self):
+        """Show the version history and what changed in each version."""
+        dialog = WhatsNewDialog(self)
+        dialog.exec()
 
     def show_check_for_updates(self):
         """Check GitHub for a newer MNELAB Streams release."""

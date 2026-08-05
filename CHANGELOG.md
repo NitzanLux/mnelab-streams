@@ -1,5 +1,11 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Add a Help – What's New dialog, a generated documentation releases page, and
+  changelog-derived GitHub release notes, all sharing one changelog parser (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Build standalone packages for Linux and Intel macOS in addition to Windows and
+  Apple Silicon macOS, and name each artifact after its architecture (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Add a last-run-only crash log for source and packaged application failures (by
   [NitzanLux](https://github.com/NitzanLux))
 - Select filter target streams and channels before configuration, add band-stop
@@ -50,6 +56,8 @@
 
 ### 🗑️ Removed
 - Remove fNIRS functions ([#684](https://github.com/cbrnr/mnelab/pull/684) by [Clemens Brunner](https://github.com/cbrnr))
+
+<!-- inherited upstream history -->
 
 ## [1.5.6] · 2026-07-06
 ### 🔧 Fixed

@@ -134,12 +134,36 @@ uv run python create-standalone-macos.py build-dmg
 ```
 
 This creates `standalone/dist/MNELAB-Streams.app` and
-`standalone/MNELAB-Streams-<VERSION>.dmg`. The DMG is unsigned by default; public
-distribution requires Apple code signing and notarization.
+`standalone/MNELAB-Streams-<VERSION>-<ARCH>.dmg`, where `<ARCH>` is the architecture
+of the build machine (`arm64` or `x86_64`) because the bundle is not universal. The
+DMG is unsigned by default; public distribution requires Apple code signing and
+notarization.
 
-The **Standalone** GitHub Actions workflow can build both platforms without a local
-Windows or macOS build machine. Run it manually from the repository's **Actions**
-page and download the Windows and macOS artifacts after both jobs finish.
+### Linux portable archive
+
+The Linux package must be built on Linux. From the repository root:
+
+```shell
+uv sync --locked --all-groups --all-extras
+cd standalone
+source ../.venv/bin/activate
+./create-standalone-linux.sh
+```
+
+This creates the portable folder `standalone/dist/MNELAB-Streams` and packs it into
+`standalone/MNELAB-Streams-<VERSION>-linux-<ARCH>.tar.gz`. Unpack it anywhere and run
+the `MNELAB-Streams` executable inside; there is no installer.
+
+### Building every platform at once
+
+PyInstaller cannot cross-compile, so each target needs a machine of that operating
+system and architecture. The **Standalone** GitHub Actions workflow provides all of
+them — Windows x64, macOS arm64, macOS x86_64, and Linux x86_64. Run it manually from
+the repository's **Actions** page and download the artifacts once the jobs finish.
+
+Pushing a `vX.Y.Z` tag runs the same builds through the **Release** workflow, which
+additionally publishes to PyPI and creates a GitHub release whose notes are generated
+from `CHANGELOG.md` by `tools/changelog.py`.
 
 ## Getting started
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import platform
 import sys
 from importlib.metadata import PackageNotFoundError, version
 
@@ -22,8 +23,10 @@ def build_dmg():
             "MNELAB Streams version not found. Install the project first."
         )
 
+    # the bundle is not universal2, so the DMG is named after the building machine
+    arch = platform.machine()
     dmgbuild.build_dmg(
-        filename=f"MNELAB-Streams-{mnelab_version}.dmg",
+        filename=f"MNELAB-Streams-{mnelab_version}-{arch}.dmg",
         volume_name="MNELAB Streams",
         settings={
             "format": "UDBZ",

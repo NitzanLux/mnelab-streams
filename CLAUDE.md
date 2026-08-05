@@ -116,6 +116,8 @@ Every PR needs an entry in the `[UNRELEASED]` section of [CHANGELOG.md](CHANGELO
 
 Entries with PR links use this fork's repository (`NitzanLux/mnelab-streams`); existing `cbrnr/mnelab` links are inherited upstream history and should be left alone.
 
+The changelog is parsed, not just read: [src/mnelab/changelog.py](src/mnelab/changelog.py) turns it into `Release` objects for the *Help > What's New* dialog, and [tools/changelog.py](tools/changelog.py) renders it into [docs/releases.md](docs/releases.md) and into each GitHub release body. Keep the `## [VERSION] · DATE` and `### SECTION` heading shapes intact, and leave the `<!-- inherited upstream history -->` marker where it is — everything below it is treated as upstream MNELAB history with no fork builds.
+
 ## Commit messages
 
 Imperative mood, capitalized, subject line 72 characters or fewer (e.g. `Fix crash when loading XDF files`).

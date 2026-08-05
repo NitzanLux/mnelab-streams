@@ -6,6 +6,7 @@ pyinstaller `
     --collect-all pybvrf `
     --add-data "..\LICENSE;." `
     --add-data "..\NOTICE;." `
+    --add-data "..\CHANGELOG.md;." `
     --name MNELAB-Streams `
     --windowed `
     --noupx `
