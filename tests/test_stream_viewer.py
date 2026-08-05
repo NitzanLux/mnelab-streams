@@ -2,6 +2,7 @@
 #
 # License: BSD (3-clause)
 
+import json
 from copy import deepcopy
 from unittest.mock import patch
 
@@ -1109,6 +1110,69 @@ def test_annotation_dock_lists_filters_and_centers_all_annotations(viewer, raw):
     np.testing.assert_array_equal(
         raw.annotations.description, annotations_before.description
     )
+
+
+def test_guide_json_annotations_use_hierarchical_browser(qtbot, raw, streams):
+    marker = {
+        "schema_version": "0.1.0",
+        "event_uid": "66666666-6666-4666-8666-666666666666",
+        "event_id": "cue-001",
+        "parent_uid": "55555555-5555-4555-8555-555555555555",
+        "event_type": "cue",
+        "event_name": "visual_go_cue",
+        "phase": "instant",
+        "source": "task_software",
+        "sequence_number": 4,
+        "hierarchy": [
+            {
+                "level": "session",
+                "id": "ses-003",
+                "uid": "33333333-3333-4333-8333-333333333333",
+            },
+            {
+                "level": "trial",
+                "id": "trial-007",
+                "uid": "55555555-5555-4555-8555-555555555555",
+            },
+        ],
+        "data": {"cue_value": "go"},
+    }
+    raw.set_annotations(mne.Annotations([1.0], [0], [json.dumps(marker)]))
+    window = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    qtbot.addWidget(window)
+    sidebar = window.annotation_sidebar
+
+    assert sidebar.tree.isVisibleTo(sidebar)
+    assert sidebar.list.isHidden()
+    assert sidebar.tree.topLevelItem(0).text(0) == "session=ses-003"
+    trial = sidebar.tree.topLevelItem(0).child(0)
+    assert trial.text(0) == "trial=trial-007"
+    event = trial.child(0)
+    assert event.text(0) == "cue=cue-001  (visual_go_cue)"
+    occurrence = event.child(0)
+    assert occurrence.text(0) == "instant @ 1.000 s"
+    occurrence.setExpanded(True)
+    assert any(
+        occurrence.child(index).text(0) == "data"
+        for index in range(occurrence.childCount())
+    )
+
+
+def test_mixed_or_invalid_annotations_keep_flat_browser(qtbot, raw, streams):
+    raw.set_annotations(
+        mne.Annotations(
+            [1.0, 2.0],
+            [0, 0],
+            ['{"schema_version":"0.1.0"}', "ordinary annotation"],
+        )
+    )
+    window = StreamViewerWindow(raw, streams=streams, duration=2.0)
+    qtbot.addWidget(window)
+    sidebar = window.annotation_sidebar
+
+    assert sidebar.tree.isHidden()
+    assert not sidebar.list.isHidden()
+    assert sidebar.list.count() == 2
 
 
 def test_annotation_type_filter_has_clear_action_and_grouped_sections(viewer):

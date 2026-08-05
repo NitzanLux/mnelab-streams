@@ -715,6 +715,15 @@ retain suppressed entries with struck-through text so they can be restored
 individually or all at once, and the underlying MNE annotations shall remain
 unchanged.
 
+When every annotation payload in a recording complies with version 0.1.0 of the
+[Hierarchical JSON Markers for Experimental Annotation in LSL
+guide](https://github.com/NitzanLux/lsl-json-annotation-guide), the annotation browser
+shall render the ordered container path, current event, lifecycle occurrence, and event
+data as an expandable indented tree. Compliance requires both structural field
+validation and semantic hierarchy validation. If any payload is ordinary text,
+malformed JSON, unsupported, or semantically invalid, the entire browser shall retain
+the flat chronological presentation and preserve all descriptions verbatim.
+
 The right-side **Annotations** dock shall be closable/collapsible and movable between
 the left and right dock areas, but it shall not be floatable. It shall list all
 recording annotations in chronological order with onset, description, optional

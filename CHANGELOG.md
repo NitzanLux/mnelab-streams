@@ -20,6 +20,9 @@
   [NitzanLux](https://github.com/NitzanLux))
 - Add marker-stream filtering and visibility controls, wrapped annotation labels, and
   Ctrl+wheel annotation text sizing in the stream viewer
+- Render annotations as an expandable hierarchy tree when every marker complies with
+  version 0.1.0 of the LSL JSON annotation guide, falling back to the flat
+  chronological list otherwise (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and

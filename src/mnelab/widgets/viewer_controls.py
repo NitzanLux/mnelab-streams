@@ -17,11 +17,40 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMenu,
     QPushButton,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
 
+from mnelab.lsl_annotation import (
+    AnnotationFormatError,
+    marker_tree_path,
+    parse_marker,
+)
+
 ANNOTATION_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+
+def parse_annotation_set(descriptions, marker_streams=()):
+    """Parse a recording only when every annotation complies with the guide."""
+    prefixes = tuple(
+        str(stream.get("annotation_prefix") or "") for stream in marker_streams
+    )
+    markers = tuple(parse_marker(description, prefixes) for description in descriptions)
+    if not markers:
+        raise AnnotationFormatError("an empty annotation set has no marker format")
+    return markers
+
+
+def validate_annotation_format(descriptions, marker_streams=()):
+    """Return whether the complete set complies with the LSL JSON marker guide."""
+    try:
+        parse_annotation_set(descriptions, marker_streams)
+    except (AnnotationFormatError, TypeError):
+        return False
+    return True
 
 
 class AnnotationSidebar(QWidget):
@@ -122,6 +151,19 @@ class AnnotationSidebar(QWidget):
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         results_layout.addWidget(self.list, 1)
 
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("annotationHierarchy")
+        self.tree.setHeaderHidden(True)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setWordWrap(True)
+        self.tree.setToolTip(
+            "Expand annotation categories; click a timestamp to center it, or "
+            "right-click to suppress or restore it"
+        )
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.hide()
+        results_layout.addWidget(self.tree, 1)
+
         self.count_label = QLabel()
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
         results_layout.addWidget(self.count_label)
@@ -152,6 +194,11 @@ class AnnotationSidebar(QWidget):
         self.list.itemClicked.connect(self._item_selected)
         self.list.itemActivated.connect(self._item_selected)
         self.list.customContextMenuRequested.connect(self._show_annotation_context_menu)
+        self.tree.itemClicked.connect(self._tree_item_selected)
+        self.tree.itemActivated.connect(self._tree_item_selected)
+        self.tree.customContextMenuRequested.connect(
+            self._show_tree_annotation_context_menu
+        )
         self.refresh_list()
 
     @property
@@ -295,6 +342,83 @@ class AnnotationSidebar(QWidget):
         if menu.actions():
             menu.exec(self.list.viewport().mapToGlobal(position))
 
+    def _show_tree_annotation_context_menu(self, position):
+        """Open visibility actions for an occurrence in the hierarchy."""
+        item = self.tree.itemAt(position)
+        annotation_index = None if item is None else item.data(0, ANNOTATION_INDEX_ROLE)
+        menu = self.create_annotation_context_menu(annotation_index)
+        if menu.actions():
+            menu.exec(self.tree.viewport().mapToGlobal(position))
+
+    @staticmethod
+    def _add_json_value(parent, label, value):
+        """Append a recursively indented JSON value below ``parent``."""
+        if isinstance(value, dict):
+            node = QTreeWidgetItem([label])
+            parent.addChild(node)
+            for key, child in value.items():
+                AnnotationSidebar._add_json_value(node, str(key), child)
+        elif isinstance(value, list):
+            node = QTreeWidgetItem([label])
+            parent.addChild(node)
+            for index, child in enumerate(value):
+                AnnotationSidebar._add_json_value(node, f"[{index}]", child)
+        else:
+            rendered = str(value).lower() if isinstance(value, bool) else str(value)
+            parent.addChild(QTreeWidgetItem([f"{label}: {rendered}"]))
+
+    def _populate_hierarchy(self, records, markers):
+        """Build category nodes and timestamped annotation occurrence leaves."""
+        self.tree.clear()
+        nodes = {}
+        for annotation_index, onset, duration, description in records:
+            description = str(description)
+            marker = markers[annotation_index]
+            path = marker_tree_path(marker)
+            parent = None
+            key = ()
+            for segment in path:
+                key += (segment,)
+                node = nodes.get(key)
+                if node is None:
+                    node = QTreeWidgetItem([segment])
+                    if parent is None:
+                        self.tree.addTopLevelItem(node)
+                    else:
+                        parent.addChild(node)
+                    nodes[key] = node
+                parent = node
+            start = float(onset - self.raw.first_time)
+            duration = float(duration)
+            duration_text = f"  ({duration:.3f} s)" if duration > 0 else ""
+            occurrence = QTreeWidgetItem(
+                [f"{marker['phase']} @ {start:.3f} s{duration_text}"]
+            )
+            occurrence.setData(0, Qt.ItemDataRole.UserRole, start)
+            occurrence.setData(0, ANNOTATION_INDEX_ROLE, annotation_index)
+            suppressed = annotation_index in self._suppressed_indices
+            font = occurrence.font(0)
+            font.setStrikeOut(suppressed)
+            occurrence.setFont(0, font)
+            occurrence.setToolTip(
+                0,
+                f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
+                f"Description: {description}\n"
+                f"Display: {'Suppressed' if suppressed else 'Shown'}",
+            )
+            parent.addChild(occurrence)
+            occurrence.addChild(QTreeWidgetItem([f"source: {marker['source']}"]))
+            occurrence.addChild(
+                QTreeWidgetItem([f"sequence_number: {marker['sequence_number']}"])
+            )
+            occurrence.addChild(QTreeWidgetItem([f"event_uid: {marker['event_uid']}"]))
+            if "terminal_status" in marker:
+                occurrence.addChild(
+                    QTreeWidgetItem([f"terminal_status: {marker['terminal_status']}"])
+                )
+            self._add_json_value(occurrence, "data", marker["data"])
+        self.tree.expandAll()
+
     def refresh_list(self):
         """Rebuild the chronological whole-recording annotation list."""
         self.list.clear()
@@ -313,6 +437,7 @@ class AnnotationSidebar(QWidget):
             ]
             records.sort(key=lambda record: float(record[1]))
         visible_count = 0
+        visible_records = []
         for annotation_index, onset, duration, description in records:
             description = str(description)
             if not self.accepts(description):
@@ -333,7 +458,23 @@ class AnnotationSidebar(QWidget):
                 f"Display: {'Suppressed' if suppressed else 'Shown'}"
             )
             self.list.addItem(item)
+            visible_records.append((annotation_index, onset, duration, description))
             visible_count += 1
+        try:
+            markers = parse_annotation_set(
+                getattr(self.raw, "annotations", ()).description,
+                self.marker_streams,
+            )
+            hierarchical = True
+        except (AnnotationFormatError, TypeError):
+            markers = ()
+            hierarchical = False
+        if hierarchical:
+            self._populate_hierarchy(visible_records, markers)
+        else:
+            self.tree.clear()
+        self.tree.setVisible(hierarchical)
+        self.list.setVisible(not hierarchical)
         if self._regex_error is None:
             suppressed_count = sum(
                 record[0] in self._suppressed_indices for record in records
@@ -347,6 +488,19 @@ class AnnotationSidebar(QWidget):
 
     def select_annotation(self, annotation_index):
         """Select and reveal an annotation already visible in the browser."""
+        if not self.tree.isHidden():
+            iterator = QTreeWidgetItemIterator(self.tree)
+            while iterator.value() is not None:
+                item = iterator.value()
+                if item.data(0, ANNOTATION_INDEX_ROLE) == annotation_index:
+                    self.tree.setCurrentItem(item)
+                    self.tree.scrollToItem(
+                        item,
+                        QAbstractItemView.ScrollHint.PositionAtCenter,
+                    )
+                    return True
+                iterator += 1
+            return False
         for row in range(self.list.count()):
             item = self.list.item(row)
             if item.data(ANNOTATION_INDEX_ROLE) == annotation_index:
@@ -389,3 +543,11 @@ class AnnotationSidebar(QWidget):
     def _item_selected(self, item):
         self.annotation_highlighted.emit(int(item.data(ANNOTATION_INDEX_ROLE)))
         self.annotation_selected.emit(float(item.data(Qt.ItemDataRole.UserRole)))
+
+    def _tree_item_selected(self, item, _column=0):
+        """Navigate only when a timestamp occurrence, not a group, is clicked."""
+        annotation_index = item.data(0, ANNOTATION_INDEX_ROLE)
+        if annotation_index is None:
+            return
+        self.annotation_highlighted.emit(int(annotation_index))
+        self.annotation_selected.emit(float(item.data(0, Qt.ItemDataRole.UserRole)))
