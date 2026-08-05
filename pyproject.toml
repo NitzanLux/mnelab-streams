@@ -71,6 +71,9 @@ upstream = "https://github.com/cbrnr/mnelab"
 [tool.uv.build-backend]
 module-name = "mnelab"
 
+[tool.ruff]
+exclude = ["vendor"]
+
 [tool.ruff.lint]
 select = ["C4", "E", "F", "I", "PERF", "UP", "W"]
 

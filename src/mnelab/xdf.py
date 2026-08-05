@@ -621,9 +621,7 @@ class NativeXDFRecording:
             segment_stops = np.r_[boundaries, len(entry["timestamps"]) - 1]
             entry["timestamp_segments"] = tuple(
                 (int(start), int(stop))
-                for start, stop in zip(
-                    segment_starts, segment_stops, strict=True
-                )
+                for start, stop in zip(segment_starts, segment_stops, strict=True)
             )
 
         self.native_sfreqs = {

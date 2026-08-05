@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mnelab.annotation_hierarchy import hierarchical_annotation_intervals
 from mnelab.widgets.channel_display import ChannelDisplayDialog
 from mnelab.widgets.stream_display import StreamDisplayPropertiesDialog
 from mnelab.widgets.viewer_controls import AnnotationSidebar
@@ -2961,6 +2962,7 @@ class AnnotationStream(QFrame):
         raw,
         annotation_colors=None,
         annotation_visible=None,
+        annotation_label=None,
         marker_streams=None,
         smart_label_layout=False,
         wrap_text=False,
@@ -2973,6 +2975,7 @@ class AnnotationStream(QFrame):
         self.annotation_visible = annotation_visible or (
             lambda _index, _description: True
         )
+        self.annotation_label = annotation_label or (lambda _index, _description: None)
         self.marker_streams = list(marker_streams or [])
         self.smart_label_layout = bool(smart_label_layout)
         self.wrap_text = bool(wrap_text)
@@ -3121,6 +3124,9 @@ class AnnotationStream(QFrame):
                 ):
                     continue
                 lane_index, display_description = self._annotation_lane(description)
+                compact_label = self.annotation_label(annotation_index, description)
+                if compact_label is not None:
+                    display_description = compact_label
                 # An explicit annotation color wins. Otherwise provenance gives
                 # every marker stream a stable, readily distinguishable color.
                 color = self.annotation_colors.get(
@@ -3752,6 +3758,223 @@ class ActivationMapWindow(QMainWindow):
             self.time_selected.emit(float(point.x()))
 
 
+class AnnotationHierarchyMapWindow(QMainWindow):
+    """Annotation-only lifecycle overview arranged by hierarchical event path."""
+
+    time_selected = Signal(float)
+    uuid_visibility_changed = Signal(bool)
+
+    def __init__(
+        self,
+        raw,
+        intervals,
+        *,
+        show_uuids=False,
+        title=None,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.raw = raw
+        self.intervals = list(intervals)
+        self.total_duration = raw.n_times / float(raw.info["sfreq"])
+        self._event_items = []
+        self.setWindowTitle(title or "Annotation Hierarchy Map")
+        self.resize(1200, max(360, min(900, 42 * len(self.intervals) + 180)))
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(6, 6, 6, 6)
+        header = QHBoxLayout()
+        self.summary_label = QLabel()
+        self.summary_label.setWordWrap(True)
+        header.addWidget(self.summary_label, 1)
+        self.show_uuids_checkbox = QCheckBox("Show UUIDs")
+        self.show_uuids_checkbox.setChecked(bool(show_uuids))
+        self.show_uuids_checkbox.setToolTip(
+            "Show event and hierarchy UUIDs in annotation-map labels"
+        )
+        self.show_uuids_checkbox.toggled.connect(self._uuid_visibility_toggled)
+        header.addWidget(self.show_uuids_checkbox)
+        layout.addLayout(header)
+
+        self.plot = pg.PlotWidget()
+        self.plot.setMenuEnabled(False)
+        self.plot.setMouseEnabled(x=True, y=False)
+        self.plot.showGrid(x=True, y=False, alpha=0.15)
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.setTitle("Annotation lifecycles by hierarchy")
+        self.plot.getViewBox().invertY(True)
+        self.current_region = pg.LinearRegionItem(
+            values=(0, 0),
+            orientation="vertical",
+            movable=False,
+            brush=pg.mkBrush(255, 255, 255, 35),
+            pen=pg.mkPen("#ffffff", width=1.5),
+        )
+        self.current_region.setBounds((0, self.total_duration))
+        self.current_region.setZValue(20)
+        self.current_region.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        for line in self.current_region.lines:
+            line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.plot.addItem(self.current_region)
+        self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        layout.addWidget(self.plot, 1)
+        self.setCentralWidget(central)
+        self._redraw()
+
+    @property
+    def show_uuids(self):
+        return self.show_uuids_checkbox.isChecked()
+
+    def _axis_labels(self):
+        return [
+            interval.display_label(show_uuids=self.show_uuids)
+            for interval in self.intervals
+        ]
+
+    def _redraw(self):
+        """Redraw lifecycle lines while preserving the synchronized time region."""
+        for item in self._event_items:
+            self.plot.removeItem(item)
+        self._event_items.clear()
+
+        labels = self._axis_labels()
+        font_metrics = self.fontMetrics()
+        longest_label = max(
+            (font_metrics.horizontalAdvance(label) for label in labels),
+            default=0,
+        )
+        axis_width = int(
+            np.clip(
+                longest_label + 24,
+                ACTIVATION_AXIS_MIN_WIDTH,
+                ACTIVATION_AXIS_MAX_WIDTH,
+            )
+        )
+        label_width = axis_width - 24
+        elided = [
+            font_metrics.elidedText(
+                label,
+                Qt.TextElideMode.ElideRight,
+                label_width,
+            )
+            for label in labels
+        ]
+        left_axis = self.plot.getAxis("left")
+        left_axis.setTicks(
+            [[(float(index), label) for index, label in enumerate(elided)]]
+        )
+        left_axis.setWidth(axis_width)
+
+        for row, interval in enumerate(self.intervals):
+            color = _automatic_color(interval.depth)
+            pen = pg.mkPen(color, width=3)
+            if not interval.complete and not interval.instant:
+                pen.setStyle(Qt.PenStyle.DashLine)
+            if interval.instant or interval.stop <= interval.start:
+                item = pg.PlotCurveItem(
+                    [interval.start, interval.start],
+                    [row - 0.28, row + 0.28],
+                    pen=pen,
+                )
+            else:
+                item = pg.PlotCurveItem(
+                    [interval.start, interval.stop],
+                    [row, row],
+                    pen=pen,
+                    symbol="o",
+                    symbolSize=7,
+                    symbolPen=pg.mkPen(color),
+                    symbolBrush=pg.mkBrush(color),
+                )
+            item.setToolTip(self._interval_tooltip(interval))
+            item.setZValue(5)
+            self.plot.addItem(item)
+            self._event_items.append(item)
+
+        row_count = len(self.intervals)
+        self.plot.setXRange(0, self.total_duration, padding=0)
+        self.plot.setYRange(-0.5, max(0.5, row_count - 0.5), padding=0)
+        complete_count = sum(interval.complete for interval in self.intervals)
+        open_count = sum(
+            not interval.complete and not interval.instant
+            for interval in self.intervals
+        )
+        summary = f"{row_count} hierarchical event(s) · {complete_count} paired/instant"
+        if open_count:
+            summary += f" · {open_count} open or unmatched"
+        self.summary_label.setText(summary)
+        self.statusBar().showMessage(
+            "Click the map to center the stream viewer; dashed lines are incomplete"
+        )
+
+    def _interval_tooltip(self, interval):
+        path = interval.hierarchy_path(show_uuids=self.show_uuids)
+        if interval.instant:
+            timing = f"Instant: {interval.start:.6f} s"
+        else:
+            timing = f"Start: {interval.start:.6f} s\nEnd: {interval.stop:.6f} s"
+        return f"{path}\n{timing}"
+
+    def set_intervals(self, raw, intervals):
+        """Rebind an open overview after data or display filters change."""
+        self.raw = raw
+        self.intervals = list(intervals)
+        self.total_duration = raw.n_times / float(raw.info["sfreq"])
+        self.current_region.setBounds((0, self.total_duration))
+        self._redraw()
+
+    def set_show_uuids(self, visible):
+        """Synchronize identity visibility with the annotation sidebar."""
+        visible = bool(visible)
+        if self.show_uuids_checkbox.isChecked() == visible:
+            return
+        self.show_uuids_checkbox.setChecked(visible)
+
+    def set_current_window(self, start, duration):
+        """Update the non-interactive region representing the stream viewer."""
+        start = float(np.clip(start, 0, self.total_duration))
+        stop = float(np.clip(start + duration, start, self.total_duration))
+        self.current_region.setRegion((start, stop))
+
+    def _map_position(self, scene_pos):
+        view_box = self.plot.getViewBox()
+        if not view_box.sceneBoundingRect().contains(scene_pos):
+            return None
+        point = view_box.mapSceneToView(scene_pos)
+        row = int(np.floor(point.y() + 0.5))
+        if not 0 <= point.x() <= self.total_duration:
+            return None
+        if not 0 <= row < len(self.intervals):
+            return None
+        return point, row
+
+    def _mouse_moved(self, scene_pos):
+        position = self._map_position(scene_pos)
+        if position is None:
+            return
+        point, row = position
+        interval = self.intervals[row]
+        self.statusBar().showMessage(
+            f"t={point.x():.3f} s   "
+            + self._interval_tooltip(interval).replace("\n", " · ")
+        )
+
+    def _mouse_clicked(self, event):
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        position = self._map_position(event.scenePos())
+        if position is not None:
+            point, _row = position
+            self.time_selected.emit(float(point.x()))
+
+    def _uuid_visibility_toggled(self, visible):
+        self._redraw()
+        self.uuid_visibility_changed.emit(bool(visible))
+
+
 class StreamViewerWindow(QMainWindow):
     """Responsive, stream-oriented viewer for continuous MNE Raw data."""
 
@@ -3829,6 +4052,7 @@ class StreamViewerWindow(QMainWindow):
         self._closing = False
         self._columns = 1
         self.activation_map_window = None
+        self.annotation_map_window = None
         self._activation_cache = None
         self._activation_task = None
         self._activation_task_token = 0
@@ -3874,6 +4098,9 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_sidebar.annotation_selected.connect(self._center_on_annotation)
         self.annotation_sidebar.annotation_highlighted.connect(
             self._highlight_annotation
+        )
+        self.annotation_sidebar.uuid_visibility_changed.connect(
+            self._annotation_uuid_visibility_changed
         )
         self.annotation_dock = QDockWidget("Annotations", self)
         self.annotation_dock.setObjectName("streamViewerAnnotationsDock")
@@ -3922,6 +4149,14 @@ class StreamViewerWindow(QMainWindow):
             "Show relative activity across every source stream"
         )
         self.activation_map_button.clicked.connect(self.show_activation_map)
+        self.annotation_map_button = QPushButton("Annotation Map")
+        self.annotation_map_button.setToolTip(
+            "Show start/end lifecycles arranged by annotation hierarchy"
+        )
+        self.annotation_map_button.setEnabled(
+            self.annotation_sidebar.has_hierarchical_annotations
+        )
+        self.annotation_map_button.clicked.connect(self.show_annotation_map)
         self.annotations_button = QPushButton("Annotations")
         self.annotations_button.setCheckable(True)
         self.annotations_button.setChecked(True)
@@ -3946,6 +4181,7 @@ class StreamViewerWindow(QMainWindow):
         controls.addWidget(QLabel("Columns:"))
         controls.addWidget(self.column_spin)
         controls.addWidget(self.activation_map_button)
+        controls.addWidget(self.annotation_map_button)
         controls.addWidget(self.annotations_button)
         controls.addStretch()
         layout.addWidget(self.layout_controls)
@@ -4015,6 +4251,7 @@ class StreamViewerWindow(QMainWindow):
             raw,
             self.annotation_colors,
             annotation_visible=self._annotation_visible,
+            annotation_label=self.annotation_sidebar.display_description,
             marker_streams=self.marker_streams,
             parent=self.annotation_container,
         )
@@ -4162,6 +4399,13 @@ class StreamViewerWindow(QMainWindow):
         self.layout_mode_actions[self._view_mode].setChecked(True)
         menu.addSeparator()
         menu.addAction("Activation &Map…", self.show_activation_map)
+        self.annotation_map_action = menu.addAction(
+            "Annotation &Hierarchy Map…",
+            self.show_annotation_map,
+        )
+        self.annotation_map_action.setEnabled(
+            self.annotation_sidebar.has_hierarchical_annotations
+        )
 
     def _create_streams_menu(self):
         """Add top-level source visibility controls, enabled by default."""
@@ -4850,6 +5094,8 @@ class StreamViewerWindow(QMainWindow):
         if title is not None:
             self.setWindowTitle(str(title))
         self.annotation_sidebar.raw = raw
+        self.annotation_sidebar.marker_streams = self.marker_streams
+        self.annotation_sidebar.refresh_list()
         self.annotation_stream.raw = raw
         for panel in self.panels:
             panel.raw = raw
@@ -4868,6 +5114,10 @@ class StreamViewerWindow(QMainWindow):
                 self._duration,
             )
             self._start_activation_computation()
+        has_hierarchy = self.annotation_sidebar.has_hierarchical_annotations
+        self.annotation_map_button.setEnabled(has_hierarchy)
+        self.annotation_map_action.setEnabled(has_hierarchy)
+        self._refresh_annotation_map()
         self.sync_bad_channels(raw.info["bads"], redraw=False)
         self.refresh()
         return True
@@ -4883,6 +5133,7 @@ class StreamViewerWindow(QMainWindow):
         self.annotation_stream.refresh(self._start_time, self._duration)
         for panel in self.panels:
             panel.redraw(self._start_time, self._duration)
+        self._refresh_annotation_map()
 
     def _marker_lane_index(self, description):
         """Return the marker-menu lane that owns an annotation description."""
@@ -5284,6 +5535,67 @@ class StreamViewerWindow(QMainWindow):
         self._rebuild_panels(preserve_floating=False)
         self.refresh()
 
+    def _hierarchical_annotation_intervals(self):
+        """Return lifecycle rows after applying current display visibility."""
+        return hierarchical_annotation_intervals(
+            self.raw,
+            self.marker_streams,
+            visible=self._annotation_visible,
+        )
+
+    def show_annotation_map(self):
+        """Show a reusable annotation-only hierarchy and lifecycle overview."""
+        if not self.annotation_sidebar.has_hierarchical_annotations:
+            return
+        if self.annotation_map_window is not None:
+            self.annotation_map_window.show()
+            self.annotation_map_window.raise_()
+            self.annotation_map_window.activateWindow()
+            self.annotation_map_window.set_current_window(
+                self._start_time,
+                self._duration,
+            )
+            return
+
+        self.annotation_map_window = AnnotationHierarchyMapWindow(
+            self.raw,
+            self._hierarchical_annotation_intervals(),
+            show_uuids=self.annotation_sidebar.show_uuids,
+            title=f"Annotation Hierarchy Map — {self.windowTitle()}",
+            parent=self,
+        )
+        self.annotation_map_window.time_selected.connect(
+            self._center_on_activation_time
+        )
+        self.annotation_map_window.uuid_visibility_changed.connect(
+            self.annotation_sidebar.show_uuids_checkbox.setChecked
+        )
+        self.annotation_map_window.destroyed.connect(self._annotation_map_destroyed)
+        self.annotation_map_window.set_current_window(
+            self._start_time,
+            self._duration,
+        )
+        self.annotation_map_window.show()
+
+    def _refresh_annotation_map(self):
+        if self.annotation_map_window is None:
+            return
+        self.annotation_map_window.set_intervals(
+            self.raw,
+            self._hierarchical_annotation_intervals(),
+        )
+        self.annotation_map_window.set_current_window(
+            self._start_time,
+            self._duration,
+        )
+
+    def _annotation_map_destroyed(self, *_args):
+        self.annotation_map_window = None
+
+    def _annotation_uuid_visibility_changed(self, visible):
+        if self.annotation_map_window is not None:
+            self.annotation_map_window.set_show_uuids(visible)
+
     def show_activation_map(self):
         """Show one reusable overview of activation across source streams."""
         if self.activation_map_window is not None:
@@ -5518,6 +5830,11 @@ class StreamViewerWindow(QMainWindow):
             self.zoom_back_button.setEnabled(bool(self._zoom_history))
         if self.activation_map_window is not None:
             self.activation_map_window.set_current_window(
+                self._start_time,
+                self._duration,
+            )
+        if self.annotation_map_window is not None:
+            self.annotation_map_window.set_current_window(
                 self._start_time,
                 self._duration,
             )

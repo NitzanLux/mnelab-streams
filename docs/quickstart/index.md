@@ -10,7 +10,8 @@ cd mnelab-streams
 uv sync --locked --all-extras
 ```
 
-Standalone installers, when available, are published on the
+Standalone builds for Windows, macOS (Apple Silicon and Intel), and Linux are listed
+with their changes on the [Releases](../releases.md) page and published on the
 [fork's releases page](https://github.com/NitzanLux/mnelab-streams/releases).
 
 ## Running MNELAB Streams

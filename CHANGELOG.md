@@ -1,5 +1,11 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Add a Help – What's New dialog, a generated documentation releases page, and
+  changelog-derived GitHub release notes, all sharing one changelog parser (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Build standalone packages for Linux and Intel macOS in addition to Windows and
+  Apple Silicon macOS, and name each artifact after its architecture (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Add a last-run-only crash log for source and packaged application failures (by
   [NitzanLux](https://github.com/NitzanLux))
 - Select filter target streams and channels before configuration, add band-stop
@@ -20,6 +26,9 @@
   [NitzanLux](https://github.com/NitzanLux))
 - Add marker-stream filtering and visibility controls, wrapped annotation labels, and
   Ctrl+wheel annotation text sizing in the stream viewer
+- Add support for the hierarchical LSL JSON annotation scheme with a collapsible
+  browser, optional UUID display, and a synchronized annotation lifecycle map; keep
+  the annotation guide updateable as a Git submodule
 
 ### 🔧 Fixed
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and
@@ -42,9 +51,13 @@
 - Display power spectral density in a native source-oriented PyQtGraph viewer with stacked-lane and numeric-amplitude overlay modes (by [NitzanLux](https://github.com/NitzanLux))
 - Configure filters independently per source stream and selected channels, show each filter's current targets, support Nyquist-bounded notch harmonics, and limit each stream to its own Nyquist frequency (by [NitzanLux](https://github.com/NitzanLux))
 - Use MNEXTEND's `resolve_streams()` and `read_bvrf_header()` instead of depending on PyXDF and PyBVRF directly ([#679](https://github.com/cbrnr/mnelab/pull/679) by [Clemens Brunner](https://github.com/cbrnr))
+- Compact the annotation sidebar filter panel into a grid with inline placeholders, icon
+  clear buttons, and paired checkboxes (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🗑️ Removed
 - Remove fNIRS functions ([#684](https://github.com/cbrnr/mnelab/pull/684) by [Clemens Brunner](https://github.com/cbrnr))
+
+<!-- inherited upstream history -->
 
 ## [1.5.6] · 2026-07-06
 ### 🔧 Fixed

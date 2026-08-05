@@ -6,6 +6,7 @@ copyright: © MNELAB developers and MNELAB Streams contributors
 nav:
   - Home: index.md
   - Quick Start: quickstart/index.md
+  - Releases: releases.md
   - Software Specification: software-specification.md
   - Documentation:
     - documentation/index.md

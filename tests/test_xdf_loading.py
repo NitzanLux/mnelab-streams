@@ -625,8 +625,8 @@ def test_unified_xdf_rows_match_stream_names_across_changing_ids():
         ),
     ]
 
-    rows, identity_by_id, identities_by_file, presence = (
-        _unified_xdf_stream_rows(file_rows)
+    rows, identity_by_id, identities_by_file, presence = _unified_xdf_stream_rows(
+        file_rows
     )
 
     assert [row[1] for row in rows] == ["XtrodesEMG", "Camera"]
@@ -961,9 +961,7 @@ def test_merge_accepts_segmented_native_timestamp_reset(tmp_path):
         )
 
     merged = window.model.current["data"]
-    assert all(
-        np.all(np.diff(entry["timestamps"]) > 0) for entry in merged.streams
-    )
+    assert all(np.all(np.diff(entry["timestamps"]) > 0) for entry in merged.streams)
 
 
 def test_merge_native_channel_union_fills_missing_stream_interval(tmp_path):

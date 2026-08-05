@@ -10,8 +10,8 @@ Run from the repository root:
   # after the release: bump to the next dev version and reopen the CHANGELOG
   uv run tools/release.py bump 0.2.0
 
-`prepare` and `bump` run `uv lock` at the end. Both leave the resulting changes
-uncommitted so they can be reviewed before commit.
+`prepare` and `bump` regenerate `docs/releases.md` and run `uv lock` at the end.
+Both leave the resulting changes uncommitted so they can be reviewed before commit.
 """
 
 import argparse
@@ -43,20 +43,29 @@ def update_urls(version):
     """Point the installer download links to `version`."""
     for path in URL_FILES:
         text = path.read_text(encoding="utf-8")
-        # e.g. releases/download/v0.1.0/MNELAB-Streams-0.1.0.dmg
+        # e.g. releases/download/v0.1.0/MNELAB-Streams-0.1.0-arm64.dmg
         text = re.sub(
-            r"releases/download/v\d+\.\d+\.\d+/MNELAB-Streams-"
-            r"\d+\.\d+\.\d+\.(dmg|exe)",
-            rf"releases/download/v{version}/MNELAB-Streams-{version}.\1",
+            r"releases/download/v\d+(?:\.\d+)*/MNELAB-Streams-\d+(?:\.\d+)*"
+            r"((?:-[A-Za-z0-9_]+)*\.(?:dmg|exe|tar\.gz))",
+            rf"releases/download/v{version}/MNELAB-Streams-{version}\1",
             text,
         )
-        # e.g. link text "MNELAB Streams 0.1.0 (macOS)"
+        # e.g. link text "MNELAB Streams 0.1.0 (macOS, Apple Silicon)"
         text = re.sub(
-            r"MNELAB Streams \d+\.\d+\.\d+ \((macOS|Windows)\)",
+            r"MNELAB Streams \d+(?:\.\d+)* \((macOS[^)]*|Windows[^)]*|Linux[^)]*)\)",
             rf"MNELAB Streams {version} (\1)",
             text,
         )
         path.write_text(text, encoding="utf-8")
+
+
+def update_releases_page():
+    """Regenerate docs/releases.md from the changelog."""
+    subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "changelog.py"), "docs"],
+        cwd=ROOT,
+        check=True,
+    )
 
 
 def uv_lock():
@@ -79,6 +88,7 @@ def prepare(version):
     if n != 1:
         sys.exit("Could not find an [UNRELEASED] heading in CHANGELOG.md.")
     CHANGELOG.write_text(text, encoding="utf-8")
+    update_releases_page()
     uv_lock()
 
 
@@ -89,6 +99,7 @@ def bump(next_version):
     if not text.startswith("## ["):
         sys.exit("CHANGELOG.md does not start with a version heading.")
     CHANGELOG.write_text("## [UNRELEASED] · YYYY-MM-DD\n\n" + text, encoding="utf-8")
+    update_releases_page()
     uv_lock()
 
 
