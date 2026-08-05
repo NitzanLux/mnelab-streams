@@ -1,3 +1,3 @@
-[submodule "external/lsl-json-annotation-guide"]
-	path = external/lsl-json-annotation-guide
+[submodule "vendor/lsl-json-annotation-guide"]
+	path = vendor/lsl-json-annotation-guide
 	url = https://github.com/NitzanLux/lsl-json-annotation-guide.git

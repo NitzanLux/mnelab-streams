@@ -9,8 +9,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
     QComboBox,
+    QGridLayout,
     QGroupBox,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -19,15 +19,13 @@ from PySide6.QtWidgets import (
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
-    QTreeWidgetItemIterator,
     QVBoxLayout,
     QWidget,
 )
 
-from mnelab.lsl_annotation import (
-    AnnotationFormatError,
-    marker_tree_path,
-    parse_marker,
+from mnelab.annotation_hierarchy import (
+    decode_hierarchical_annotation,
+    hierarchical_annotations,
 )
 
 ANNOTATION_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
@@ -59,6 +57,7 @@ class AnnotationSidebar(QWidget):
     filter_changed = Signal()
     annotation_selected = Signal(float)
     annotation_highlighted = Signal(int)
+    uuid_visibility_changed = Signal(bool)
 
     def __init__(self, raw, marker_streams=None, parent=None):
         super().__init__(parent)
@@ -67,6 +66,10 @@ class AnnotationSidebar(QWidget):
         self._suppressed_indices = set()
         self._regex_pattern = None
         self._regex_error = None
+        self._marker_cache_signature = None
+        self._hierarchical_markers = []
+        self._markers_by_index = {}
+        self._markers_by_description = {}
         self.setMinimumWidth(100)
         self.setObjectName("annotationSidebar")
 
@@ -75,34 +78,31 @@ class AnnotationSidebar(QWidget):
         layout.setSpacing(6)
 
         self.filter_group = QGroupBox("Filter")
-        filter_layout = QVBoxLayout(self.filter_group)
-        filter_layout.setContentsMargins(6, 6, 6, 6)
-        filter_layout.setSpacing(4)
+        filter_layout = QGridLayout(self.filter_group)
+        filter_layout.setContentsMargins(6, 4, 6, 4)
+        filter_layout.setHorizontalSpacing(6)
+        filter_layout.setVerticalSpacing(3)
+        filter_layout.setColumnStretch(0, 1)
+        filter_layout.setColumnStretch(1, 1)
 
-        filter_layout.addWidget(QLabel("Description"))
         self.filter_edit = QLineEdit()
         self.filter_edit.setClearButtonEnabled(True)
         self.filter_edit.setPlaceholderText("Filter descriptions…")
         self.filter_edit.setToolTip("Case-insensitive annotation text filter")
-        filter_layout.addWidget(self.filter_edit)
+        filter_layout.addWidget(self.filter_edit, 0, 0, 1, 3)
 
-        filter_layout.addWidget(QLabel("By type"))
-        type_row = QHBoxLayout()
         self.type_combo = QComboBox()
         self.type_combo.setToolTip("Show one annotation type")
-        self.type_combo.setPlaceholderText("Select type…")
-        type_row.addWidget(self.type_combo, 1)
-        self.clear_type_button = QPushButton("Clear")
-        self.clear_type_button.setToolTip("Clear the annotation type filter")
-        self.clear_type_button.setEnabled(False)
-        type_row.addWidget(self.clear_type_button)
-        filter_layout.addLayout(type_row)
+        self.type_combo.setPlaceholderText("Filter by type…")
+        filter_layout.addWidget(self.type_combo, 1, 0, 1, 2)
+        self.clear_type_button = self._make_clear_button(
+            "Clear the annotation type filter"
+        )
+        filter_layout.addWidget(self.clear_type_button, 1, 2)
 
-        filter_layout.addWidget(QLabel("By marker stream"))
-        marker_row = QHBoxLayout()
         self.marker_combo = QComboBox()
         self.marker_combo.setToolTip("Show annotations from one marker stream")
-        self.marker_combo.setPlaceholderText("Select marker stream…")
+        self.marker_combo.setPlaceholderText("Filter by marker stream…")
         for stream in self.marker_streams:
             self.marker_combo.addItem(
                 str(stream.get("name") or "Markers"),
@@ -110,37 +110,48 @@ class AnnotationSidebar(QWidget):
             )
         self.marker_combo.setCurrentIndex(-1)
         self.marker_combo.setEnabled(bool(self.marker_streams))
-        marker_row.addWidget(self.marker_combo, 1)
-        self.clear_marker_button = QPushButton("Clear")
-        self.clear_marker_button.setToolTip("Clear the marker stream filter")
-        self.clear_marker_button.setEnabled(False)
-        marker_row.addWidget(self.clear_marker_button)
-        filter_layout.addLayout(marker_row)
+        filter_layout.addWidget(self.marker_combo, 2, 0, 1, 2)
+        self.clear_marker_button = self._make_clear_button(
+            "Clear the marker stream filter"
+        )
+        filter_layout.addWidget(self.clear_marker_button, 2, 2)
 
-        match_row = QHBoxLayout()
         self.regex_checkbox = QCheckBox("Regex")
         self.regex_checkbox.setToolTip(
             "Interpret the text filter as a case-insensitive regular expression"
         )
-        match_row.addWidget(self.regex_checkbox)
+        filter_layout.addWidget(self.regex_checkbox, 3, 0)
         self.invert_checkbox = QCheckBox("Invert")
         self.invert_checkbox.setToolTip("Show annotations that do not match")
-        match_row.addWidget(self.invert_checkbox)
-        match_row.addStretch()
-        filter_layout.addLayout(match_row)
+        filter_layout.addWidget(self.invert_checkbox, 3, 1, 1, 2)
 
-        self.apply_to_plots = QCheckBox("Apply filter to plots")
+        self.apply_to_plots = QCheckBox("Apply to plots")
         self.apply_to_plots.setChecked(True)
         self.apply_to_plots.setToolTip(
             "Hide filtered annotations from signal and annotation plots"
         )
-        filter_layout.addWidget(self.apply_to_plots)
+        filter_layout.addWidget(self.apply_to_plots, 4, 0)
+        self.show_uuids_checkbox = QCheckBox("Show UUIDs")
+        self.show_uuids_checkbox.setChecked(False)
+        self.show_uuids_checkbox.setToolTip(
+            "Show event, parent, and hierarchy UUIDs in JSON marker labels"
+        )
+        filter_layout.addWidget(self.show_uuids_checkbox, 4, 1, 1, 2)
         layout.addWidget(self.filter_group)
 
         self.results_group = QGroupBox("Annotations")
         results_layout = QVBoxLayout(self.results_group)
         results_layout.setContentsMargins(6, 6, 6, 6)
         results_layout.setSpacing(4)
+        self.tree = QTreeWidget()
+        self.tree.setHeaderHidden(True)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setWordWrap(True)
+        self.tree.setToolTip(
+            "Expand hierarchy levels and click a lifecycle marker to center it"
+        )
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        results_layout.addWidget(self.tree, 1)
         self.list = QListWidget()
         self.list.setAlternatingRowColors(True)
         self.list.setWordWrap(True)
@@ -169,12 +180,17 @@ class AnnotationSidebar(QWidget):
         results_layout.addWidget(self.count_label)
         layout.addWidget(self.results_group, 1)
 
-        descriptions = (
-            sorted({str(value) for value in raw.annotations.description})
-            if hasattr(raw, "annotations")
-            else []
-        )
-        self.type_combo.addItems(descriptions)
+        self._ensure_marker_cache()
+        markers = self._hierarchical_markers
+        hierarchical_indices = {marker.annotation_index for marker in markers}
+        descriptions = {marker.event_name for marker in markers} | {
+            str(value)
+            for index, value in enumerate(
+                getattr(getattr(raw, "annotations", None), "description", [])
+            )
+            if index not in hierarchical_indices
+        }
+        self.type_combo.addItems(sorted(descriptions))
         self.type_combo.setCurrentIndex(-1)
 
         self.filter_edit.textChanged.connect(self._filter_updated)
@@ -191,15 +207,66 @@ class AnnotationSidebar(QWidget):
         self.regex_checkbox.toggled.connect(self._filter_updated)
         self.invert_checkbox.toggled.connect(self._filter_updated)
         self.apply_to_plots.toggled.connect(self.filter_changed)
+        self.show_uuids_checkbox.toggled.connect(self._uuid_visibility_updated)
         self.list.itemClicked.connect(self._item_selected)
         self.list.itemActivated.connect(self._item_selected)
         self.list.customContextMenuRequested.connect(self._show_annotation_context_menu)
-        self.tree.itemClicked.connect(self._tree_item_selected)
-        self.tree.itemActivated.connect(self._tree_item_selected)
+        self.tree.itemClicked.connect(self._item_selected)
+        self.tree.itemActivated.connect(self._item_selected)
         self.tree.customContextMenuRequested.connect(
             self._show_tree_annotation_context_menu
         )
         self.refresh_list()
+
+    @staticmethod
+    def _make_clear_button(tooltip):
+        """Return a compact, initially disabled button that clears a filter."""
+        button = QPushButton("✕")
+        button.setToolTip(tooltip)
+        button.setEnabled(False)
+        button.setFixedWidth(button.fontMetrics().height() + 10)
+        return button
+
+    @property
+    def show_uuids(self):
+        """Return whether JSON identity fields are visible in viewer labels."""
+        return self.show_uuids_checkbox.isChecked()
+
+    @property
+    def has_hierarchical_annotations(self):
+        """Return whether the current recording contains supported JSON markers."""
+        self._ensure_marker_cache()
+        return bool(self._hierarchical_markers)
+
+    def _ensure_marker_cache(self):
+        """Decode each JSON annotation once for the current Raw and stream metadata."""
+        annotations = getattr(self.raw, "annotations", None)
+        stream_signature = tuple(
+            (
+                str(stream.get("name") or ""),
+                str(stream.get("annotation_prefix") or ""),
+            )
+            for stream in self.marker_streams
+        )
+        signature = (
+            id(self.raw),
+            id(annotations),
+            len(annotations) if annotations is not None else 0,
+            stream_signature,
+        )
+        if signature == self._marker_cache_signature:
+            return
+        self._marker_cache_signature = signature
+        self._hierarchical_markers = hierarchical_annotations(
+            self.raw,
+            self.marker_streams,
+        )
+        self._markers_by_index = {
+            marker.annotation_index: marker for marker in self._hierarchical_markers
+        }
+        self._markers_by_description = {
+            marker.description: marker for marker in self._hierarchical_markers
+        }
 
     @property
     def state(self):
@@ -211,6 +278,7 @@ class AnnotationSidebar(QWidget):
             "regex": self.regex_checkbox.isChecked(),
             "invert": self.invert_checkbox.isChecked(),
             "apply_to_plots": self.apply_to_plots.isChecked(),
+            "show_uuids": self.show_uuids,
         }
 
     def set_state(self, state):
@@ -222,6 +290,7 @@ class AnnotationSidebar(QWidget):
             self.regex_checkbox,
             self.invert_checkbox,
             self.apply_to_plots,
+            self.show_uuids_checkbox,
         )
         for widget in widgets:
             widget.blockSignals(True)
@@ -235,6 +304,7 @@ class AnnotationSidebar(QWidget):
         self.regex_checkbox.setChecked(bool(state.get("regex", False)))
         self.invert_checkbox.setChecked(bool(state.get("invert", False)))
         self.apply_to_plots.setChecked(bool(state.get("apply_to_plots", True)))
+        self.show_uuids_checkbox.setChecked(bool(state.get("show_uuids", False)))
         for widget in widgets:
             widget.blockSignals(False)
         self.clear_type_button.setEnabled(type_index >= 0)
@@ -242,26 +312,50 @@ class AnnotationSidebar(QWidget):
         self._compile_regex()
         self.refresh_list()
         self.filter_changed.emit()
+        self.uuid_visibility_changed.emit(self.show_uuids)
 
     def accepts(self, description):
         """Return whether ``description`` matches the current list filter."""
         description = str(description)
+        self._ensure_marker_cache()
+        marker = self._markers_by_description.get(description)
+        if marker is None:
+            marker = decode_hierarchical_annotation(
+                description,
+                marker_streams=self.marker_streams,
+            )
+        searchable = marker.searchable_text() if marker is not None else description
+        annotation_type = marker.event_name if marker is not None else description
         query = self.filter_edit.text()
         selected_type = self.type_combo.currentText()
         marker_prefix = self.marker_combo.currentData()
         if self._regex_error is not None:
             return False
         if self.regex_checkbox.isChecked():
-            text_matches = not query or bool(self._regex_pattern.search(description))
+            text_matches = not query or bool(self._regex_pattern.search(searchable))
         else:
             query = query.strip().casefold()
-            text_matches = not query or query in description.casefold()
+            text_matches = not query or query in searchable.casefold()
         matches = (
             text_matches
-            and (not selected_type or description == selected_type)
+            and (not selected_type or annotation_type == selected_type)
             and (not marker_prefix or description.startswith(str(marker_prefix)))
         )
         return not matches if self.invert_checkbox.isChecked() else matches
+
+    def display_description(self, annotation_index, description):
+        """Return a compact label for JSON markers and ``None`` for plain text."""
+        self._ensure_marker_cache()
+        marker = self._markers_by_index.get(int(annotation_index))
+        if marker is None:
+            marker = decode_hierarchical_annotation(
+                description,
+                annotation_index=annotation_index,
+                marker_streams=self.marker_streams,
+            )
+        if marker is None:
+            return None
+        return marker.display_label(show_uuids=self.show_uuids)
 
     def plot_accepts(self, annotation_index, description):
         """Return whether an annotation should be rendered on plots."""
@@ -325,8 +419,9 @@ class AnnotationSidebar(QWidget):
             for index in sorted(self._suppressed_indices):
                 description = str(self.raw.annotations.description[index])
                 onset = float(self.raw.annotations.onset[index] - self.raw.first_time)
+                display = self.display_description(index, description) or description
                 show_menu.addAction(
-                    f"{onset:.3f} s  {description}",
+                    f"{onset:.3f} s  {display}",
                     lambda _checked=False, index=index: self.set_annotation_visible(
                         index, True
                     ),
@@ -343,85 +438,17 @@ class AnnotationSidebar(QWidget):
             menu.exec(self.list.viewport().mapToGlobal(position))
 
     def _show_tree_annotation_context_menu(self, position):
-        """Open visibility actions for an occurrence in the hierarchy."""
+        """Open visibility actions for a lifecycle marker in the hierarchy."""
         item = self.tree.itemAt(position)
         annotation_index = None if item is None else item.data(0, ANNOTATION_INDEX_ROLE)
         menu = self.create_annotation_context_menu(annotation_index)
         if menu.actions():
             menu.exec(self.tree.viewport().mapToGlobal(position))
 
-    @staticmethod
-    def _add_json_value(parent, label, value):
-        """Append a recursively indented JSON value below ``parent``."""
-        if isinstance(value, dict):
-            node = QTreeWidgetItem([label])
-            parent.addChild(node)
-            for key, child in value.items():
-                AnnotationSidebar._add_json_value(node, str(key), child)
-        elif isinstance(value, list):
-            node = QTreeWidgetItem([label])
-            parent.addChild(node)
-            for index, child in enumerate(value):
-                AnnotationSidebar._add_json_value(node, f"[{index}]", child)
-        else:
-            rendered = str(value).lower() if isinstance(value, bool) else str(value)
-            parent.addChild(QTreeWidgetItem([f"{label}: {rendered}"]))
-
-    def _populate_hierarchy(self, records, markers):
-        """Build category nodes and timestamped annotation occurrence leaves."""
-        self.tree.clear()
-        nodes = {}
-        for annotation_index, onset, duration, description in records:
-            description = str(description)
-            marker = markers[annotation_index]
-            path = marker_tree_path(marker)
-            parent = None
-            key = ()
-            for segment in path:
-                key += (segment,)
-                node = nodes.get(key)
-                if node is None:
-                    node = QTreeWidgetItem([segment])
-                    if parent is None:
-                        self.tree.addTopLevelItem(node)
-                    else:
-                        parent.addChild(node)
-                    nodes[key] = node
-                parent = node
-            start = float(onset - self.raw.first_time)
-            duration = float(duration)
-            duration_text = f"  ({duration:.3f} s)" if duration > 0 else ""
-            occurrence = QTreeWidgetItem(
-                [f"{marker['phase']} @ {start:.3f} s{duration_text}"]
-            )
-            occurrence.setData(0, Qt.ItemDataRole.UserRole, start)
-            occurrence.setData(0, ANNOTATION_INDEX_ROLE, annotation_index)
-            suppressed = annotation_index in self._suppressed_indices
-            font = occurrence.font(0)
-            font.setStrikeOut(suppressed)
-            occurrence.setFont(0, font)
-            occurrence.setToolTip(
-                0,
-                f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
-                f"Description: {description}\n"
-                f"Display: {'Suppressed' if suppressed else 'Shown'}",
-            )
-            parent.addChild(occurrence)
-            occurrence.addChild(QTreeWidgetItem([f"source: {marker['source']}"]))
-            occurrence.addChild(
-                QTreeWidgetItem([f"sequence_number: {marker['sequence_number']}"])
-            )
-            occurrence.addChild(QTreeWidgetItem([f"event_uid: {marker['event_uid']}"]))
-            if "terminal_status" in marker:
-                occurrence.addChild(
-                    QTreeWidgetItem([f"terminal_status: {marker['terminal_status']}"])
-                )
-            self._add_json_value(occurrence, "data", marker["data"])
-        self.tree.expandAll()
-
     def refresh_list(self):
         """Rebuild the chronological whole-recording annotation list."""
         self.list.clear()
+        self.tree.clear()
         records = []
         if hasattr(self.raw, "annotations"):
             records = [
@@ -436,6 +463,11 @@ class AnnotationSidebar(QWidget):
                 )
             ]
             records.sort(key=lambda record: float(record[1]))
+        self._ensure_marker_cache()
+        markers = self._hierarchical_markers
+        markers_by_index = self._markers_by_index
+        hierarchy_nodes = {}
+        other_root = None
         visible_count = 0
         visible_records = []
         for annotation_index, onset, duration, description in records:
@@ -445,36 +477,96 @@ class AnnotationSidebar(QWidget):
             start = float(onset - self.raw.first_time)
             duration = float(duration)
             duration_text = f"  ({duration:.3f} s)" if duration > 0 else ""
-            item = QListWidgetItem(f"{start:10.3f} s  {description}{duration_text}")
-            item.setData(Qt.ItemDataRole.UserRole, start)
-            item.setData(ANNOTATION_INDEX_ROLE, annotation_index)
             suppressed = annotation_index in self._suppressed_indices
-            font = item.font()
+            marker = markers_by_index.get(annotation_index)
+            if marker is None and markers:
+                if other_root is None:
+                    other_root = QTreeWidgetItem(["Other annotations"])
+                    self.tree.addTopLevelItem(other_root)
+                item = QTreeWidgetItem(
+                    [f"{start:10.3f} s  {description}{duration_text}"]
+                )
+                item.setData(0, Qt.ItemDataRole.UserRole, start)
+                item.setData(0, ANNOTATION_INDEX_ROLE, annotation_index)
+                item.setToolTip(
+                    0,
+                    f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
+                    f"Description: {description}\n"
+                    f"Display: {'Suppressed' if suppressed else 'Shown'}",
+                )
+                other_root.addChild(item)
+            elif marker is not None:
+                parent = None
+                path = ()
+                if marker.stream_name:
+                    path = (("stream", marker.stream_name),)
+                    parent = hierarchy_nodes.get(path)
+                    if parent is None:
+                        parent = QTreeWidgetItem([marker.stream_name])
+                        self.tree.addTopLevelItem(parent)
+                        hierarchy_nodes[path] = parent
+                for node in marker.hierarchy:
+                    identity = node.get("uid") or node["id"]
+                    path += ((node["level"], identity),)
+                    child = hierarchy_nodes.get(path)
+                    if child is None:
+                        label = f"{node['level']}: {node['id']}"
+                        if self.show_uuids and node.get("uid"):
+                            label += f" · uid={node['uid']}"
+                        child = QTreeWidgetItem([label])
+                        if parent is None:
+                            self.tree.addTopLevelItem(child)
+                        else:
+                            parent.addChild(child)
+                        hierarchy_nodes[path] = child
+                    parent = child
+                event_path = path + (("event", marker.event_uid),)
+                event_item = hierarchy_nodes.get(event_path)
+                if event_item is None:
+                    event_item = QTreeWidgetItem(
+                        [
+                            marker.display_label(
+                                show_uuids=self.show_uuids,
+                                include_phase=False,
+                            )
+                        ]
+                    )
+                    if parent is None:
+                        self.tree.addTopLevelItem(event_item)
+                    else:
+                        parent.addChild(event_item)
+                    hierarchy_nodes[event_path] = event_item
+                terminal = marker.payload.get("terminal_status")
+                phase = marker.phase
+                if terminal:
+                    phase += f" · {terminal}"
+                item = QTreeWidgetItem([f"{start:10.3f} s  {phase}"])
+                item.setData(0, Qt.ItemDataRole.UserRole, start)
+                item.setData(0, ANNOTATION_INDEX_ROLE, annotation_index)
+                item.setToolTip(0, marker.tooltip(show_uuids=self.show_uuids))
+                event_item.addChild(item)
+            else:
+                item = QListWidgetItem(f"{start:10.3f} s  {description}{duration_text}")
+                item.setData(Qt.ItemDataRole.UserRole, start)
+                item.setData(ANNOTATION_INDEX_ROLE, annotation_index)
+                item.setToolTip(
+                    f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
+                    f"Description: {description}\n"
+                    f"Display: {'Suppressed' if suppressed else 'Shown'}"
+                )
+                self.list.addItem(item)
+            font = item.font(0) if isinstance(item, QTreeWidgetItem) else item.font()
             font.setStrikeOut(suppressed)
-            item.setFont(font)
-            item.setToolTip(
-                f"Onset: {start:.6f} s\nDuration: {duration:.6f} s\n"
-                f"Description: {description}\n"
-                f"Display: {'Suppressed' if suppressed else 'Shown'}"
-            )
-            self.list.addItem(item)
-            visible_records.append((annotation_index, onset, duration, description))
+            if isinstance(item, QTreeWidgetItem):
+                item.setFont(0, font)
+            else:
+                item.setFont(font)
             visible_count += 1
-        try:
-            markers = parse_annotation_set(
-                getattr(self.raw, "annotations", ()).description,
-                self.marker_streams,
-            )
-            hierarchical = True
-        except (AnnotationFormatError, TypeError):
-            markers = ()
-            hierarchical = False
-        if hierarchical:
-            self._populate_hierarchy(visible_records, markers)
-        else:
-            self.tree.clear()
-        self.tree.setVisible(hierarchical)
-        self.list.setVisible(not hierarchical)
+        use_tree = bool(markers)
+        self.tree.setVisible(use_tree)
+        self.list.setVisible(not use_tree)
+        if use_tree:
+            self.tree.expandToDepth(0)
         if self._regex_error is None:
             suppressed_count = sum(
                 record[0] in self._suppressed_indices for record in records
@@ -489,9 +581,12 @@ class AnnotationSidebar(QWidget):
     def select_annotation(self, annotation_index):
         """Select and reveal an annotation already visible in the browser."""
         if not self.tree.isHidden():
-            iterator = QTreeWidgetItemIterator(self.tree)
-            while iterator.value() is not None:
-                item = iterator.value()
+            pending = [
+                self.tree.topLevelItem(index)
+                for index in range(self.tree.topLevelItemCount())
+            ]
+            while pending:
+                item = pending.pop(0)
                 if item.data(0, ANNOTATION_INDEX_ROLE) == annotation_index:
                     self.tree.setCurrentItem(item)
                     self.tree.scrollToItem(
@@ -499,7 +594,7 @@ class AnnotationSidebar(QWidget):
                         QAbstractItemView.ScrollHint.PositionAtCenter,
                     )
                     return True
-                iterator += 1
+                pending[0:0] = [item.child(index) for index in range(item.childCount())]
             return False
         for row in range(self.list.count()):
             item = self.list.item(row)
@@ -532,6 +627,12 @@ class AnnotationSidebar(QWidget):
         self.refresh_list()
         self.filter_changed.emit()
 
+    def _uuid_visibility_updated(self, visible):
+        """Rebuild display-only labels without modifying recorded JSON."""
+        self.refresh_list()
+        self.uuid_visibility_changed.emit(bool(visible))
+        self.filter_changed.emit()
+
     def _type_filter_changed(self, index):
         """Keep the adjacent Clear action synchronized with type selection."""
         self.clear_type_button.setEnabled(index >= 0)
@@ -540,14 +641,14 @@ class AnnotationSidebar(QWidget):
         """Keep the marker-stream Clear action synchronized with selection."""
         self.clear_marker_button.setEnabled(index >= 0)
 
-    def _item_selected(self, item):
-        self.annotation_highlighted.emit(int(item.data(ANNOTATION_INDEX_ROLE)))
-        self.annotation_selected.emit(float(item.data(Qt.ItemDataRole.UserRole)))
-
-    def _tree_item_selected(self, item, _column=0):
-        """Navigate only when a timestamp occurrence, not a group, is clicked."""
-        annotation_index = item.data(0, ANNOTATION_INDEX_ROLE)
-        if annotation_index is None:
+    def _item_selected(self, item, *_args):
+        if isinstance(item, QTreeWidgetItem):
+            annotation_index = item.data(0, ANNOTATION_INDEX_ROLE)
+            onset = item.data(0, Qt.ItemDataRole.UserRole)
+        else:
+            annotation_index = item.data(ANNOTATION_INDEX_ROLE)
+            onset = item.data(Qt.ItemDataRole.UserRole)
+        if annotation_index is None or onset is None:
             return
         self.annotation_highlighted.emit(int(annotation_index))
-        self.annotation_selected.emit(float(item.data(0, Qt.ItemDataRole.UserRole)))
+        self.annotation_selected.emit(float(onset))

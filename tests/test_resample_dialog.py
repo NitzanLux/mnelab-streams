@@ -32,9 +32,7 @@ def test_resample_dialog_requires_at_least_one_stream(qtbot):
     qtbot.addWidget(dialog)
 
     for index in range(dialog.stream_tree.topLevelItemCount()):
-        dialog.stream_tree.topLevelItem(index).setCheckState(
-            0, Qt.CheckState.Unchecked
-        )
+        dialog.stream_tree.topLevelItem(index).setCheckState(0, Qt.CheckState.Unchecked)
 
     assert dialog.selected_stream_ids == []
     assert not dialog._ok_button.isEnabled()

@@ -731,6 +731,16 @@ duration, and a count of visible versus total records. Selecting an item shall c
 its onset in the shared viewer; clicking an annotation in the dedicated lane shall
 highlight and reveal its list item.
 
+Descriptions containing a recognized hierarchical LSL JSON marker shall remain unchanged
+in the underlying MNE annotations but use a structured display. The browser shall
+group them into collapsible ordered hierarchy nodes and one event node per
+`event_uid`, with lifecycle samples below that event. Its annotation-type filter shall
+use `event_name`, while text filtering shall search human-readable event, hierarchy,
+source, phase, and data fields. UUID fields shall be hidden from browser and marker
+timeline labels by default; **Show UUIDs** shall reveal them without modifying data.
+Ordinary annotations shall retain the chronological list, and mixed recordings shall
+place ordinary entries under an **Other annotations** tree node.
+
 Filtering shall support:
 
 - an exact annotation-type selector;
@@ -763,7 +773,27 @@ source stream and no merging caused by the current panel layout.
 - Worker errors shall be shown in the child window, and pressing **Activation Map**
   again shall retry after a failure.
 
-### 12.9 Power spectral density viewer
+### 12.9 Annotation hierarchy map
+
+When supported hierarchical JSON markers are present, **Annotation Map** and **View >
+Annotation Hierarchy Map** shall open a whole-recording lifecycle overview.
+
+- Markers sharing one `event_uid` shall form one row ordered by their hierarchy path.
+- `start` and `end` LSL timestamps shall define a horizontal interval with visible
+  endpoints; `instant` markers shall be vertical ticks.
+- A start without a matching end shall extend to the recording end and use a dashed
+  line. An end/update without a start shall remain visible as unmatched rather than
+  being silently discarded.
+- Current annotation and marker-stream display filters shall also control rows in the
+  map, without altering the recorded annotations.
+- UUID visibility, the highlighted viewer window, and click-to-center navigation shall
+  remain synchronized with the main stream viewer.
+
+The referenced annotation format is pinned at
+`vendor/lsl-json-annotation-guide` as a Git submodule so schema and documentation
+updates can be reviewed independently.
+
+### 12.10 Power spectral density viewer
 
 Power spectral density shall open in an MNELAB-native PyQtGraph window rather than a
 Matplotlib figure. It shall reuse the raw viewer's visual organization where applicable:

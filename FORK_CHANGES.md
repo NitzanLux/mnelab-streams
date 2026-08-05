@@ -140,6 +140,14 @@ group-scaled modes. Joined panels retain independent settings for every source s
 - Clicking an annotation lane item selects the corresponding entry in the annotation
   sidebar.
 - Literal and regular-expression annotation filters can also control plot visibility.
+- Markers conforming to the nested LSL JSON annotation guide are decoded for display
+  without changing their recorded payload. The annotation dock becomes a collapsible
+  session/run/block/trial/action tree, and **Show UUIDs** reveals identity fields that
+  are hidden by default in the tree and marker timeline.
+- The annotation hierarchy map reconstructs shared-UID `start`/`end` lifecycles into
+  horizontal lines organized by hierarchy, draws instant annotations as ticks, and
+  flags unmatched/open intervals with dashed lines. Its time selection and current
+  window remain synchronized with the signal viewer.
 - The asynchronous activation map computes a bounded per-source relative-RMS
   overview. Bins containing missing data are visually distinct instead of being
   treated as ordinary low activation.

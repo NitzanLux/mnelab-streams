@@ -30,9 +30,7 @@ class XDFStreamsDialog(QDialog):
     def __init__(self, parent, rows, fname=None, presence_counts=None, file_count=None):
         super().__init__(parent)
         if fname is None:
-            self.setWindowTitle(
-                f"Select XDF Streams — {int(file_count or 0)} files"
-            )
+            self.setWindowTitle(f"Select XDF Streams — {int(file_count or 0)} files")
         else:
             self.setWindowTitle(f"Select XDF Streams — {Path(fname).name}")
         self.fname = fname

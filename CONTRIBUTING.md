@@ -129,7 +129,8 @@ To create the app bundle, run the following command in the `standalone` folder:
 This creates `MNELAB-Streams.app` in `standalone/dist`. The checked-in workflow creates
 an unsigned build; configure and use the fork maintainer's own Apple signing and
 notarization credentials before distributing a notarized release. Create the
-`MNELAB-Streams-<VERSION>.dmg` file as follows:
+`MNELAB-Streams-<VERSION>-<ARCH>.dmg` file (`<ARCH>` being `arm64` or `x86_64`, since
+the bundle is not universal) as follows:
 
 ```
 ./create-standalone-macos.py build-dmg
@@ -165,6 +166,29 @@ On Windows, download and install [Inno Setup](https://jrsoftware.org/isinfo.php)
 ```
 
 This produces `MNELAB-Streams-<VERSION>.exe` in the `standalone` folder.
+
+
+### Linux
+
+Run the following command in the `standalone` folder:
+
+```
+./create-standalone-linux.sh
+```
+
+This produces the portable folder `standalone/dist/MNELAB-Streams` and packs it into
+`standalone/MNELAB-Streams-<VERSION>-linux-<ARCH>.tar.gz`. There is no Linux installer;
+users unpack the archive and run the `MNELAB-Streams` executable inside it.
+
+
+### Release notes and the releases page
+
+`CHANGELOG.md` is the single source of truth for what changed in each version.
+`tools/changelog.py` renders it in two places: `docs` regenerates `docs/releases.md`
+(done automatically by `tools/release.py`), and `notes X.Y.Z` produces the GitHub
+release body used by the release workflow. The same parser
+(`src/mnelab/changelog.py`) backs the *Help – What's New* dialog, which reads the
+`CHANGELOG.md` bundled into the standalone builds.
 
 
 #### Creating the app icon
