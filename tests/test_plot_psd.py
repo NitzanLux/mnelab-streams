@@ -9,6 +9,7 @@ import numpy as np
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
+from mnelab.xdf import NativeXDFRecording
 
 
 class _AcceptedPSDDialog:
@@ -55,3 +56,58 @@ def test_plot_psd_falls_back_to_all_channels(qtbot, tmp_path):
     assert viewer.windowTitle() == "Power spectral density — auxiliary"
     viewer.close()
     qtbot.waitUntil(lambda: not window._psd_viewers)
+
+
+def test_plot_psd_keeps_native_xdf_stream_rates(qtbot, tmp_path):
+    """Native XDF PSDs use each stream's own samples and Nyquist limit."""
+    rng = np.random.default_rng(3)
+    streams = [
+        {
+            "id": 1,
+            "name": "Slow",
+            "raw": mne.io.RawArray(
+                rng.normal(size=(1, 400)),
+                mne.create_info(["Slow"], 40, ["misc"]),
+                verbose=False,
+            ),
+            "timestamps": np.arange(400) / 40,
+        },
+        {
+            "id": 2,
+            "name": "Fast",
+            "raw": mne.io.RawArray(
+                rng.normal(size=(1, 1000)),
+                mne.create_info(["Fast"], 100, ["misc"]),
+                verbose=False,
+            ),
+            "timestamps": np.arange(1000) / 100,
+        },
+    ]
+    descriptors = [
+        {
+            "id": stream["id"],
+            "name": stream["name"],
+            "type": "Aux",
+            "channel_names": stream["raw"].ch_names,
+            "nominal_srate": stream["raw"].info["sfreq"],
+        }
+        for stream in streams
+    ]
+    model = Model()
+    window = MainWindow(model)
+    model.view = window
+    qtbot.addWidget(window)
+    path = tmp_path / "native.xdf"
+    path.write_bytes(b"x")
+    model.load_data(NativeXDFRecording(streams), path, source_streams=descriptors)
+
+    assert window.all_actions["plot_psd"].isEnabled()
+    with patch("mnelab.mainwindow.PSDDialog", return_value=_AcceptedPSDDialog()):
+        window.plot_psd()
+
+    viewer = window._psd_viewers[-1]
+    slow_frequencies, _values = viewer.panels[0]._curves[0].getData()
+    fast_frequencies, _values = viewer.panels[1]._curves[0].getData()
+    assert slow_frequencies[-1] <= 20
+    assert fast_frequencies[-1] == 50
+    viewer.close()

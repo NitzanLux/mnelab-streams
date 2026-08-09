@@ -15,6 +15,7 @@ from PySide6.QtCore import (
     QPoint,
     QRectF,
     QRunnable,
+    QSize,
     Qt,
     QThreadPool,
     QTimer,
@@ -145,6 +146,9 @@ MAX_AMPLITUDE = 1000.0
 CHANNEL_LIST_WIDTH = 96
 CHANNEL_LABEL_WIDTH = 64
 PANEL_BODY_SPACING = 2
+CHANNEL_LANE_HEIGHT = 32
+MIN_STREAM_PLOT_HEIGHT = 64
+MAX_STREAM_PLOT_HEIGHT = 2000
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
@@ -644,6 +648,49 @@ class StreamDragHandle(QLabel):
 
     def mouseReleaseEvent(self, event):
         self._press_position = None
+        super().mouseReleaseEvent(event)
+
+
+class StreamResizeHandle(QFrame):
+    """Bottom-edge handle that changes one stream panel's plot height."""
+
+    resize_requested = Signal(int)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._last_global_y = None
+        self.setFixedHeight(8)
+        self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.setToolTip("Drag to resize this stream")
+        self.setFrameShape(QFrame.Shape.HLine)
+        self.setFrameShadow(QFrame.Shadow.Sunken)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_global_y = int(round(event.globalPosition().y()))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if (
+            self._last_global_y is not None
+            and event.buttons() & Qt.MouseButton.LeftButton
+        ):
+            global_y = int(round(event.globalPosition().y()))
+            delta = global_y - self._last_global_y
+            if delta:
+                self._last_global_y = global_y
+                self.resize_requested.emit(delta)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._last_global_y = None
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
 
 
@@ -1286,7 +1333,11 @@ class StreamPanel(QFrame):
             axisItems={"left": TraceLabelAxis(orientation="left")}
         )
         visible_count = len(self.visible_channel_names)
-        self.plot.setMinimumHeight(max(150, min(500, 32 * visible_count)))
+        self._plot_height = max(
+            150,
+            MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * visible_count,
+        )
+        self.plot.setFixedHeight(self._plot_height)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
         self.plot.showAxis("left")
@@ -1304,6 +1355,9 @@ class StreamPanel(QFrame):
         self.plot.measurement_changed.connect(self._measurement_changed)
         body.addWidget(self.plot, 1)
         outer.addLayout(body)
+        self.resize_handle = StreamResizeHandle(self)
+        self.resize_handle.resize_requested.connect(self.resize_plot_by)
+        outer.addWidget(self.resize_handle)
         self._curves = [
             self.plot.plot([], [], pen=pg.mkPen("#4c78a8", width=1))
             for _ in range(visible_count)
@@ -1314,6 +1368,17 @@ class StreamPanel(QFrame):
         self._update_channel_list()
         self._update_page_controls()
         self._update_scale_mode_controls()
+        self._size_hint_chrome_height = max(
+            0, super().sizeHint().height() - self._plot_height
+        )
+
+    def sizeHint(self):
+        """Return a panel height that follows its independently resized plot."""
+        hint = super().sizeHint()
+        chrome_height = getattr(self, "_size_hint_chrome_height", None)
+        if chrome_height is None:
+            return hint
+        return QSize(hint.width(), chrome_height + self._plot_height)
 
     @property
     def title(self):
@@ -1390,7 +1455,9 @@ class StreamPanel(QFrame):
         index = int(np.clip(index, 0, self.page_count - 1))
         if index == self._page:
             return
+        previous_visible_count = len(self.visible_channel_names)
         self._page = index
+        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1701,11 +1768,14 @@ class StreamPanel(QFrame):
         visible = bool(visible)
         if self.channel_settings[name]["visible"] == visible:
             return
+        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name]["visible"] = visible
-        self._visibility_changed()
+        self._visibility_changed(previous_visible_count)
 
-    def _visibility_changed(self):
+    def _visibility_changed(self, previous_visible_count=None):
         """Refresh labels, lanes, and fetched rows after a visibility change."""
+        if previous_visible_count is not None:
+            self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()
@@ -1713,8 +1783,37 @@ class StreamPanel(QFrame):
         self.page_changed.emit()
         self._settings_updated()
 
+    def _adjust_height_for_channel_count(self, previous_visible_count):
+        """Add or remove one plot lane for each visibility-count change."""
+        lane_delta = len(self.visible_channel_names) - int(previous_visible_count)
+        if lane_delta:
+            self.resize_plot_by(CHANNEL_LANE_HEIGHT * lane_delta)
+
+    def resize_plot_by(self, delta):
+        """Resize this panel's plot by a mouse drag or channel-lane change."""
+        height = int(
+            np.clip(
+                self._plot_height + int(delta),
+                MIN_STREAM_PLOT_HEIGHT,
+                MAX_STREAM_PLOT_HEIGHT,
+            )
+        )
+        if height == self._plot_height:
+            return
+        self._plot_height = height
+        self.plot.setFixedHeight(height)
+        if self.layout() is not None:
+            self.layout().invalidate()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            parent_layout = self.parentWidget().layout()
+            if parent_layout is not None:
+                parent_layout.invalidate()
+            self.parentWidget().updateGeometry()
+
     def reset_channel_display(self, name):
         """Restore one channel's display-only properties."""
+        previous_visible_count = len(self.visible_channel_names)
         self.channel_settings[name] = {
             "gain": 1.0,
             "offset": 0.0,
@@ -1723,6 +1822,7 @@ class StreamPanel(QFrame):
             "visible": True,
         }
         self.channel_fits.pop(name, None)
+        self._adjust_height_for_channel_count(previous_visible_count)
         self._values = np.empty((len(self.visible_channel_names), 0))
         self._axis_channels = None
         self._resize_curves()

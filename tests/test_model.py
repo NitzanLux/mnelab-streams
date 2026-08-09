@@ -183,6 +183,86 @@ def test_append_data(edf_files, duplicate_data):
     )
 
 
+def _append_model(tmp_path, raws):
+    """Return a model holding `raws` as separate datasets, with the first current."""
+    model = Model()
+    for i, raw in enumerate(raws):
+        path = tmp_path / f"rec_{i}.edf"
+        path.write_bytes(b"x")
+        model.load_data(raw, path)
+    model.index = 0
+    return model
+
+
+def _raw(names, seed):
+    rng = np.random.default_rng(seed)
+    return mne.io.RawArray(
+        rng.standard_normal((len(names), 50)) * 1e-6,
+        mne.create_info(names, 100, "eeg"),
+        verbose=False,
+    )
+
+
+def test_append_candidates_report_forceable_metadata_conflicts(tmp_path):
+    """Datasets differing only in metadata are listed with a forceable reason."""
+    model = _append_model(tmp_path, [_raw(["A", "B"], 0), _raw(["A", "B"], 1)])
+    other = model.data[1]["data"]
+    other.info["bads"] = ["A"]
+    with other.info._unlock():
+        other.info["lowpass"] = 30.0
+
+    assert model.get_compatibles() == []  # blocked, as before
+
+    ((idx, _, conflicts),) = model.get_append_candidates()
+    assert idx == 1
+    assert all(forceable for _, forceable in conflicts)
+    assert any("bad channels" in message for message, _ in conflicts)
+    assert any("lowpass" in message for message, _ in conflicts)
+
+
+def test_append_candidates_report_blocked_conflicts(tmp_path):
+    """Differing sample grids are reported as not forceable."""
+    model = _append_model(tmp_path, [_raw(["A", "B"], 0), _raw(["A", "C"], 1)])
+    with model.data[1]["data"].info._unlock():
+        model.data[1]["data"].info["sfreq"] = 200.0
+
+    ((_, _, conflicts),) = model.get_append_candidates()
+    assert not any(forceable for _, forceable in conflicts)
+    assert any("channel names" in message for message, _ in conflicts)
+    assert any("200 Hz instead of 100 Hz" in message for message, _ in conflicts)
+
+
+def test_append_data_force_harmonizes_metadata(tmp_path):
+    """Forced appending adopts the current dataset's metadata without touching data."""
+    first, second = _raw(["A", "B"], 0), _raw(["A", "B"], 1)
+    expected = second.get_data().copy()
+    model = _append_model(tmp_path, [first, second])
+    model.data[1]["data"].info["bads"] = ["A"]
+
+    model.append_data([1], force=True)
+
+    appended = model.current["data"]
+    assert appended.n_times == 100
+    assert appended.info["bads"] == []  # taken from the current dataset
+    np.testing.assert_allclose(appended.get_data()[:, 50:], expected)
+    assert model.data[1]["data"].info["bads"] == ["A"]  # source left untouched
+
+
+def test_append_data_matches_channel_order(tmp_path):
+    """Appended datasets are reordered so samples stay with their own channel."""
+    first, second = _raw(["A", "B"], 0), _raw(["B", "A"], 1)
+    expected = second.get_data(picks=["A", "B"]).copy()
+    model = _append_model(tmp_path, [first, second])
+
+    assert model.get_compatibles() == [(1, model.data[1]["name"])]
+    model.append_data([1])
+
+    appended = model.current["data"]
+    assert appended.ch_names == ["A", "B"]
+    np.testing.assert_allclose(appended.get_data()[:, 50:], expected)
+    assert model.data[1]["data"].ch_names == ["B", "A"]  # source left untouched
+
+
 @pytest.fixture
 def model_with_data(tmp_path):
     """Model with a single 30-second EDF file loaded."""

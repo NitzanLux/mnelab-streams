@@ -120,6 +120,42 @@ def _data_nbytes(data):
     return array.nbytes if array is not None else data.get_data().nbytes
 
 
+def _native_streams_by_name(recording):
+    """Map casefolded native stream names to entries, plus the first duplicate name.
+
+    Mirrors the keying that `concatenate_native_xdf_recordings` performs, so append
+    conflicts are reported with the same rules the merge itself applies.
+    """
+    mapping = {}
+    duplicate = None
+    for entry in recording.streams:
+        name = str(entry["name"]).strip()
+        key = name.casefold()
+        if key in mapping and duplicate is None:
+            duplicate = name
+        mapping.setdefault(key, entry)
+    return mapping, duplicate
+
+
+def _close(a, b):
+    """Compare two optional floats, tolerating `None` on either side."""
+    if a is None or b is None:
+        return a is None and b is None
+    return bool(np.isclose(a, b))
+
+
+def _format_hz(value):
+    """Format a filter cutoff for display in an append conflict message."""
+    return "unset" if value is None else f"{value:.6g} Hz"
+
+
+def _abbreviate(names, limit=3):
+    """Join channel names, eliding everything past `limit`."""
+    if len(names) > limit:
+        return ", ".join(names[:limit]) + f", ... (+{len(names) - limit})"
+    return ", ".join(names)
+
+
 def _effective_streams(data, streams):
     """Return stored streams or the channel-type decomposition used by the viewer."""
     if streams:
@@ -1430,6 +1466,197 @@ class Model:
         self.current["name"] += " (cropped)"
         self.history.append(f"data.crop({start}, {stop})")
 
+    def _append_conflicts(self, d):
+        """Return reasons why dataset `d` cannot be appended to the current one.
+
+        Parameters
+        ----------
+        d : dict
+            Dataset to check against the current dataset.
+
+        Returns
+        -------
+        list of tuple of (str, bool)
+            One `(message, forceable)` pair per mismatching property. `forceable`
+            marks differences that `append_data(force=True)` can resolve because
+            they concern metadata only and never the samples themselves. An empty
+            list means the dataset can be appended directly.
+        """
+        data = self.current["data"]
+        conflicts = []
+        d_info = d["data"].info if d["data"] is not None else d["_evict_info"]
+
+        if d_info["nchan"] != data.info["nchan"]:
+            conflicts.append(
+                (f"{d_info['nchan']} channels instead of {data.info['nchan']}", False)
+            )
+        if set(d_info["ch_names"]) != set(data.info["ch_names"]):
+            missing = sorted(set(data.info["ch_names"]) - set(d_info["ch_names"]))
+            extra = sorted(set(d_info["ch_names"]) - set(data.info["ch_names"]))
+            detail = []
+            if missing:
+                detail.append(f"missing {_abbreviate(missing)}")
+            if extra:
+                detail.append(f"extra {_abbreviate(extra)}")
+            conflicts.append(("channel names: " + ", ".join(detail), False))
+        if not np.isclose(d_info["sfreq"], data.info["sfreq"]):
+            conflicts.append(
+                (
+                    f"{d_info['sfreq']:.6g} Hz instead of {data.info['sfreq']:.6g} Hz",
+                    False,
+                )
+            )
+        if sorted(d_info["bads"]) != sorted(data.info["bads"]):
+            conflicts.append(
+                (
+                    f"bad channels {_abbreviate(sorted(d_info['bads'])) or 'none'} "
+                    f"instead of {_abbreviate(sorted(data.info['bads'])) or 'none'}",
+                    True,
+                )
+            )
+        conflicts.extend(
+            (
+                f"{band} {_format_hz(d_info[band])} instead of "
+                f"{_format_hz(data.info[band])}",
+                True,
+            )
+            for band in ("highpass", "lowpass")
+            if not _close(d_info[band], data.info[band])
+        )
+        if d["dtype"] == "raw":
+            d_cals = d["data"]._cals if d["data"] is not None else d["_evict_cals"]
+            if len(d_cals) != len(data._cals) or np.any(
+                np.asarray(d_cals) != np.asarray(data._cals)
+            ):
+                conflicts.append(("calibration factors differ", True))
+        if d["dtype"] == "epochs":
+            if d["data"] is not None:
+                d_tmin = d["data"].tmin
+                d_tmax = d["data"].tmax
+                d_baseline = d["data"].baseline
+            else:
+                d_tmin = d["_evict_tmin"]
+                d_tmax = d["_evict_tmax"]
+                d_baseline = d["_evict_baseline"]
+            if d_tmin != data.tmin or d_tmax != data.tmax:
+                conflicts.append(
+                    (
+                        f"epochs span {d_tmin} to {d_tmax} s instead of "
+                        f"{data.tmin} to {data.tmax} s",
+                        False,
+                    )
+                )
+            if d_baseline != data.baseline:
+                conflicts.append(
+                    (f"baseline {d_baseline} instead of {data.baseline}", False)
+                )
+        return conflicts
+
+    def _native_append_conflicts(self, d):
+        """Return reasons why native XDF dataset `d` cannot be appended.
+
+        Native recordings keep one `Raw` per stream at its own rate, so they are
+        matched by stream name rather than by a common channel list and sampling
+        frequency. The rules mirror `concatenate_native_xdf_recordings`: differing
+        stream or channel sets are forceable because the merge can fill the absent
+        intervals with NaN, while duplicate stream names, differing channel types,
+        and differing nominal rates are not resolvable.
+        """
+        data = self.current["data"]
+        other = d["data"]
+        if not isinstance(other, NativeXDFRecording):
+            return [("not a native multi-rate XDF recording", False)]
+
+        current_map, current_duplicate = _native_streams_by_name(data)
+        other_map, other_duplicate = _native_streams_by_name(other)
+        duplicates = [
+            (f'stream name "{name}" is not unique in {label}', False)
+            for name, label in (
+                (current_duplicate, "the current data set"),
+                (other_duplicate, "this data set"),
+            )
+            if name is not None
+        ]
+        if duplicates:
+            return duplicates  # streams cannot be matched up at all
+
+        conflicts = []
+        missing = sorted(current_map.keys() - other_map.keys())
+        extra = sorted(other_map.keys() - current_map.keys())
+        if missing or extra:
+            detail = []
+            if missing:
+                detail.append(f"missing {_abbreviate(missing)}")
+            if extra:
+                detail.append(f"extra {_abbreviate(extra)}")
+            conflicts.append(("streams: " + ", ".join(detail), True))
+
+        for key in sorted(current_map.keys() & other_map.keys()):
+            entry, other_entry = current_map[key], other_map[key]
+            name = entry["name"]
+            raw, other_raw = entry["raw"], other_entry["raw"]
+            types = dict(zip(raw.ch_names, raw.get_channel_types()))
+            other_types = dict(zip(other_raw.ch_names, other_raw.get_channel_types()))
+            mismatched = sorted(
+                channel
+                for channel in types.keys() & other_types.keys()
+                if types[channel] != other_types[channel]
+            )
+            if mismatched:
+                conflicts.append(
+                    (
+                        f'"{name}" channel type differs for {_abbreviate(mismatched)}',
+                        False,
+                    )
+                )
+            elif raw.ch_names != other_raw.ch_names:
+                conflicts.append((f'"{name}" channels differ', True))
+            rates = [
+                float(item.get("nominal_srate") or 0) for item in (entry, other_entry)
+            ]
+            if all(rate > 0 for rate in rates) and not np.allclose(
+                rates, np.median(rates), rtol=1e-3, atol=1e-9
+            ):
+                conflicts.append(
+                    (
+                        f'"{name}" nominal rate {rates[1]:.6g} Hz instead of '
+                        f"{rates[0]:.6g} Hz",
+                        False,
+                    )
+                )
+        return conflicts
+
+    def get_append_candidates(self):
+        """Return all datasets that could be appended to the current one.
+
+        Unlike `get_compatibles`, incompatible datasets are reported along with the
+        reason they are incompatible instead of being dropped.
+
+        Returns
+        -------
+        list of tuple of (int, str, list)
+            Index, name, and conflicts (see `_append_conflicts` and
+            `_native_append_conflicts`) of every dataset of the same type as the
+            current one. Datasets with no conflicts can be appended directly.
+        """
+        candidates = []
+        if self.current is None or self.current["dtype"] not in ("raw", "epochs"):
+            return candidates
+        native = isinstance(self.current["data"], NativeXDFRecording)
+        for idx, d in enumerate(self.data):
+            if idx == self.index:  # skip current dataset
+                continue
+            if d["dtype"] != self.current["dtype"]:
+                continue
+            if native:
+                conflicts = self._native_append_conflicts(d)
+            elif isinstance(d["data"], NativeXDFRecording):
+                conflicts = [("a native multi-rate XDF recording", False)]
+            else:
+                conflicts = self._append_conflicts(d)
+            candidates.append((idx, d["name"], conflicts))
+        return candidates
+
     def get_compatibles(self):
         """Return indices and names of datasets compatible with the current one.
 
@@ -1440,69 +1667,82 @@ class Model:
         list of tuple of (int, str)
             Indices and names of compatible datasets.
         """
-        compatibles = []
-        data = self.current["data"]
-        for idx, d in enumerate(self.data):
-            if idx == self.index:  # skip current dataset
-                continue
-            if d["dtype"] not in ("raw", "epochs"):
-                continue
-            if d["dtype"] != self.current["dtype"]:
-                continue
-            d_info = d["data"].info if d["data"] is not None else d["_evict_info"]
-            if d_info["nchan"] != data.info["nchan"]:
-                continue
-            if set(d_info["ch_names"]) != set(data.info["ch_names"]):
-                continue
-            if d_info["bads"] != data.info["bads"]:
-                continue
-            if not np.isclose(d_info["sfreq"], data.info["sfreq"]):
-                continue
-            if not np.isclose(d_info["highpass"], data.info["highpass"]):
-                continue
-            if not np.isclose(d_info["lowpass"], data.info["lowpass"]):
-                continue
-            if d["dtype"] == "raw":
-                d_cals = d["data"]._cals if d["data"] is not None else d["_evict_cals"]
-                if any(d_cals != data._cals):
-                    continue
-            if d["dtype"] == "epochs":
-                if d["data"] is not None:
-                    d_tmin = d["data"].tmin
-                    d_tmax = d["data"].tmax
-                    d_baseline = d["data"].baseline
-                else:
-                    d_tmin = d["_evict_tmin"]
-                    d_tmax = d["_evict_tmax"]
-                    d_baseline = d["_evict_baseline"]
-                if d_tmin != data.tmin:
-                    continue
-                if d_tmax != data.tmax:
-                    continue
-                if d_baseline != data.baseline:
-                    continue
-            compatibles.append((idx, d["name"]))
-        return compatibles
+        return [
+            (idx, name)
+            for idx, name, conflicts in self.get_append_candidates()
+            if not conflicts
+        ]
+
+    def _prepare_for_append(self, other, reference, force):
+        """Return `other`, or a copy of it made concatenable with `reference`.
+
+        Channel order is always matched to `reference`, because `mne` compares
+        channel names as a set and would otherwise silently concatenate samples of
+        different channels. With `force`, the metadata that `_append_conflicts`
+        reports as forceable is additionally overwritten with `reference`'s. Samples
+        are never modified, and `other` itself is left untouched.
+        """
+        names = list(reference.info["ch_names"])
+        reorder = list(other.info["ch_names"]) != names
+        if not force and not reorder:
+            return other
+        prepared = other.copy()
+        if not getattr(prepared, "preload", True):
+            prepared.load_data()  # keep `_cals` from being applied to unread samples
+        if reorder:
+            prepared.reorder_channels(names)
+        if force:
+            prepared.info["bads"] = list(reference.info["bads"])
+            with prepared.info._unlock():
+                prepared.info["highpass"] = reference.info["highpass"]
+                prepared.info["lowpass"] = reference.info["lowpass"]
+            if hasattr(prepared, "_cals") and hasattr(reference, "_cals"):
+                prepared._cals = np.array(reference._cals, copy=True)
+        return prepared
 
     @data_changed
-    def append_data(self, selected_idx):
-        """Append the given raw data sets."""
+    def append_data(self, selected_idx, force=False):
+        """Append the given raw data sets.
+
+        Parameters
+        ----------
+        selected_idx : list of int
+            Indices of the datasets to append, in the order they should follow the
+            current dataset.
+        force : bool
+            If True, harmonize bad channels, filter settings, and calibration
+            factors of the appended datasets with the current dataset instead of
+            letting `mne` reject them. Only metadata is adjusted; samples are
+            concatenated unchanged.
+        """
         for idx in selected_idx:  # ensure all source datasets are in memory
             self.reload_dataset(idx)
         self.current["name"] += " (appended)"
-        datasets = [self.current["data"]]
+        reference = self.current["data"]
+        datasets = [reference]
         indices = []
+        harmonized = False
 
         for idx in selected_idx:
-            datasets.append(self.data[idx]["data"])
+            other = self.data[idx]["data"]
+            prepared = self._prepare_for_append(other, reference, force)
+            harmonized = harmonized or prepared is not other
+            datasets.append(prepared)
             indices.append(f"datasets[{idx}]")
 
+        if harmonized:
+            self.history.append(
+                "# appended data sets were copied and their channel order, bad "
+                "channels,\n# filter settings, and calibration factors matched to "
+                "`data` beforehand"
+            )
+        args = f"[data, {', '.join(indices)}]"
         if self.current["dtype"] == "raw":
             self.current["data"] = mne.concatenate_raws(datasets)
-            self.history.append(f"mne.concatenate_raws(data, {', '.join(indices)})")
+            self.history.append(f"data = mne.concatenate_raws({args})")
         elif self.current["dtype"] == "epochs":
             self.current["data"] = mne.concatenate_epochs(datasets)
-            self.history.append(f"mne.concatenate_epochs(data, {', '.join(indices)})")
+            self.history.append(f"data = mne.concatenate_epochs({args})")
 
     @data_changed
     def apply_ica(self):

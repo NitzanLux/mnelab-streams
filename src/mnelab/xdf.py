@@ -8,6 +8,7 @@ import os
 import struct
 import tempfile
 import uuid
+import warnings
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import UTC, datetime
@@ -62,6 +63,66 @@ _UNIT_NAMES = {
 }
 
 
+class NativeXDFSpectrum:
+    """PSD results whose channels retain their source streams' frequency grids."""
+
+    def __init__(self, recording, spectra):
+        self.info = recording.info.copy()
+        self._channel_data = {}
+        self._channel_frequencies = {}
+        for spectrum in spectra:
+            values = spectrum.get_data(picks="all", exclude=())
+            for name, values_for_channel in zip(spectrum.ch_names, values, strict=True):
+                self._channel_data[name] = values_for_channel
+                self._channel_frequencies[name] = spectrum.freqs.copy()
+        self.ch_names = list(self._channel_data)
+        self.info["bads"] = [
+            name for name in self.info["bads"] if name in self.ch_names
+        ]
+
+    def get_channel_types(self, picks=None, unique=False, only_data_chs=False):
+        """Return channel types with the subset of MNE's Spectrum API we use."""
+        names = self.ch_names if picks is None else list(picks)
+        types = [
+            mne.channel_type(self.info, self.info["ch_names"].index(name))
+            for name in names
+        ]
+        return list(dict.fromkeys(types)) if unique else types
+
+    def channel_frequency_data(self):
+        """Return independent frequency and power arrays by channel name."""
+        return {
+            name: (self._channel_frequencies[name], self._channel_data[name])
+            for name in self.ch_names
+        }
+
+    def copy(self):
+        """Return an independent copy suitable for channel selection."""
+        copied = object.__new__(type(self))
+        copied.info = self.info.copy()
+        copied.ch_names = list(self.ch_names)
+        copied._channel_data = {
+            name: values.copy() for name, values in self._channel_data.items()
+        }
+        copied._channel_frequencies = {
+            name: values.copy() for name, values in self._channel_frequencies.items()
+        }
+        return copied
+
+    def pick(self, picks):
+        """Restrict this spectrum to the requested channel names."""
+        names = [
+            self.ch_names[pick] if isinstance(pick, int) else pick for pick in picks
+        ]
+        self.ch_names = names
+        self._channel_data = {name: self._channel_data[name] for name in names}
+        self._channel_frequencies = {
+            name: self._channel_frequencies[name] for name in names
+        }
+        self.info["bads"] = [name for name in self.info["bads"] if name in names]
+        return self
+
+
 def _xdf_channel_metadata(stream):
     """Return channel names, MNE types, and physical-unit scale for one stream."""
     from mne.io import get_channel_type_constants
@@ -88,6 +149,42 @@ def _xdf_channel_metadata(stream):
     microvolts = {"microvolt", "microvolts", "µV", "μV", "uV"}
     scale = np.asarray([1e-6 if unit in microvolts else 1.0 for unit in units])
     return names, types, scale
+
+
+def _repair_nonfinite_raw_psd(raw, spectrum, fmin, fmax):
+    """Recompute non-finite PSD rows without bridging missing-data gaps."""
+    psds = spectrum.get_data(picks="all", exclude=())
+    nonfinite = ~np.isfinite(psds).all(axis=1)
+    if not nonfinite.any():
+        return spectrum
+
+    samples = raw.get_data(picks=spectrum.ch_names, reject_by_annotation="NaN").copy()
+    samples[~np.isfinite(samples)] = np.nan
+    n_fft = min(raw.n_times, 2048)
+    for index in np.flatnonzero(nonfinite):
+        if not np.isfinite(samples[index]).any():
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore", message=r"nperseg = .* greater than input length"
+            )
+            repaired, freqs = mne.time_frequency.psd_array_welch(
+                samples[index : index + 1],
+                raw.info["sfreq"],
+                fmin=fmin,
+                fmax=fmax,
+                n_fft=n_fft,
+                verbose=False,
+            )
+        if np.array_equal(freqs, spectrum.freqs):
+            psds[index] = repaired[0]
+
+    finite = np.isfinite(psds).all(axis=1)
+    if not finite.any():
+        return None
+    repaired_spectrum = spectrum.copy().pick(np.flatnonzero(finite))
+    repaired_spectrum._data[...] = psds[finite]
+    return repaired_spectrum
 
 
 def _unique_xdf_channel_names(entries):
@@ -203,6 +300,38 @@ class NativeXDFRecording:
     def set_annotations(self, annotations):
         self.annotations = annotations.copy()
         return self
+
+    def compute_psd(self, **kwargs):
+        """Compute PSD independently for each native-rate source stream."""
+        spectra = []
+        for entry in self.streams:
+            raw = entry["raw"]
+            stream_kwargs = kwargs.copy()
+            requested_fmax = stream_kwargs.get("fmax", np.inf)
+            stream_kwargs["fmax"] = min(requested_fmax, raw.info["sfreq"] / 2)
+            if stream_kwargs.get("fmin", 0) > stream_kwargs["fmax"]:
+                continue
+            with warnings.catch_warnings():
+                warnings.filterwarnings(
+                    "ignore",
+                    message=r"Non-finite values .* PSD for those channels will be NaN",
+                    category=RuntimeWarning,
+                )
+                try:
+                    spectrum = raw.compute_psd(**stream_kwargs)
+                except ValueError as error:
+                    if "yielded no channels" not in str(error):
+                        raise
+                    spectrum = raw.compute_psd(**(stream_kwargs | {"picks": "all"}))
+            spectrum = _repair_nonfinite_raw_psd(
+                raw,
+                spectrum,
+                stream_kwargs.get("fmin", 0),
+                stream_kwargs["fmax"],
+            )
+            if spectrum is not None:
+                spectra.append(spectrum)
+        return NativeXDFSpectrum(self, spectra)
 
     def apply_function(self, function, picks=None, **kwargs):
         """Apply a channel-wise function without crossing stream timestamp gaps.

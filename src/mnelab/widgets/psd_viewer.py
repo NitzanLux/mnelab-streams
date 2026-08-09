@@ -48,23 +48,28 @@ def _stream_frequency_mask(frequencies, source):
 
 def _channel_frequency_data(spectrum):
     """Return finite-aware channel-by-frequency data from any MNE Spectrum."""
+    if hasattr(spectrum, "channel_frequency_data"):
+        return spectrum.channel_frequency_data()
     values = spectrum.get_data(picks="all", exclude=())
     dimensions = list(spectrum._dims)
     channel_axis = dimensions.index("channel")
     frequency_axis = dimensions.index("freq")
     values = np.moveaxis(values, (channel_axis, frequency_axis), (0, 1))
-    if values.ndim == 2:
-        return values
-    aggregate_axes = tuple(range(2, values.ndim))
-    finite = np.isfinite(values)
-    counts = finite.sum(axis=aggregate_axes)
-    totals = np.where(finite, values, 0).sum(axis=aggregate_axes)
-    return np.divide(
-        totals,
-        counts,
-        out=np.full(totals.shape, np.nan, dtype=float),
-        where=counts > 0,
-    )
+    if values.ndim != 2:
+        aggregate_axes = tuple(range(2, values.ndim))
+        finite = np.isfinite(values)
+        counts = finite.sum(axis=aggregate_axes)
+        totals = np.where(finite, values, 0).sum(axis=aggregate_axes)
+        values = np.divide(
+            totals,
+            counts,
+            out=np.full(totals.shape, np.nan, dtype=float),
+            where=counts > 0,
+        )
+    return {
+        name: (spectrum.freqs, values[index])
+        for index, name in enumerate(spectrum.ch_names)
+    }
 
 
 def _spatial_colors(info, enabled):
@@ -97,6 +102,7 @@ class PSDPanel(QFrame):
         spectrum,
         source,
         channel_data,
+        channel_frequencies,
         colors,
         channels_per_page=20,
         parent=None,
@@ -105,10 +111,10 @@ class PSDPanel(QFrame):
         self.spectrum = spectrum
         self.source = source
         self.channel_data = channel_data
+        self.channel_frequencies = channel_frequencies
         self.colors = colors
-        self.frequency_mask = _stream_frequency_mask(spectrum.freqs, source)
-        self.frequencies = spectrum.freqs[self.frequency_mask]
         self.channel_names = list(source["channel_names"])
+        self.frequencies, _values = self._frequency_values(self.channel_names[0])
         self.channels_per_page = max(1, int(channels_per_page))
         self._visible = dict.fromkeys(self.channel_names, True)
         self._page = 0
@@ -216,6 +222,13 @@ class PSDPanel(QFrame):
         floor = peak * 1e-12
         return 10 * np.log10(np.maximum(values, floor))
 
+    def _frequency_values(self, name):
+        """Return the channel's PSD bins clipped to its source Nyquist limit."""
+        frequencies = self.channel_frequencies[name]
+        values = self.channel_data[name]
+        mask = _stream_frequency_mask(frequencies, self.source)
+        return frequencies[mask], values[mask]
+
     def _resize_curves(self):
         count = len(self.visible_channel_names)
         while len(self._curves) > count:
@@ -310,8 +323,12 @@ class PSDPanel(QFrame):
 
         finite_values = []
         for curve, name in zip(self._curves, names, strict=True):
-            values = self._display_values(name)[self.frequency_mask]
-            curve.setData(self.frequencies, values)
+            frequencies, values = self._frequency_values(name)
+            if self._db:
+                values = self._display_values(name)[
+                    _stream_frequency_mask(self.channel_frequencies[name], self.source)
+                ]
+            curve.setData(frequencies, values)
             curve.setPen(pg.mkPen(self._channel_color(name), width=1))
             finite = values[np.isfinite(values)]
             if finite.size:
@@ -345,7 +362,11 @@ class PSDPanel(QFrame):
         )
 
         for curve, name, offset in zip(self._curves, names, offsets, strict=True):
-            values = self._display_values(name)[self.frequency_mask]
+            frequencies, values = self._frequency_values(name)
+            if self._db:
+                values = self._display_values(name)[
+                    _stream_frequency_mask(self.channel_frequencies[name], self.source)
+                ]
             finite = values[np.isfinite(values)]
             if finite.size:
                 low = float(np.min(finite))
@@ -355,7 +376,7 @@ class PSDPanel(QFrame):
                 fitted = (values - center) / scale * 2 * PSD_LANE_HALF_HEIGHT
             else:
                 fitted = np.zeros_like(values)
-            curve.setData(self.frequencies, fitted + offset)
+            curve.setData(frequencies, fitted + offset)
             curve.setPen(pg.mkPen(self._channel_color(name), width=1))
 
         margin = PSD_LANE_STEP / 2
@@ -383,8 +404,13 @@ class PSDViewerWindow(QMainWindow):
         self.max_channels = max(1, int(max_channels))
         self._columns = 1
         self.panels = []
-        values = _channel_frequency_data(spectrum)
-        self.channel_data = dict(zip(spectrum.ch_names, values, strict=True))
+        frequency_data = _channel_frequency_data(spectrum)
+        self.channel_frequencies = {
+            name: frequencies for name, (frequencies, _values) in frequency_data.items()
+        }
+        self.channel_data = {
+            name: values for name, (_frequencies, values) in frequency_data.items()
+        }
         self.colors = _spatial_colors(spectrum.info, spatial_colors)
 
         window_title = "Power spectral density"
@@ -439,6 +465,7 @@ class PSDViewerWindow(QMainWindow):
                     spectrum,
                     source,
                     self.channel_data,
+                    self.channel_frequencies,
                     self.colors,
                     channels_per_page=self.max_channels,
                     parent=self.panel_container,

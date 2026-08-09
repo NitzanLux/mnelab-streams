@@ -827,6 +827,20 @@ def test_plot_help_is_persistent_instead_of_hovering(viewer):
     assert "Ctrl+wheel: zoom" in hint
 
 
+def test_stream_resize_handle_changes_its_panel_height(qtbot, viewer):
+    """The boundary below a stream panel resizes its trace plot."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    panel = viewer.panels[0]
+    original_height = panel.plot.height()
+
+    panel.resize_handle.resize_requested.emit(48)
+    qtbot.waitUntil(lambda: panel.plot.height() == original_height + 48)
+
+    assert panel.resize_handle.toolTip() == "Drag to resize this stream"
+    assert panel.sizeHint().height() >= panel.plot.height()
+
+
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):
     """The synchronized bottom lane clips regions and wraps horizontal labels."""
     layout = viewer.centralWidget().layout()

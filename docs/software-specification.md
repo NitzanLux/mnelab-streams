@@ -260,7 +260,8 @@ rules include:
 - Interpolating bad channels requires both bad channels and channel locations.
 - ICLabel requires a fitted ICA solution and channel locations. Applying/exporting ICA
   requires a fitted solution.
-- Appending requires at least one compatible open dataset.
+- Appending requires at least one other open dataset of the same type; the dialog
+  reports why any of them cannot be appended.
 - Epoch datasets expose only exporters supported for epochs.
 
 ## 7. File I/O
@@ -304,9 +305,11 @@ The XDF selection dialog shall show every stream's ID, name, type, channel count
 channel format, and nominal sampling rate. Numeric data streams and string marker
 streams shall be selectable in the same table.
 
-- Selecting multiple XDF files shall open an ordering dialog offering either separate
-  datasets or sequential concatenation into one dataset. Concatenation requires equal
-  channel identities, channel types, and sampling frequencies, reorders identical
+- **File > Open XDF Files** shall use an XDF-only multi-file picker, allowing the user
+  to select several recordings with standard platform multi-selection controls such as
+  Ctrl-click. Selecting multiple XDF files shall open an ordering dialog offering either
+  separate datasets or sequential concatenation into one dataset. Concatenation requires
+  equal channel identities, channel types, and sampling frequencies, reorders identical
   channel sets safely, and inserts boundary annotations between recordings.
 - Folder import shall recursively include all `.xdf`, `.xdfz`, and `.xdf.gz` files.
 - Automatic ordering shall use absolute recording datetimes from the XDF headers. The
@@ -356,6 +359,9 @@ streams shall be selectable in the same table.
 - Import-time resampling remains an explicit option. A native-rate recording may also
   be converted later with Process > Resample Data when an operation requires one MNE
   sampling grid.
+- Operations that require a single sampling grid shall be disabled for native-rate
+  recordings. Process > Append Data is available, because appending native recordings
+  is defined per stream (see section 10.1) rather than on a common grid.
 - The suggested target frequency shall be the most common selected nominal frequency,
   weighted by channel count.
 - Optional gap detection has a UI range of 0.1-10 s. For native-rate viewing it shall
@@ -496,6 +502,25 @@ annotations rather than silently replace them.
 - Raw or epochs datasets may be appended only when their type, channel set, bad list,
   sampling rate, high/low-pass metadata, and relevant calibration/epoch geometry are
   compatible. Epoch compatibility also requires identical `tmin`, `tmax`, and baseline.
+- The **Append Data** dialog shall list every open dataset of the current dataset's
+  type, and shall state for each incompatible one which property mismatches. Datasets
+  differing only in bad channels, high/low-pass metadata, or calibration factors shall
+  be selectable once the user confirms the mismatch, in which case those three
+  properties shall be taken from the current dataset. Samples shall never be altered,
+  and the appended datasets themselves shall remain unchanged.
+- Appended datasets shall be reordered to the current dataset's channel order before
+  concatenation, so samples always stay with their own channel.
+- Native multi-rate XDF recordings shall be appendable to each other. Their streams
+  shall be matched by name rather than by a shared channel list, each stream shall keep
+  its own native sampling rate, and the result shall be a new merged dataset equivalent
+  to importing the same recordings together. Streams or channels absent from one
+  recording may be filled with NaN for that recording's interval when the user confirms
+  the mismatch; duplicate stream names, differing channel types, and differing nominal
+  rates shall remain incompatible.
+- The native XDF **Append Data** dialog shall optionally order the current and selected
+  recordings by their absolute XDF recording times. Selecting this option requires a
+  valid absolute timestamp for every recording; otherwise appending shall report the
+  affected recording and make no change.
 
 ### 10.2 Filter presets
 
@@ -799,6 +824,8 @@ Matplotlib figure. It shall reuse the raw viewer's visual organization where app
 NaN-padded streams shall be estimated independently over their finite spans without
 interpolating across gaps. Channels with no finite samples shall be omitted. Timeline,
 event, and annotation controls do not apply in frequency space and shall not be shown.
+For native multi-rate XDF recordings, each source stream shall retain its own sample
+grid and frequency bins; PSD calculation shall not materialize or resample streams.
 
 ## 13. Display montage lifecycle
 

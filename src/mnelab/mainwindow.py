@@ -9,6 +9,7 @@ import re
 import sys
 import traceback
 import warnings
+from copy import deepcopy
 from functools import partial
 from operator import itemgetter
 from pathlib import Path
@@ -816,6 +817,11 @@ class MainWindow(QMainWindow):
             self.open_data,
             QKeySequence.StandardKey.Open,
         )
+        self.all_actions["open_xdf_files"] = file_menu.addAction(
+            QIcon.fromTheme("open-file"),
+            "Open &XDF Files...",
+            self.open_xdf_files,
+        )
         self.all_actions["open_xdf_folder"] = file_menu.addAction(
             QIcon.fromTheme("open-file"),
             "Open XDF &Folder...",
@@ -1145,6 +1151,7 @@ class MainWindow(QMainWindow):
         # actions that are always enabled
         self.always_enabled = [
             "open_file",
+            "open_xdf_files",
             "open_xdf_folder",
             "about",
             "about_qt",
@@ -1424,7 +1431,8 @@ class MainWindow(QMainWindow):
             self.all_actions["crop"].setEnabled(
                 enabled and self.model.current["dtype"] == "raw"
             )
-            append = bool(self.model.get_compatibles())
+            # also enabled for mismatching data sets, so the dialog can explain why
+            append = bool(self.model.get_append_candidates())
             self.all_actions["append_data"].setEnabled(
                 enabled
                 and append
@@ -1447,6 +1455,7 @@ class MainWindow(QMainWindow):
                 native_safe_actions = {
                     "annotation_colors",
                     "annotations",
+                    "append_data",
                     "close_all",
                     "close_file",
                     "export_annotations",
@@ -1454,6 +1463,7 @@ class MainWindow(QMainWindow):
                     "filter",
                     "history",
                     "plot_data",
+                    "plot_psd",
                     "resample",
                     "statusbar",
                     "xdf_chunks",
@@ -1932,6 +1942,19 @@ class MainWindow(QMainWindow):
         else:
             self._open_multiple_xdfs(fnames)
 
+    def open_xdf_files(self):
+        """Open one or more XDF recordings with an XDF-only file picker."""
+        fnames, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Open XDF files",
+            self._get_last_dir(),
+            "XDF Files (*.xdf *.xdfz *.xdf.gz)",
+        )
+        if len(fnames) == 1:
+            self._open_xdf(fnames[0])
+        elif fnames:
+            self._open_multiple_xdfs(fnames)
+
     def open_data(self, fname=None):
         """Open raw file."""
         if fname is None:
@@ -2400,15 +2423,120 @@ class MainWindow(QMainWindow):
 
     def append_data(self):
         """Concatenate raw data objects to current one."""
-        compatibles = self.model.get_compatibles()
-        dialog = AppendDialog(self, compatibles)
+        candidates = self.model.get_append_candidates()
+        if isinstance(self.model.current["data"], NativeXDFRecording):
+            dialog = AppendDialog(
+                self,
+                candidates,
+                force_label=(
+                    "Append despite different streams and fill unavailable "
+                    "intervals with NaN"
+                ),
+                force_tooltip=(
+                    "Streams and channels missing from a recording are added and "
+                    "filled with NaN only for the interval that recording covers. "
+                    "Each stream keeps its own native sampling rate."
+                ),
+                show_time_ordering=True,
+            )
+            if dialog.exec():
+                self._append_xdf_data(
+                    dialog.selected_idx,
+                    dialog.force,
+                    order_by_time=dialog.order_by_time,
+                )
+            return
+        dialog = AppendDialog(self, candidates)
         if dialog.exec():
             idx_list = dialog.selected_idx
+            force = dialog.force
             if self.auto_duplicate():  # adjust for index change if duplicated
                 idx_list = [
                     idx + 1 if idx >= self.model.index else idx for idx in idx_list
                 ]
-            self.model.append_data(idx_list)
+            self.model.append_data(idx_list, force=force)
+
+    def _append_xdf_data(self, idx_list, allow_union, *, order_by_time=False):
+        """Merge already-loaded native XDF recordings into a new data set.
+
+        Reuses the multi-file import merge so appending produces exactly the data set
+        that importing the same recordings together would have produced. The sources
+        are copied first, because qualifying duplicate channel labels renames
+        channels in place and the original data sets must survive untouched.
+        """
+        datasets = [self.model.data[index] for index in [self.model.index] + idx_list]
+        raws = [deepcopy(dataset["data"]) for dataset in datasets]
+        stream_sets = [
+            deepcopy(dataset["source_streams"]) or [] for dataset in datasets
+        ]
+        marker_sets = [
+            deepcopy(dataset["marker_streams"]) or [] for dataset in datasets
+        ]
+        fnames = [dataset["fname"] or dataset["name"] for dataset in datasets]
+
+        try:
+            if order_by_time:
+                order = _chronological_xdf_groups(
+                    raws,
+                    fnames,
+                    float("inf"),
+                    split_on_discontinuity=False,
+                )[0]
+                datasets = [datasets[index] for index in order]
+                raws = [raws[index] for index in order]
+                stream_sets = [stream_sets[index] for index in order]
+                marker_sets = [marker_sets[index] for index in order]
+                fnames = [fnames[index] for index in order]
+            qualified_channels = _qualify_xdf_duplicate_channels(
+                raws, stream_sets, fnames
+            )
+            try:
+                merged = concatenate_native_xdf_recordings(
+                    raws, allow_channel_union=allow_union
+                )
+            except (TypeError, ValueError) as error:
+                raise XDFImportError(
+                    f"Cannot append native XDF streams: {error}"
+                ) from error
+            unified_streams = _unify_xdf_streams(
+                stream_sets, fnames, merged.ch_names, merged.info["sfreq"]
+            )
+        except XDFImportError as error:
+            QMessageBox.critical(self, "Could Not Append XDF Recordings", str(error))
+            return
+
+        unified_marker_streams = list(
+            {
+                stream["annotation_prefix"]: stream
+                for streams in marker_sets
+                for stream in streams
+            }.values()
+        )
+        source_files = []
+        for dataset in datasets:
+            for path in dataset["source_files"] or [dataset["fname"]]:
+                if path is not None and path not in source_files:
+                    source_files.append(path)
+        name = f"{self.model.current['name']} ({len(datasets)} XDF recordings appended)"
+        self.model.load_data(
+            merged,
+            source_files[0] if source_files else fnames[0],
+            name=name,
+            source_streams=unified_streams,
+            marker_streams=unified_marker_streams,
+            source_files=source_files or None,
+            is_xdf_merge=len(source_files) > 1,
+        )
+        self.model.history.append(
+            "data = concatenate_native_xdf_recordings(recordings)"
+        )
+
+        if qualified_channels:
+            QMessageBox.information(
+                self,
+                "XDF Channel Labels Qualified by Stream",
+                _qualified_xdf_channels_message(qualified_channels),
+            )
 
     def plot_data(self):
         """Plot data."""
@@ -2572,7 +2700,10 @@ class MainWindow(QMainWindow):
                     psd_kwds["picks"] = "all"
                     plot_kwds["picks"] = "all"
                     spectrum = data.compute_psd(**psd_kwds)
-            spectrum = _repair_nonfinite_psd(data, spectrum, dialog.fmin, dialog.fmax)
+            if not isinstance(data, NativeXDFRecording):
+                spectrum = _repair_nonfinite_psd(
+                    data, spectrum, dialog.fmin, dialog.fmax
+                )
             if spectrum is None:
                 QMessageBox.warning(
                     self,

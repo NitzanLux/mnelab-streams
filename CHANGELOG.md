@@ -1,5 +1,11 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Allow native XDF recordings appended from the main window to be ordered automatically
+  by their recording times (by [NitzanLux](https://github.com/NitzanLux))
+- Calculate PSD independently on every native-rate XDF stream without resampling (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Add an XDF-only multi-file picker for selecting recordings to merge (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Add a Help – What's New dialog, a generated documentation releases page, and
   changelog-derived GitHub release notes, all sharing one changelog parser (by
   [NitzanLux](https://github.com/NitzanLux))
@@ -29,8 +35,16 @@
 - Add support for the hierarchical LSL JSON annotation scheme with a collapsible
   browser, optional UUID display, and a synchronized annotation lifecycle map; keep
   the annotation guide updateable as a Git submodule
+- List data sets that cannot be appended together with the reason they mismatch, and
+  allow appending anyway when only bad channels, filter settings, or calibration
+  factors differ (by [NitzanLux](https://github.com/NitzanLux))
+- Append already-loaded native multi-rate XDF recordings from the Append Data dialog,
+  matching streams by name, keeping each at its own sampling rate, and optionally
+  filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Restore draggable stream boundaries for resizing individual trace panels (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and
   recovering legacy buffered timing from measured endpoints instead of nominal rates
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
@@ -41,6 +55,9 @@
   dataset, and recompute activation from the filtered samples
 - Prevent missing XDF samples from contaminating the remainder of a channel during
   IIR and notch filtering by resetting filter state at every non-finite gap
+- Match channel order before appending data sets, which previously concatenated
+  samples of differently ordered channels onto each other (by
+  [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
 - Rename the independent distribution and application to MNELAB Streams, retain the
