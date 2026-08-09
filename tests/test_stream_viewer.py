@@ -27,6 +27,7 @@ from mnelab.widgets.stream_viewer import (
     StreamViewerWindow,
     activation_matrix,
     peak_envelope,
+    window_psd,
 )
 
 
@@ -267,7 +268,15 @@ def test_plot_traces_menus_are_organized_and_streams_default_on(viewer):
     """Streams and settings are top-level menus, outside the annotation dock."""
     assert [
         action.text().replace("&", "") for action in viewer.menuBar().actions()
-    ] == ["View", "Streams", "Markers", "Settings", "Montage", "Help"]
+    ] == [
+        "View",
+        "Streams",
+        "Markers",
+        "Visualizations",
+        "Settings",
+        "Montage",
+        "Help",
+    ]
     assert viewer.annotation_dock.widget() is viewer.annotation_sidebar
     assert [action.isChecked() for action in viewer.stream_visibility_actions] == [
         True,
@@ -288,6 +297,43 @@ def test_plot_traces_menus_are_organized_and_streams_default_on(viewer):
 
     assert viewer.panels[1].isVisibleTo(viewer.panel_container)
     assert viewer.panels[1].visible_channel_names == ["Audio L"]
+
+
+def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
+    """PSD, spectrogram, RMS, and CAR operate only on the visible time range."""
+    viewer.set_start_time(1.0)
+    viewer.panels[0].selected.setChecked(True)
+
+    with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
+        viewer.show_current_window_psd()
+    psd = viewer.visualization_windows[-1]
+    assert psd.channel_names == ["EEG A"]
+    assert psd.frequencies[-1] <= raw.info["sfreq"] / 2
+
+    with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
+        viewer.show_current_window_spectrogram()
+    spectrogram = viewer.visualization_windows[-1]
+    assert spectrogram.channel_names == ["EEG A"]
+    assert spectrogram.spectrogram[2].size
+
+    viewer.show_current_window_rms()
+    rms = viewer.visualization_windows[-1]
+    expected = raw.get_data(picks=["EEG A", "EEG B"], start=100, stop=301)
+    assert rms.channel_names == ["EEG A", "EEG B"]
+    assert rms.rms == pytest.approx(np.sqrt(np.mean(expected**2, axis=1)))
+
+    viewer.show_current_window_common_average_reference()
+    car = viewer.visualization_windows[-1]
+    assert car.channel_names == ["EEG A", "EEG B"]
+    assert np.allclose(sum(car.values_by_channel.values()), 0)
+
+
+def test_window_psd_does_not_bridge_nonfinite_gaps():
+    """PSD keeps missing samples out of every finite sample run."""
+    frequencies, power = window_psd(np.array([1.0, 1.0, np.nan, 3.0, 3.0]), 10.0)
+
+    assert len(frequencies) == len(power)
+    assert np.isfinite(power).all()
 
 
 def test_view_menu_stream_toggles_and_unified_layout_stay_interactive(viewer):
@@ -829,17 +875,34 @@ def test_plot_help_is_persistent_instead_of_hovering(viewer):
 
 
 def test_stream_resize_handle_changes_its_panel_height(qtbot, viewer):
-    """The boundary below a stream panel resizes its trace plot."""
+    """The boundary below a stream panel resizes its complete body."""
     viewer.show()
     qtbot.waitUntil(viewer.isVisible)
     panel = viewer.panels[0]
     original_height = panel.plot.height()
+    original_panel_height = panel.height()
 
     panel.resize_handle.resize_requested.emit(48)
-    qtbot.waitUntil(lambda: panel.plot.height() == original_height + 48)
+    qtbot.waitUntil(lambda: panel.height() == original_panel_height + 48)
 
+    assert panel.plot.height() == original_height + 48
+    assert panel.channel_list.height() == panel.plot.height()
     assert panel.resize_handle.toolTip() == "Drag to resize this stream"
     assert panel.sizeHint().height() >= panel.plot.height()
+
+
+def test_stream_resize_handle_shrinks_the_complete_panel(qtbot, viewer):
+    """Shrinking continues below the channel list's default size hint."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    panel = viewer.panels[0]
+    original_panel_height = panel.height()
+
+    panel.resize_handle.resize_requested.emit(-80)
+
+    qtbot.waitUntil(lambda: panel.height() == original_panel_height - 80)
+    assert panel.plot.height() == 70
+    assert panel.channel_list.height() == panel.plot.height()
 
 
 def test_annotation_stream_wraps_labels_inside_visible_plot(viewer):

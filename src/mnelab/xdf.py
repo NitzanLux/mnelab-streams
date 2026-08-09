@@ -147,7 +147,13 @@ def _xdf_channel_metadata(stream):
     if len(units) != count:
         units = ["NA"] * count
     microvolts = {"microvolt", "microvolts", "µV", "μV", "uV"}
-    scale = np.asarray([1e-6 if unit in microvolts else 1.0 for unit in units])
+    millivolts = {"millivolt", "millivolts", "mV", "mv"}
+    scale = np.asarray(
+        [
+            1e-6 if unit in microvolts else 1e-3 if unit in millivolts else 1.0
+            for unit in units
+        ]
+    )
     return names, types, scale
 
 

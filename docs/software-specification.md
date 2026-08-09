@@ -373,6 +373,8 @@ streams shall be selectable in the same table.
 - Successfully loaded numeric stream boundaries shall be preserved as source-stream
   descriptors for the raw viewer. Channel membership must match the loaded channel
   names.
+- XDF channels labeled in millivolts (`mV`, `mv`, `millivolt`, or `millivolts`) shall
+  be converted to MNE's volt base unit during import.
 - The application shall provide separate dialogs for full XDF XML metadata and physical
   chunk inspection.
 - Malformed or incomplete XDF XML shall produce a file-specific error dialog rather
@@ -622,6 +624,7 @@ Users may select panels and:
 - **Swap Selected** to exchange exactly two panel positions;
 - **Reset Layout** to restore one panel per source in original order;
 - choose the number of main-viewer columns; and
+- drag a panel's lower boundary to resize its plot and channel list together; and
 - float a panel into a separate window by button or outward drag, then redock it.
 
 Detached panels remain synchronized with navigation, bad channels, events,
@@ -779,6 +782,18 @@ An invalid regular expression shall not crash or propagate an exception. The lis
 shall become empty, the UI shall show `Invalid regex: <reason>`, and the text field
 tooltip shall contain the error. Clearing or correcting the expression shall restore
 normal matching.
+
+### 12.7.1 Current-window visualizations
+
+The raw trace viewer shall provide a **Visualizations** menu for display-only analyses
+of its current shared time window. **Power Spectral Density** and **Spectrogram** shall
+ask the user to choose a channel, then open a separate window using that channel's
+unmodified samples in the visible range. **RMS for Selected Stream** shall show one RMS
+value per channel, and **Common Average Reference for Selected Stream** shall show
+per-channel traces after subtracting the samplewise stream average. The latter two
+commands require exactly one stream panel to be selected with its **Select** control.
+None of these visualizations shall modify the recording, its display montage, or its
+analysis history. Missing sample spans shall not be treated as continuous data.
 
 ### 12.8 Activation map
 

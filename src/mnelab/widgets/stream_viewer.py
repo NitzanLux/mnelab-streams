@@ -68,6 +68,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from scipy import signal
 
 from mnelab.annotation_hierarchy import hierarchical_annotation_intervals
 from mnelab.widgets.channel_display import ChannelDisplayDialog
@@ -162,6 +163,119 @@ ACTIVATION_AXIS_MAX_WIDTH = 360
 MARKER_ROW_LIMIT = 8
 MIN_ANNOTATION_FONT_SIZE = 6
 MAX_ANNOTATION_FONT_SIZE = 24
+
+
+def _finite_runs(values):
+    """Return contiguous finite runs without joining acquisition gaps."""
+    finite = np.isfinite(values)
+    edges = np.flatnonzero(np.diff(np.r_[False, finite, False]))
+    return [values[start:stop] for start, stop in edges.reshape(-1, 2)]
+
+
+def window_psd(values, sfreq):
+    """Estimate PSD over finite runs, weighted by each run's length."""
+    runs = [run for run in _finite_runs(values) if len(run) >= 2]
+    if not runs:
+        return np.empty(0), np.empty(0)
+    nperseg = min(256, *(len(run) for run in runs))
+    spectra = []
+    for run in runs:
+        frequencies, power = signal.welch(run, fs=sfreq, nperseg=nperseg)
+        spectra.append((frequencies, power, len(run)))
+    frequencies = spectra[0][0]
+    power = sum(item[1] * item[2] for item in spectra) / sum(
+        item[2] for item in spectra
+    )
+    return frequencies, power
+
+
+class TraceVisualizationWindow(QMainWindow):
+    """Display a visualization calculated from the active trace time window."""
+
+    def __init__(self, title, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self.setWindowTitle(title)
+        self.resize(800, 500)
+        self.plot = pg.PlotWidget()
+        self.plot.showGrid(x=True, y=True, alpha=0.2)
+        self.setCentralWidget(self.plot)
+        self.channel_names = []
+        self.values_by_channel = {}
+
+    def show_psd(self, channel, values, sfreq):
+        """Plot one channel's finite-aware Welch power spectral density."""
+        frequencies, power = window_psd(values, sfreq)
+        self.channel_names = [channel]
+        self.frequencies = frequencies
+        self.power = power
+        self.plot.setLabel("bottom", "Frequency", units="Hz")
+        self.plot.setLabel("left", "Power", units="unit²/Hz")
+        if len(frequencies):
+            self.plot.plot(frequencies, power, pen=pg.mkPen(DEFAULT_TRACE_COLOR))
+
+    def show_spectrogram(self, channel, times, values, sfreq):
+        """Plot one channel's spectrogram without crossing missing-data gaps."""
+        finite = np.isfinite(values)
+        edges = np.flatnonzero(np.diff(np.r_[False, finite, False])).reshape(-1, 2)
+        start, stop = max(edges, key=lambda edge: edge[1] - edge[0], default=(0, 0))
+        run = values[start:stop]
+        self.channel_names = [channel]
+        if len(run) < 2:
+            self.spectrogram = (np.empty(0), np.empty(0), np.empty((0, 0)))
+            return
+        nperseg = min(128, len(run))
+        frequencies, relative_times, power = signal.spectrogram(
+            run, fs=sfreq, nperseg=nperseg, noverlap=nperseg // 2
+        )
+        relative_times = relative_times + times[start]
+        self.spectrogram = (frequencies, relative_times, power)
+        image = pg.ImageItem(power.T)
+        width = max(np.finfo(float).eps, relative_times[-1] - relative_times[0])
+        height = max(np.finfo(float).eps, frequencies[-1] - frequencies[0])
+        image.setRect(QRectF(relative_times[0], frequencies[0], width, height))
+        self.plot.addItem(image)
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.setLabel("left", "Frequency", units="Hz")
+
+    def show_rms(self, values_by_channel):
+        """Plot the RMS of every channel in the selected source stream(s)."""
+        self.channel_names = list(values_by_channel)
+        self.values_by_channel = dict(values_by_channel)
+        rms = np.array(
+            [np.sqrt(np.nanmean(values**2)) for values in values_by_channel.values()]
+        )
+        self.rms = rms
+        positions = np.arange(len(self.channel_names))
+        self.plot.addItem(pg.BarGraphItem(x=positions, height=rms, width=0.7))
+        self.plot.getAxis("bottom").setTicks([list(zip(positions, self.channel_names))])
+        self.plot.setLabel("left", "RMS", units="raw")
+
+    def show_common_average_reference(self, times, values_by_channel):
+        """Plot each selected channel after a display-only common average reference."""
+        self.channel_names = list(values_by_channel)
+        values = np.vstack(list(values_by_channel.values()))
+        reference = np.nanmean(values, axis=0)
+        referenced = values - reference
+        self.common_average_reference = reference
+        self.values_by_channel = dict(zip(self.channel_names, referenced, strict=True))
+        finite = np.abs(referenced[np.isfinite(referenced)])
+        scale = finite.max() if len(finite) else 0.0
+        offset = 2 * scale if np.isfinite(scale) and scale else 1.0
+        for index, (name, channel_values) in enumerate(self.values_by_channel.items()):
+            self.plot.plot(
+                times, channel_values + (len(referenced) - index - 1) * offset
+            )
+        self.plot.getAxis("left").setTicks(
+            [
+                [
+                    ((len(referenced) - index - 1) * offset, name)
+                    for index, name in enumerate(self.channel_names)
+                ]
+            ]
+        )
+        self.plot.setLabel("bottom", "Time", units="s")
+        self.plot.setLabel("left", "CAR traces")
 
 
 def _full_signal_standard_deviation_fits(raw):
@@ -1159,6 +1273,7 @@ class StreamPanel(QFrame):
         self._lane_step = 3.0
         self._axis_channels = None
         self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(6, 4, 6, 6)
@@ -1337,6 +1452,7 @@ class StreamPanel(QFrame):
             150,
             MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * visible_count,
         )
+        self.channel_list.setFixedHeight(self._plot_height)
         self.plot.setFixedHeight(self._plot_height)
         self.plot.setMenuEnabled(False)
         self.plot.setMouseEnabled(x=False, y=False)
@@ -1801,6 +1917,7 @@ class StreamPanel(QFrame):
         if height == self._plot_height:
             return
         self._plot_height = height
+        self.channel_list.setFixedHeight(height)
         self.plot.setFixedHeight(height)
         if self.layout() is not None:
             self.layout().invalidate()
@@ -4158,6 +4275,7 @@ class StreamViewerWindow(QMainWindow):
         self._activation_task_token = 0
         self._activation_error = None
         self._activation_max_bins = 1000
+        self.visualization_windows = []
         self._event_overlays_visible = True
         self._annotation_overlays_visible = True
         self._selected_annotation_index = None
@@ -4417,6 +4535,7 @@ class StreamViewerWindow(QMainWindow):
         self._create_view_menu()
         self._create_streams_menu()
         self._create_markers_menu()
+        self._create_visualizations_menu()
         self._create_settings_menu()
         self._create_display_montage_menu()
         self._create_help_menu()
@@ -4561,6 +4680,131 @@ class StreamViewerWindow(QMainWindow):
         )
         menu.addSeparator()
         menu.addAction("Keyboard &Shortcuts…", self.show_shortcuts)
+
+    def _create_visualizations_menu(self):
+        """Add display-only analyses for the current trace time window."""
+        menu = self.menuBar().addMenu("&Visualizations")
+        menu.addAction("Power Spectral &Density…", self.show_current_window_psd)
+        menu.addAction("&Spectrogram…", self.show_current_window_spectrogram)
+        menu.addSeparator()
+        menu.addAction("&RMS for Selected Stream", self.show_current_window_rms)
+        menu.addAction(
+            "&Common Average Reference for Selected Stream",
+            self.show_current_window_common_average_reference,
+        )
+
+    def _window_channel_data(self, name):
+        """Return unmodified samples and timestamps from the visible time window."""
+        stop = self._start_time + self._duration
+        if isinstance(self.raw, NativeXDFRecording):
+            times, values = self.raw.channel_window(name, self._start_time, stop)
+            return times, values[0]
+        sfreq = float(self.raw.info["sfreq"])
+        start = max(0, int(np.floor(self._start_time * sfreq)))
+        end = min(self.raw.n_times, int(np.ceil(stop * sfreq)) + 1)
+        times = np.arange(start, end) / sfreq
+        return times, self.raw.get_data(picks=[name], start=start, stop=end)[0]
+
+    def _window_stream_data(self, source):
+        """Return all unmodified source samples from the visible time window."""
+        names = list(source["channel_names"])
+        stop = self._start_time + self._duration
+        if isinstance(self.raw, NativeXDFRecording):
+            times, values = self.raw.window(source["id"], names, self._start_time, stop)
+            return times, values, names
+        sfreq = float(self.raw.info["sfreq"])
+        start = max(0, int(np.floor(self._start_time * sfreq)))
+        end = min(self.raw.n_times, int(np.ceil(stop * sfreq)) + 1)
+        return (
+            np.arange(start, end) / sfreq,
+            self.raw.get_data(picks=names, start=start, stop=end),
+            names,
+        )
+
+    @staticmethod
+    def _sampling_frequency(times, fallback):
+        """Return a measured frequency when timestamps provide one."""
+        differences = np.diff(times)
+        finite = differences[np.isfinite(differences) & (differences > 0)]
+        return 1 / np.median(finite) if len(finite) else float(fallback)
+
+    def _show_channel_visualization(self, kind):
+        """Ask for one channel, then visualize that channel's visible samples."""
+        name, accepted = QInputDialog.getItem(
+            self, f"{kind} Channel", "Channel:", self.raw.ch_names, editable=False
+        )
+        if not accepted:
+            return
+        times, values = self._window_channel_data(name)
+        sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
+        window = TraceVisualizationWindow(f"{kind}: {name}", self)
+        if kind == "PSD":
+            window.show_psd(name, values, sfreq)
+        else:
+            window.show_spectrogram(name, times, values, sfreq)
+        self._register_visualization_window(window)
+
+    def _register_visualization_window(self, window):
+        """Keep display-only visualization windows alive until they are closed."""
+        self.visualization_windows.append(window)
+        window.destroyed.connect(
+            lambda _object=None, window=window: (
+                self.visualization_windows.remove(window)
+                if window in self.visualization_windows
+                else None
+            )
+        )
+        window.show()
+
+    def show_current_window_psd(self):
+        """Open a current-window PSD after the user chooses a channel."""
+        self._show_channel_visualization("PSD")
+
+    def show_current_window_spectrogram(self):
+        """Open a current-window spectrogram after the user chooses a channel."""
+        self._show_channel_visualization("Spectrogram")
+
+    def _selected_visualization_source(self):
+        """Return the one source selected via a trace panel's Select control."""
+        sources = [
+            source
+            for panel in self.panels
+            if panel.selected.isChecked()
+            for source in panel.sources
+        ]
+        unique = list({source["id"]: source for source in sources}.values())
+        if len(unique) == 1:
+            return unique[0]
+        QMessageBox.information(
+            self,
+            "Select One Stream",
+            "Select exactly one stream panel before opening this visualization.",
+        )
+        return None
+
+    def show_current_window_rms(self):
+        """Open RMS bars for every channel in the selected source stream."""
+        source = self._selected_visualization_source()
+        if source is None:
+            return
+        _times, values, names = self._window_stream_data(source)
+        window = TraceVisualizationWindow(f"RMS: {source['name']}", self)
+        window.show_rms(dict(zip(names, values, strict=True)))
+        self._register_visualization_window(window)
+
+    def show_current_window_common_average_reference(self):
+        """Open display-only CAR traces for every channel in the selected stream."""
+        source = self._selected_visualization_source()
+        if source is None:
+            return
+        times, values, names = self._window_stream_data(source)
+        window = TraceVisualizationWindow(
+            f"Common Average Reference: {source['name']}", self
+        )
+        window.show_common_average_reference(
+            times, dict(zip(names, values, strict=True))
+        )
+        self._register_visualization_window(window)
 
     def _edit_discrete_threshold(self):
         """Prompt for the discrete-channel rendering threshold."""
@@ -5397,7 +5641,9 @@ class StreamViewerWindow(QMainWindow):
             )
         for index, panel in enumerate(attached):
             row, column = divmod(index, self._columns)
-            self.panel_layout.addWidget(panel, row, column)
+            self.panel_layout.addWidget(
+                panel, row, column, alignment=Qt.AlignmentFlag.AlignTop
+            )
             panel.show()
         for column in range(max(1, len(self.panels))):
             self.panel_layout.setColumnStretch(

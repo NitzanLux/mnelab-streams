@@ -1,5 +1,7 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Add current-window PSD, spectrogram, RMS, and common-average-reference trace
+  visualizations (by [NitzanLux](https://github.com/NitzanLux))
 - Allow native XDF recordings appended from the main window to be ordered automatically
   by their recording times (by [NitzanLux](https://github.com/NitzanLux))
 - Calculate PSD independently on every native-rate XDF stream without resampling (by
@@ -43,6 +45,10 @@
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Resize the complete stream-panel body when dragging its lower boundary, preventing
+  gray space beside a shrinking plot (by [NitzanLux](https://github.com/NitzanLux))
+- Scale XDF channels labeled in millivolts correctly during import (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Restore draggable stream boundaries for resizing individual trace panels (by
   [NitzanLux](https://github.com/NitzanLux))
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and

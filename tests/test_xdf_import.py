@@ -2,9 +2,44 @@
 #
 # License: BSD (3-clause)
 
+import numpy as np
+import pytest
 from PySide6.QtWidgets import QDialogButtonBox
 
 from mnelab.dialogs.xdf_import import XDFImportDialog
+from mnelab.xdf import _xdf_channel_metadata
+
+
+@pytest.mark.parametrize("unit", ["mV", "mv", "millivolt", "millivolts"])
+def test_xdf_channel_metadata_scales_millivolts_to_volts(unit):
+    """Millivolt XDF channel metadata is converted to MNE's volt base unit."""
+    stream = {
+        "info": {
+            "channel_count": ["1"],
+            "name": ["EEG"],
+            "desc": [
+                {
+                    "channels": [
+                        {
+                            "channel": [
+                                {
+                                    "label": ["Cz"],
+                                    "type": ["eeg"],
+                                    "unit": [unit],
+                                }
+                            ]
+                        }
+                    ]
+                }
+            ],
+        }
+    }
+
+    names, types, scale = _xdf_channel_metadata(stream)
+
+    assert names == ["Cz"]
+    assert types == ["eeg"]
+    np.testing.assert_allclose(scale, [1e-3])
 
 
 def test_multiple_xdf_dialog_controls_mode_and_order(qtbot):
