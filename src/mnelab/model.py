@@ -262,6 +262,8 @@ class Model:
             "import numpy as np",
             "import scipy.signal",
             "from mnelab.model import _finite_span_iir_filter, _moving_average_filter",
+            "from mnelab.xdf import (combine_native_xdf_streams, "
+            "concatenate_native_xdf_recordings)",
             "from mnelab.utils import ("
             "detect_extreme_values,"
             "detect_kurtosis,"
@@ -1558,9 +1560,10 @@ class Model:
         Native recordings keep one `Raw` per stream at its own rate, so they are
         matched by stream name rather than by a common channel list and sampling
         frequency. The rules mirror `concatenate_native_xdf_recordings`: differing
-        stream or channel sets are forceable because the merge can fill the absent
-        intervals with NaN, while duplicate stream names, differing channel types,
-        and differing nominal rates are not resolvable.
+        entirely distinct stream sets are directly combinable as concurrent streams.
+        Partial stream or channel differences are forceable because temporal append
+        can fill absent intervals with NaN, while duplicate stream names, differing
+        channel types, and differing nominal rates are not resolvable.
         """
         data = self.current["data"]
         other = d["data"]
@@ -1584,6 +1587,8 @@ class Model:
         missing = sorted(current_map.keys() - other_map.keys())
         extra = sorted(other_map.keys() - current_map.keys())
         if missing or extra:
+            if not current_map.keys() & other_map.keys():
+                return []
             detail = []
             if missing:
                 detail.append(f"missing {_abbreviate(missing)}")

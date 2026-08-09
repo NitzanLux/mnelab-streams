@@ -1,7 +1,7 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
-- Add current-window PSD, spectrogram, RMS, and common-average-reference trace
-  visualizations (by [NitzanLux](https://github.com/NitzanLux))
+- Add context-updated PSD, spectrogram, RMS, and common-average-reference virtual
+  streams to the trace viewer (by [NitzanLux](https://github.com/NitzanLux))
 - Allow native XDF recordings appended from the main window to be ordered automatically
   by their recording times (by [NitzanLux](https://github.com/NitzanLux))
 - Calculate PSD independently on every native-rate XDF stream without resampling (by
@@ -45,6 +45,9 @@
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Combine appended XDF recordings with distinct streams into one concurrent entity
+  without extending equal-duration recordings (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Resize the complete stream-panel body when dragging its lower boundary, preventing
   gray space beside a shrinking plot (by [NitzanLux](https://github.com/NitzanLux))
 - Scale XDF channels labeled in millivolts correctly during import (by
@@ -66,8 +69,10 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
-- Double-clicking a stream-viewer channel now isolates that channel by hiding its
-  visible peers (by [NitzanLux](https://github.com/NitzanLux))
+- Match the main-window PSD trace palette to the raw stream viewer palette (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Double-clicking a stream-viewer channel now toggles its isolation, hiding or
+  restoring its visible peers (by [NitzanLux](https://github.com/NitzanLux))
 - Rename the independent distribution and application to MNELAB Streams, retain the
   upstream BSD license and import namespace, and separate fork metadata and release
   identity from upstream (by [NitzanLux](https://github.com/NitzanLux))

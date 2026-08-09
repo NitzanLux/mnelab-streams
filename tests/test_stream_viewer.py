@@ -309,6 +309,7 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
     psd = viewer.visualization_windows[-1]
     assert psd.channel_names == ["EEG A"]
     assert psd.frequencies[-1] <= raw.info["sfreq"] / 2
+    initial_power = psd.power
 
     with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
         viewer.show_current_window_spectrogram()
@@ -326,6 +327,16 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
     car = viewer.visualization_windows[-1]
     assert car.channel_names == ["EEG A", "EEG B"]
     assert np.allclose(sum(car.values_by_channel.values()), 0)
+    assert len(viewer.visualization_docks) == 4
+    assert all(
+        dock.windowTitle().startswith("Virtual Stream —")
+        for dock in viewer.visualization_docks
+    )
+
+    viewer.set_start_time(2.0)
+
+    assert psd.power is not initial_power
+    assert viewer.visualization_streams[0]["window"] is psd
 
 
 def test_window_psd_does_not_bridge_nonfinite_gaps():
@@ -1641,8 +1652,8 @@ def test_hidden_channel_statistics_read_only_the_visible_time_window(viewer, raw
     }
 
 
-def test_double_clicking_channel_list_item_isolates_that_channel(qtbot, viewer):
-    """A double-click leaves only the chosen trace visible in its stream panel."""
+def test_double_clicking_channel_list_item_toggles_channel_isolation(qtbot, viewer):
+    """A second double-click restores peers hidden by the first one."""
     panel = viewer.panels[0]
     viewer.show()
     qtbot.waitUntil(viewer.isVisible)
@@ -1655,6 +1666,15 @@ def test_double_clicking_channel_list_item_isolates_that_channel(qtbot, viewer):
     )
 
     assert panel.visible_channel_names == ["EEG B"]
+
+    item = panel.channel_list.item(1)
+    qtbot.mouseDClick(
+        panel.channel_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=panel.channel_list.visualItemRect(item).center(),
+    )
+
+    assert panel.visible_channel_names == ["EEG A", "EEG B"]
     viewer._display_montage_baseline = viewer.display_montage_state()
     viewer.hide()
 

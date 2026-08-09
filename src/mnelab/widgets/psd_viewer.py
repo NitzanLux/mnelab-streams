@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from mnelab.widgets.stream_viewer import (
     CHANNEL_LIST_WIDTH,
     TraceLabelAxis,
+    _automatic_color,
     normalize_streams,
 )
 
@@ -208,9 +209,12 @@ class PSDPanel(QFrame):
             return QColor("#d62728")
         if name in self.colors:
             return self.colors[name]
-        return QColor(
-            pg.intColor(self.channel_names.index(name), max(1, len(self.channel_names)))
-        )
+        visible_names = self.visible_channel_names
+        try:
+            visible_index = visible_names.index(name)
+        except ValueError:
+            visible_index = self.page_channel_names.index(name)
+        return QColor(_automatic_color(visible_index))
 
     def _display_values(self, name):
         values = self.channel_data[name]

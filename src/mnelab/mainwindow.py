@@ -82,7 +82,11 @@ from mnelab.viz import (
     plot_evoked_topomaps,
 )
 from mnelab.widgets import EmptyWidget, InfoWidget, SidebarWidget
-from mnelab.xdf import NativeXDFRecording, concatenate_native_xdf_recordings
+from mnelab.xdf import (
+    NativeXDFRecording,
+    combine_native_xdf_streams,
+    concatenate_native_xdf_recordings,
+)
 
 SIDEBAR_MIN_WIDTH = 150
 INFOWIDGET_MIN_WIDTH = 200
@@ -2491,8 +2495,18 @@ class MainWindow(QMainWindow):
                 raws, stream_sets, fnames
             )
             try:
-                merged = concatenate_native_xdf_recordings(
-                    raws, allow_channel_union=allow_union
+                stream_keys = [
+                    str(stream["name"]).strip().casefold()
+                    for raw in raws
+                    for stream in raw.streams
+                ]
+                combine_streams = len(stream_keys) == len(set(stream_keys))
+                merged = (
+                    combine_native_xdf_streams(raws)
+                    if combine_streams
+                    else concatenate_native_xdf_recordings(
+                        raws, allow_channel_union=allow_union
+                    )
                 )
             except (TypeError, ValueError) as error:
                 raise XDFImportError(
@@ -2527,9 +2541,12 @@ class MainWindow(QMainWindow):
             source_files=source_files or None,
             is_xdf_merge=len(source_files) > 1,
         )
-        self.model.history.append(
-            "data = concatenate_native_xdf_recordings(recordings)"
+        operation = (
+            "combine_native_xdf_streams"
+            if combine_streams
+            else "concatenate_native_xdf_recordings"
         )
+        self.model.history.append(f"data = {operation}(recordings)")
 
         if qualified_channels:
             QMessageBox.information(

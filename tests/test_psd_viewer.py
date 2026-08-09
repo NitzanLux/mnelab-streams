@@ -6,6 +6,7 @@ import mne
 import numpy as np
 
 from mnelab.widgets.psd_viewer import PSDViewerWindow
+from mnelab.widgets.stream_viewer import _automatic_color
 
 
 def _spectrum_and_streams():
@@ -81,6 +82,29 @@ def test_psd_channel_list_controls_trace_visibility(qtbot):
     assert panel.visible_channel_names == ["EEG 2"]
     assert panel.channel_list.item(0).font().strikeOut()
     assert len(panel._curves) == 1
+
+
+def test_psd_uses_stream_trace_palette_in_visible_order(qtbot):
+    """PSD traces share the raw viewer palette and remap after one is hidden."""
+    spectrum, streams = _spectrum_and_streams()
+    spectrum.info["bads"] = []
+    viewer = PSDViewerWindow(
+        spectrum,
+        streams=streams,
+        spatial_colors=False,
+        max_channels=2,
+    )
+    qtbot.addWidget(viewer)
+    panel = viewer.panels[0]
+
+    assert [curve.opts["pen"].color().name() for curve in panel._curves] == [
+        _automatic_color(0),
+        _automatic_color(1),
+    ]
+
+    panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
+
+    assert panel._curves[0].opts["pen"].color().name() == _automatic_color(0)
 
 
 def test_psd_overlay_uses_numeric_amplitude_axis(qtbot):

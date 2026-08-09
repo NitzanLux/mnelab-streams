@@ -994,6 +994,50 @@ def concatenate_native_xdf_recordings(recordings, *, allow_channel_union=False):
     )
 
 
+def combine_native_xdf_streams(recordings):
+    """Combine distinct concurrent native XDF streams without extending time."""
+    recordings = list(recordings)
+    if not recordings:
+        raise ValueError("At least one native XDF recording is required.")
+    if not all(isinstance(recording, NativeXDFRecording) for recording in recordings):
+        raise TypeError("All recordings must be NativeXDFRecording instances.")
+
+    entries = []
+    stream_names = set()
+    for recording in recordings:
+        for source in recording.streams:
+            name = str(source["name"]).strip()
+            key = name.casefold()
+            if key in stream_names:
+                raise ValueError(
+                    f'Native XDF stream name "{name}" occurs in multiple recordings.'
+                )
+            stream_names.add(key)
+            entry = deepcopy(source)
+            entry["id"] = f"merged:{len(entries) + 1}"
+            entries.append(entry)
+
+    annotation_onsets = []
+    annotation_durations = []
+    annotation_descriptions = []
+    for recording in recordings:
+        annotation_onsets.extend(recording.annotations.onset)
+        annotation_durations.extend(recording.annotations.duration)
+        annotation_descriptions.extend(recording.annotations.description)
+    annotations = mne.Annotations(
+        annotation_onsets,
+        annotation_durations,
+        annotation_descriptions,
+        orig_time=recordings[0].meas_date,
+    )
+    return NativeXDFRecording(
+        entries,
+        annotations=annotations,
+        meas_date=recordings[0].meas_date,
+        gap_threshold=max(recording.gap_threshold for recording in recordings),
+    )
+
+
 def _xdf_synchronization_metadata(stream):
     """Return scalar synchronization metadata from an XDF stream description."""
     try:

@@ -514,11 +514,13 @@ annotations rather than silently replace them.
   concatenation, so samples always stay with their own channel.
 - Native multi-rate XDF recordings shall be appendable to each other. Their streams
   shall be matched by name rather than by a shared channel list, each stream shall keep
-  its own native sampling rate, and the result shall be a new merged dataset equivalent
-  to importing the same recordings together. Streams or channels absent from one
-  recording may be filled with NaN for that recording's interval when the user confirms
-  the mismatch; duplicate stream names, differing channel types, and differing nominal
-  rates shall remain incompatible.
+  its own native sampling rate, and the result shall be a new merged dataset. Recordings
+  with entirely distinct stream names shall be combined as concurrent streams in one
+  entity without extending the timeline, including when their durations are equal.
+  Otherwise the recordings shall be concatenated in time, and streams or channels
+  absent from one recording may be filled with NaN for that recording's interval when
+  the user confirms the mismatch; duplicate stream names within one recording,
+  differing channel types, and differing nominal rates shall remain incompatible.
 - The native XDF **Append Data** dialog shall optionally order the current and selected
   recordings by their absolute XDF recording times. Selecting this option requires a
   valid absolute timestamp for every recording; otherwise appending shall report the
@@ -590,7 +592,8 @@ views when their data prerequisites are met.
 The power spectral density viewer shall preserve the ordered source-stream panel
 model used for raw data. It shall offer fitted stacked channel lanes and a per-stream
 channel overlay; overlay mode shall use a numeric PSD-amplitude y-axis in the selected
-dB or linear power scale.
+dB or linear power scale. Unless spatial colors are enabled, PSD traces shall use the
+same automatic high-contrast palette and visible-channel ordering as raw traces.
 
 Epoch browsing uses MNE's configured Matplotlib or optional Qt browser backend. The
 settings determine the default number of displayed epochs and channels and whether
@@ -691,7 +694,8 @@ panel amplitude setting.
 ### 12.5 Per-channel display customization
 
 Double-clicking a channel row shall leave that channel visible and hide all other
-currently visible channels in its stream panel.
+currently visible channels in its stream panel. Double-clicking its isolated row again
+shall restore all channels in that panel.
 
 Right-clicking a channel row shall expose:
 
@@ -789,14 +793,17 @@ normal matching.
 ### 12.7.1 Current-window visualizations
 
 The raw trace viewer shall provide a **Visualizations** menu for display-only analyses
-of its current shared time window. **Power Spectral Density** and **Spectrogram** shall
-ask the user to choose a channel, then open a separate window using that channel's
-unmodified samples in the visible range. **RMS for Selected Stream** shall show one RMS
-value per channel, and **Common Average Reference for Selected Stream** shall show
-per-channel traces after subtracting the samplewise stream average. The latter two
-commands require exactly one stream panel to be selected with its **Select** control.
-None of these visualizations shall modify the recording, its display montage, or its
-analysis history. Missing sample spans shall not be treated as continuous data.
+of its current shared time window. Each visualization shall be added as a dockable
+virtual stream inside the trace viewer, with multiple virtual streams organized as
+tabs, and shall recompute whenever the visible start time or duration changes. **Power
+Spectral Density** and **Spectrogram** shall ask the user to choose a channel and use
+that channel's unmodified samples in the visible range. **RMS for Selected Stream**
+shall show one RMS value per channel, and **Common Average Reference for Selected
+Stream** shall show per-channel traces after subtracting the samplewise stream average.
+The latter two commands require exactly one stream panel to be selected with its
+**Select** control. None of these visualizations shall modify the recording, its
+display montage, or its analysis history. Missing sample spans shall not be treated as
+continuous data.
 
 ### 12.8 Activation map
 

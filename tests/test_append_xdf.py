@@ -98,6 +98,25 @@ def test_native_stream_mismatch_is_forceable(window, tmp_path):
     assert "missing camera" in conflicts[0][0]
 
 
+def test_distinct_native_streams_are_direct_append_candidates(window, tmp_path):
+    """Disjoint native streams can be combined without enabling NaN filling."""
+    _load(window, tmp_path, 0, include_camera=False)
+    recording, descriptors = _recording(10_000, include_camera=False)
+    recording.streams[0]["name"] = "IMU"
+    recording.streams[0]["raw"].rename_channels({"EMG": "Accel X"})
+    descriptors[0].update(name="IMU", channel_names=["Accel X"])
+    path = tmp_path / "rec_1.xdf"
+    path.write_bytes(b"x")
+    window.model.load_data(
+        recording, path, source_streams=descriptors, marker_streams=[]
+    )
+    window.model.index = 0
+
+    ((_, _, conflicts),) = window.model.get_append_candidates()
+
+    assert conflicts == []
+
+
 def test_native_rate_mismatch_is_blocked(window, tmp_path):
     """A stream recorded at another nominal rate can never be appended."""
     _load(window, tmp_path, 0)
@@ -153,6 +172,40 @@ def test_append_xdf_data_fills_absent_streams_with_nan(window, tmp_path):
     values = camera["raw"].get_data()[0]
     assert np.all(np.isfinite(values[:CAMERA_COUNT]))
     assert np.all(np.isnan(values[CAMERA_COUNT:]))
+
+
+def test_append_xdf_data_combines_distinct_equal_duration_streams(window, tmp_path):
+    """Distinct streams remain concurrent rather than doubling the timeline."""
+    first = _load(window, tmp_path, 0, include_camera=False)
+    recording, descriptors = _recording(10_000, include_camera=False)
+    recording.streams[0]["name"] = "IMU"
+    recording.streams[0]["raw"].rename_channels({"EMG": "Accel X"})
+    descriptors[0].update(name="IMU", channel_names=["Accel X"])
+    path = tmp_path / "rec_1.xdf"
+    path.write_bytes(b"x")
+    window.model.load_data(
+        recording, path, source_streams=descriptors, marker_streams=[]
+    )
+    window.model.index = 0
+
+    window._append_xdf_data([1], allow_union=False)
+
+    merged = window.model.current
+    assert [stream["name"] for stream in merged["data"].streams] == ["EMG", "IMU"]
+    assert [stream["raw"].n_times for stream in merged["data"].streams] == [
+        EMG_COUNT,
+        EMG_COUNT,
+    ]
+    assert merged["data"].duration == first.duration
+    np.testing.assert_array_equal(
+        merged["data"].streams[1]["raw"].get_data()[0],
+        10_000 + np.arange(EMG_COUNT),
+    )
+    assert [stream["name"] for stream in merged["source_streams"]] == [
+        "EMG",
+        "IMU",
+    ]
+    assert window.model.history[-1] == ("data = combine_native_xdf_streams(recordings)")
 
 
 def test_append_xdf_data_can_order_recordings_by_time(window, tmp_path, monkeypatch):

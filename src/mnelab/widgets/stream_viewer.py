@@ -189,22 +189,23 @@ def window_psd(values, sfreq):
     return frequencies, power
 
 
-class TraceVisualizationWindow(QMainWindow):
-    """Display a visualization calculated from the active trace time window."""
+class TraceVisualizationPanel(QWidget):
+    """Display a virtual stream calculated from the active trace time window."""
 
     def __init__(self, title, parent=None):
         super().__init__(parent)
-        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(title)
-        self.resize(800, 500)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.2)
-        self.setCentralWidget(self.plot)
+        layout.addWidget(self.plot)
         self.channel_names = []
         self.values_by_channel = {}
 
     def show_psd(self, channel, values, sfreq):
         """Plot one channel's finite-aware Welch power spectral density."""
+        self.plot.clear()
         frequencies, power = window_psd(values, sfreq)
         self.channel_names = [channel]
         self.frequencies = frequencies
@@ -216,6 +217,7 @@ class TraceVisualizationWindow(QMainWindow):
 
     def show_spectrogram(self, channel, times, values, sfreq):
         """Plot one channel's spectrogram without crossing missing-data gaps."""
+        self.plot.clear()
         finite = np.isfinite(values)
         edges = np.flatnonzero(np.diff(np.r_[False, finite, False])).reshape(-1, 2)
         start, stop = max(edges, key=lambda edge: edge[1] - edge[0], default=(0, 0))
@@ -240,10 +242,15 @@ class TraceVisualizationWindow(QMainWindow):
 
     def show_rms(self, values_by_channel):
         """Plot the RMS of every channel in the selected source stream(s)."""
+        self.plot.clear()
         self.channel_names = list(values_by_channel)
         self.values_by_channel = dict(values_by_channel)
         rms = np.array(
-            [np.sqrt(np.nanmean(values**2)) for values in values_by_channel.values()]
+            [
+                np.sqrt(np.mean(finite**2)) if len(finite) else np.nan
+                for values in values_by_channel.values()
+                for finite in [values[np.isfinite(values)]]
+            ]
         )
         self.rms = rms
         positions = np.arange(len(self.channel_names))
@@ -253,9 +260,17 @@ class TraceVisualizationWindow(QMainWindow):
 
     def show_common_average_reference(self, times, values_by_channel):
         """Plot each selected channel after a display-only common average reference."""
+        self.plot.clear()
         self.channel_names = list(values_by_channel)
         values = np.vstack(list(values_by_channel.values()))
-        reference = np.nanmean(values, axis=0)
+        counts = np.isfinite(values).sum(axis=0)
+        reference = np.full(values.shape[1], np.nan)
+        np.divide(
+            np.nansum(values, axis=0),
+            counts,
+            out=reference,
+            where=counts > 0,
+        )
         referenced = values - reference
         self.common_average_reference = reference
         self.values_by_channel = dict(zip(self.channel_names, referenced, strict=True))
@@ -1426,7 +1441,7 @@ class StreamPanel(QFrame):
         self.channel_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.channel_list.setDropIndicatorShown(True)
         self.channel_list.itemClicked.connect(self._toggle_channel_visibility)
-        self.channel_list.isolate_requested.connect(self._show_only_channel)
+        self.channel_list.isolate_requested.connect(self._toggle_channel_isolation)
         self.channel_list.model().rowsMoved.connect(self._channel_rows_moved)
         self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.channel_list.customContextMenuRequested.connect(
@@ -2699,9 +2714,13 @@ class StreamPanel(QFrame):
         name = item.data(Qt.ItemDataRole.UserRole)
         self._toggle_bad_channel_name(name)
 
-    def _show_only_channel(self, item):
-        """Keep the double-clicked channel visible and hide its visible peers."""
-        self.show_only_channel(item.data(Qt.ItemDataRole.UserRole))
+    def _toggle_channel_isolation(self, item):
+        """Isolate a channel, or restore all channels when it is already isolated."""
+        name = item.data(Qt.ItemDataRole.UserRole)
+        if self.visible_channel_names == [name]:
+            self.show_all_channels()
+        else:
+            self.show_only_channel(name)
 
     def _toggle_bad_channel_name(self, name):
         """Toggle bad-channel status by channel name."""
@@ -4295,6 +4314,8 @@ class StreamViewerWindow(QMainWindow):
         self._activation_error = None
         self._activation_max_bins = 1000
         self.visualization_windows = []
+        self.visualization_streams = []
+        self.visualization_docks = []
         self._event_overlays_visible = True
         self._annotation_overlays_visible = True
         self._selected_annotation_index = None
@@ -4756,24 +4777,78 @@ class StreamViewerWindow(QMainWindow):
             return
         times, values = self._window_channel_data(name)
         sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
-        window = TraceVisualizationWindow(f"{kind}: {name}", self)
+        window = TraceVisualizationPanel(f"{kind}: {name}")
         if kind == "PSD":
             window.show_psd(name, values, sfreq)
         else:
             window.show_spectrogram(name, times, values, sfreq)
-        self._register_visualization_window(window)
+        self._register_visualization_stream(window, kind, channel=name)
 
-    def _register_visualization_window(self, window):
-        """Keep display-only visualization windows alive until they are closed."""
-        self.visualization_windows.append(window)
-        window.destroyed.connect(
-            lambda _object=None, window=window: (
-                self.visualization_windows.remove(window)
-                if window in self.visualization_windows
-                else None
-            )
+    def _register_visualization_stream(
+        self, window, kind, *, channel=None, source=None
+    ):
+        """Add a context-updated visualization as a dockable virtual stream."""
+        title = window.windowTitle()
+        dock = QDockWidget(f"Virtual Stream — {title}", self)
+        dock.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        dock.setObjectName(f"traceVisualizationDock{len(self.visualization_docks)}")
+        dock.setAllowedAreas(
+            Qt.DockWidgetArea.TopDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
         )
-        window.show()
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+        )
+        dock.setWidget(window)
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        if self.visualization_docks:
+            self.tabifyDockWidget(self.visualization_docks[0], dock)
+        self.visualization_windows.append(window)
+        self.visualization_docks.append(dock)
+        self.visualization_streams.append(
+            {
+                "kind": kind,
+                "channel": channel,
+                "source": source,
+                "window": window,
+                "dock": dock,
+            }
+        )
+        dock.destroyed.connect(
+            lambda _object=None, dock=dock: self._remove_visualization_stream(dock)
+        )
+        dock.show()
+        dock.raise_()
+
+    def _remove_visualization_stream(self, dock):
+        """Forget a virtual stream after its dock is destroyed."""
+        matching = [item for item in self.visualization_streams if item["dock"] is dock]
+        for item in matching:
+            self.visualization_streams.remove(item)
+            if item["window"] in self.visualization_windows:
+                self.visualization_windows.remove(item["window"])
+        if dock in self.visualization_docks:
+            self.visualization_docks.remove(dock)
+
+    def _refresh_visualization_streams(self):
+        """Recompute every virtual stream from the current visible context."""
+        for item in tuple(self.visualization_streams):
+            window = item["window"]
+            if item["channel"] is not None:
+                times, values = self._window_channel_data(item["channel"])
+                sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
+                if item["kind"] == "PSD":
+                    window.show_psd(item["channel"], values, sfreq)
+                else:
+                    window.show_spectrogram(item["channel"], times, values, sfreq)
+                continue
+            times, values, names = self._window_stream_data(item["source"])
+            values_by_channel = dict(zip(names, values, strict=True))
+            if item["kind"] == "RMS":
+                window.show_rms(values_by_channel)
+            else:
+                window.show_common_average_reference(times, values_by_channel)
 
     def show_current_window_psd(self):
         """Open a current-window PSD after the user chooses a channel."""
@@ -4807,9 +4882,9 @@ class StreamViewerWindow(QMainWindow):
         if source is None:
             return
         _times, values, names = self._window_stream_data(source)
-        window = TraceVisualizationWindow(f"RMS: {source['name']}", self)
+        window = TraceVisualizationPanel(f"RMS: {source['name']}")
         window.show_rms(dict(zip(names, values, strict=True)))
-        self._register_visualization_window(window)
+        self._register_visualization_stream(window, "RMS", source=source)
 
     def show_current_window_common_average_reference(self):
         """Open display-only CAR traces for every channel in the selected stream."""
@@ -4817,13 +4892,11 @@ class StreamViewerWindow(QMainWindow):
         if source is None:
             return
         times, values, names = self._window_stream_data(source)
-        window = TraceVisualizationWindow(
-            f"Common Average Reference: {source['name']}", self
-        )
+        window = TraceVisualizationPanel(f"Common Average Reference: {source['name']}")
         window.show_common_average_reference(
             times, dict(zip(names, values, strict=True))
         )
-        self._register_visualization_window(window)
+        self._register_visualization_stream(window, "CAR", source=source)
 
     def _edit_discrete_threshold(self):
         """Prompt for the discrete-channel rendering threshold."""
@@ -6208,6 +6281,7 @@ class StreamViewerWindow(QMainWindow):
         if self._closing:
             return
         self.annotation_stream.refresh(self._start_time, self._duration)
+        self._refresh_visualization_streams()
         panels = self._panels_in_viewport()
         if isinstance(self.raw, NativeXDFRecording):
             stop_time = self._start_time + self._duration
