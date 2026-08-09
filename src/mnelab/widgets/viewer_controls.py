@@ -31,6 +31,26 @@ from mnelab.annotation_hierarchy import (
 ANNOTATION_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
 
+def parse_annotation_set(descriptions, marker_streams=()):
+    """Parse a recording only when every annotation complies with the guide."""
+    prefixes = tuple(
+        str(stream.get("annotation_prefix") or "") for stream in marker_streams
+    )
+    markers = tuple(parse_marker(description, prefixes) for description in descriptions)
+    if not markers:
+        raise AnnotationFormatError("an empty annotation set has no marker format")
+    return markers
+
+
+def validate_annotation_format(descriptions, marker_streams=()):
+    """Return whether the complete set complies with the LSL JSON marker guide."""
+    try:
+        parse_annotation_set(descriptions, marker_streams)
+    except (AnnotationFormatError, TypeError):
+        return False
+    return True
+
+
 class AnnotationSidebar(QWidget):
     """Whole-recording annotation browser with live plot filtering."""
 
@@ -141,6 +161,19 @@ class AnnotationSidebar(QWidget):
         )
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         results_layout.addWidget(self.list, 1)
+
+        self.tree = QTreeWidget()
+        self.tree.setObjectName("annotationHierarchy")
+        self.tree.setHeaderHidden(True)
+        self.tree.setAlternatingRowColors(True)
+        self.tree.setWordWrap(True)
+        self.tree.setToolTip(
+            "Expand annotation categories; click a timestamp to center it, or "
+            "right-click to suppress or restore it"
+        )
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.hide()
+        results_layout.addWidget(self.tree, 1)
 
         self.count_label = QLabel()
         self.count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
@@ -436,6 +469,7 @@ class AnnotationSidebar(QWidget):
         hierarchy_nodes = {}
         other_root = None
         visible_count = 0
+        visible_records = []
         for annotation_index, onset, duration, description in records:
             description = str(description)
             if not self.accepts(description):
