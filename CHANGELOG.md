@@ -1,8 +1,9 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
 - Add context-updated PSD, spectrogram, RMS, and common-average-reference virtual
-  streams to the trace viewer, with PSD showing all channels in source-oriented panels
-  directly alongside the recorded streams (by
+  streams to the trace viewer, with PSD respecting the selected stream, retaining its
+  complete controls, and joining RMS and CAR in supporting pop-out windows directly
+  alongside the recorded streams (by
   [NitzanLux](https://github.com/NitzanLux))
 - Allow native XDF recordings appended from the main window to be ordered automatically
   by their recording times (by [NitzanLux](https://github.com/NitzanLux))
@@ -47,6 +48,11 @@
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Expose non-modal viewer and scientific-plot windows independently in desktop
+  taskbars and window navigation while retaining owner-based cleanup (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Show the stream-viewer crosshair time guide over every trace plot (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Enable **Join Selected** for native multi-rate XDF trace panels (by
   [NitzanLux](https://github.com/NitzanLux))
 - Expand a detached stream panel's trace body when its window is maximized instead of
@@ -75,6 +81,12 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Increase Plot Traces PSDs to a 16,384-point FFT, add an in-window frequency-bin
+  control, and centralize safe viewer and scientific-plot defaults in a validated YAML
+  configuration (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Increase main-window PSD frequency-bin density with a 16,384-point FFT (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Match the main-window PSD palette to raw traces without recoloring remaining channels
   when one is hidden (by [NitzanLux](https://github.com/NitzanLux))
 - Double-clicking a stream-viewer channel now toggles its isolation, hiding or

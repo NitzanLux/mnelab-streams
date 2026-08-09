@@ -73,6 +73,7 @@ from mnelab.utils import (
     image_path,
     natural_sort,
 )
+from mnelab.viewer_config import VIEWER_CONFIG
 from mnelab.viz import (
     _calc_tfr,
     plot_erds,
@@ -82,6 +83,7 @@ from mnelab.viz import (
     plot_evoked_topomaps,
 )
 from mnelab.widgets import EmptyWidget, InfoWidget, SidebarWidget
+from mnelab.widgets.windowing import make_window_independent
 from mnelab.xdf import (
     NativeXDFRecording,
     combine_native_xdf_streams,
@@ -91,6 +93,7 @@ from mnelab.xdf import (
 
 SIDEBAR_MIN_WIDTH = 150
 INFOWIDGET_MIN_WIDTH = 200
+PSD_N_FFT = VIEWER_CONFIG["psd"]["main_window_n_fft"]
 XDF_SUFFIXES = (".xdf", ".xdfz", ".xdf.gz")
 
 
@@ -707,7 +710,7 @@ def _empty_xdf_stream_warning(rows, skipped_stream_ids):
     )
 
 
-def _repair_nonfinite_psd(data, spectrum, fmin, fmax):
+def _repair_nonfinite_psd(data, spectrum, fmin, fmax, n_fft, n_per_seg):
     """Recompute non-finite Raw PSD rows without bridging missing-data gaps."""
     psds = spectrum.get_data(picks="all", exclude=())
     nonfinite = ~np.isfinite(psds).all(axis=1)
@@ -716,8 +719,6 @@ def _repair_nonfinite_psd(data, spectrum, fmin, fmax):
 
     samples = data.get_data(picks=spectrum.ch_names, reject_by_annotation="NaN").copy()
     samples[~np.isfinite(samples)] = np.nan
-    n_fft = min(data.n_times, 2048)
-
     for index in np.flatnonzero(nonfinite):
         if not np.isfinite(samples[index]).any():
             continue
@@ -731,6 +732,7 @@ def _repair_nonfinite_psd(data, spectrum, fmin, fmax):
                 fmin=fmin,
                 fmax=fmax,
                 n_fft=n_fft,
+                n_per_seg=n_per_seg,
                 verbose=False,
             )
         if np.array_equal(freqs, spectrum.freqs):
@@ -771,6 +773,7 @@ class MainWindow(QMainWindow):
         self.model = model  # data model
         self._stream_viewers = []
         self._psd_viewers = []
+        self._plot_windows = []
         self._stream_viewer_bads_before = {}
         self.setWindowTitle("MNELAB Streams")
         self.setMinimumSize(600, 500)
@@ -2478,15 +2481,11 @@ class MainWindow(QMainWindow):
         datasets = [self.model.data[index] for index in [self.model.index] + idx_list]
         stream_sets = []
         for dataset in datasets:
-            streams = _effective_streams(
-                dataset["data"], dataset["source_streams"]
-            )[0]
+            streams = _effective_streams(dataset["data"], dataset["source_streams"])[0]
             if not isinstance(dataset["data"], NativeXDFRecording):
                 for stream in streams:
                     if not stream.get("removed"):
-                        stream["nominal_srate"] = float(
-                            dataset["data"].info["sfreq"]
-                        )
+                        stream["nominal_srate"] = float(dataset["data"].info["sfreq"])
             stream_sets.append(streams)
         raws = []
         for dataset, streams in zip(datasets, stream_sets, strict=True):
@@ -2705,6 +2704,7 @@ class MainWindow(QMainWindow):
             fig.gotClosed.connect(self._plot_closed)
             fig.mne.keyboard_shortcuts.pop("escape")
 
+        self._register_plot_window(fig)
         fig.show()
 
     def plot_psd(self):
@@ -2715,12 +2715,17 @@ class MainWindow(QMainWindow):
         )
 
         if dialog.exec():
-            psd_kwds = {"fmin": dialog.fmin, "fmax": dialog.fmax}
+            data = self.model.current["data"]
+            psd_kwds = {
+                "fmin": dialog.fmin,
+                "fmax": dialog.fmax,
+                "n_fft": PSD_N_FFT,
+                "n_per_seg": min(PSD_N_FFT, int(data.n_times)),
+            }
             plot_kwds = {
                 "spatial_colors": dialog.spatial_colors,
                 "exclude": dialog.exclude,
             }
-            data = self.model.current["data"]
             with warnings.catch_warnings():
                 warnings.filterwarnings(
                     "ignore",
@@ -2740,7 +2745,12 @@ class MainWindow(QMainWindow):
                     spectrum = data.compute_psd(**psd_kwds)
             if not isinstance(data, NativeXDFRecording):
                 spectrum = _repair_nonfinite_psd(
-                    data, spectrum, dialog.fmin, dialog.fmax
+                    data,
+                    spectrum,
+                    dialog.fmin,
+                    dialog.fmax,
+                    psd_kwds["n_fft"],
+                    psd_kwds["n_per_seg"],
                 )
             if spectrum is None:
                 QMessageBox.warning(
@@ -2794,6 +2804,7 @@ class MainWindow(QMainWindow):
         win = fig.canvas.manager.window
         win.setWindowTitle("Montage")
         win.statusBar().hide()  # not necessary since matplotlib 3.3
+        self._register_plot_window(fig)
         fig.show()
 
     def plot_ica_components(self):
@@ -2805,9 +2816,13 @@ class MainWindow(QMainWindow):
         # refresh UI after closing the plots to reflect changes in ICA exclusions
         for fig in figs:
             fig.canvas.mpl_connect("close_event", lambda _: self.data_changed())
+            self._register_plot_window(fig)
+            fig.show()
 
     def plot_ica_sources(self):
-        self.model.current["ica"].plot_sources(inst=self.model.current["data"])
+        fig = self.model.current["ica"].plot_sources(inst=self.model.current["data"])
+        self._register_plot_window(fig)
+        fig.show()
 
     def plot_erds(self):
         """Plot ERDS maps."""
@@ -2847,6 +2862,7 @@ class MainWindow(QMainWindow):
                 tfr_and_masks = res.get(timeout=1)
                 figs = plot_erds(tfr_and_masks)
                 for fig in figs:
+                    self._register_plot_window(fig)
                     fig.show()
 
     def plot_erds_topomaps(self):
@@ -2865,6 +2881,7 @@ class MainWindow(QMainWindow):
                 times=[dialog.t1, dialog.t2],
             )
             for fig in figs:
+                self._register_plot_window(fig)
                 fig.show()
 
     def plot_evoked(self):
@@ -2898,6 +2915,7 @@ class MainWindow(QMainWindow):
                 topomap_times=topomap_times,
             )
             for fig in figs:
+                self._register_plot_window(fig)
                 fig.show()
 
     def plot_evoked_comparison(self):
@@ -2914,6 +2932,7 @@ class MainWindow(QMainWindow):
                 confidence_intervals=dialog.confidence_intervals.isChecked(),
             )
             for fig in figs:
+                self._register_plot_window(fig)
                 fig.show()
 
     def plot_evoked_topomaps(self):
@@ -2937,6 +2956,7 @@ class MainWindow(QMainWindow):
                 times=times,
             )
             for fig in figs:
+                self._register_plot_window(fig)
                 fig.show()
 
     def run_ica(self):
@@ -3583,8 +3603,33 @@ class MainWindow(QMainWindow):
         if self.bads != bads:
             self.model.history.append(f'data.info["bads"] = {bads}')
 
+    def _register_plot_window(self, plot):
+        """Expose an MNE or Matplotlib plot as an independent desktop window."""
+        canvas = getattr(plot, "canvas", None)
+        manager = getattr(canvas, "manager", None)
+        window = getattr(manager, "window", None) or plot
+        if not isinstance(window, QWidget):
+            return None
+        make_window_independent(window, self)
+        if window not in self._plot_windows:
+            self._plot_windows.append(window)
+
+            def window_destroyed(*_args):
+                if window in self._plot_windows:
+                    self._plot_windows.remove(window)
+
+            window.destroyed.connect(window_destroyed)
+        return window
+
     def event(self, event):
         if event.type() == QEvent.Type.Close:
+            for viewer in list(self._stream_viewers):
+                viewer._closing_application = True
+                viewer.close()
+            for viewer in list(self._psd_viewers):
+                viewer.close()
+            for window in list(self._plot_windows):
+                window.close()
             sizes = self.splitter.sizes()
             total = sum(sizes)
             kwargs = {"size": self.size(), "pos": self.pos()}

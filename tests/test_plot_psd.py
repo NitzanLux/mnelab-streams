@@ -50,11 +50,16 @@ def test_plot_psd_falls_back_to_all_channels(qtbot, tmp_path):
     assert len(viewer.panels) == 1
     assert viewer.panels[0].visible_channel_names == ["Aux 1", "Aux 2"]
     assert model.history[-1] == (
-        "data.compute_psd(fmin=0.0, fmax=50.0, picks='all')."
+        "data.compute_psd(fmin=0.0, fmax=50.0, n_fft=16384, n_per_seg=500, "
+        "picks='all')."
         "plot(spatial_colors=False, exclude=(), picks='all')"
     )
+    assert len(viewer.spectrum.freqs) > 2048
     assert viewer.windowTitle() == "Power spectral density — auxiliary"
-    viewer.close()
+    assert viewer.parent() is None
+
+    window.close()
+    qtbot.waitUntil(lambda: not viewer.isVisible())
     qtbot.waitUntil(lambda: not window._psd_viewers)
 
 
@@ -109,5 +114,7 @@ def test_plot_psd_keeps_native_xdf_stream_rates(qtbot, tmp_path):
     slow_frequencies, _values = viewer.panels[0]._curves[0].getData()
     fast_frequencies, _values = viewer.panels[1]._curves[0].getData()
     assert slow_frequencies[-1] <= 20
-    assert fast_frequencies[-1] == 50
+    assert 0 <= 50 - fast_frequencies[-1] <= 100 / 16384
+    assert len(slow_frequencies) > 2048
+    assert len(fast_frequencies) > 2048
     viewer.close()

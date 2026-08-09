@@ -15,7 +15,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMainWindow,
     QPushButton,
     QScrollArea,
     QSpinBox,
@@ -23,15 +22,17 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from mnelab.viewer_config import VIEWER_CONFIG
 from mnelab.widgets.stream_viewer import (
     CHANNEL_LIST_WIDTH,
     TraceLabelAxis,
     _automatic_color,
     normalize_streams,
 )
+from mnelab.widgets.windowing import IndependentMainWindow
 
-PSD_LANE_STEP = 2.0
-PSD_LANE_HALF_HEIGHT = 0.82
+PSD_LANE_STEP = VIEWER_CONFIG["psd"]["lane_step"]
+PSD_LANE_HALF_HEIGHT = VIEWER_CONFIG["psd"]["lane_half_height"]
 
 
 def _stream_frequency_mask(frequencies, source):
@@ -390,7 +391,7 @@ class PSDPanel(QFrame):
         self.plot.showGrid(x=True, y=False, alpha=0.2)
 
 
-class PSDViewerWindow(QMainWindow):
+class PSDViewerWindow(IndependentMainWindow):
     """MNELAB-native, source-oriented power spectral density viewer."""
 
     def __init__(

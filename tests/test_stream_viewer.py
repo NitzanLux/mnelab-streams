@@ -12,7 +12,12 @@ import pyqtgraph as pg
 import pytest
 from PySide6.QtCore import QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QTextOption, QWheelEvent
-from PySide6.QtWidgets import QApplication, QDockWidget, QInputDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QApplication,
+    QDockWidget,
+    QInputDialog,
+    QMessageBox,
+)
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
@@ -23,6 +28,7 @@ from mnelab.widgets.stream_viewer import (
     CHANNEL_LABEL_WIDTH,
     CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
+    TRACE_PSD_N_FFT,
     ActivationMapWindow,
     StreamViewerWindow,
     activation_matrix,
@@ -209,6 +215,27 @@ def test_crosshair_is_an_optional_view_overlay(viewer):
     assert not panel.plot._crosshair_enabled
 
 
+def test_crosshair_time_guide_is_synchronized_across_stream_plots(qtbot, viewer):
+    """Hovering one stream shows its time guide over every stream plot."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    source, other = viewer.panels
+    viewer.crosshair_action.setChecked(True)
+    scene_position = source.plot.getViewBox().mapViewToScene(QPointF(0.75, 0.0))
+
+    source._mouse_moved(scene_position)
+
+    assert source.plot._crosshair_v.value() == pytest.approx(0.75)
+    assert other.plot._crosshair_v.value() == pytest.approx(0.75)
+    assert source.plot._crosshair_v.isVisible()
+    assert other.plot._crosshair_v.isVisible()
+    assert source.plot._crosshair_h.isVisible()
+    assert not other.plot._crosshair_h.isVisible()
+
+    source.plot.pointer_left.emit()
+    assert all(not panel.plot._crosshair_v.isVisible() for panel in viewer.panels)
+
+
 def test_shift_drag_measurement_reports_segment_statistics(viewer):
     """A two-point measurement exposes time and physical-value statistics."""
     panel = viewer.panels[0]
@@ -306,18 +333,30 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
 
     viewer.show_current_window_psd()
     psd = viewer.visualization_windows[-1]
-    assert [panel.title for panel in psd.panels] == [
-        "BrainAmp (EEG)",
-        "Audio",
-    ]
+    assert [panel.title for panel in psd.panels] == ["BrainAmp (EEG)"]
     assert psd.panels[0].channel_names == ["EEG A", "EEG B"]
-    assert psd.panels[1].channel_names == ["Audio L"]
-    assert set(psd.channel_data) == set(raw.ch_names)
+    assert set(psd.channel_data) == {"EEG A", "EEG B"}
     assert all(
         frequencies[-1] <= raw.info["sfreq"] / 2
         for frequencies in psd.channel_frequencies.values()
     )
     initial_power = psd.channel_data["EEG A"]
+
+    psd.scale_combo.setCurrentText("Linear")
+    assert all(not panel._db for panel in psd.panels)
+    psd.display_combo.setCurrentText("Overlay")
+    assert all(panel._overlay for panel in psd.panels)
+    assert psd.column_spin.maximum() == 1
+    controls = psd.layout().itemAt(0).layout()
+    assert controls.indexOf(psd.float_button) == controls.count() - 2
+    assert controls.indexOf(psd.close_button) == controls.count() - 1
+
+    psd.float_button.click()
+    assert psd in viewer._detached_visualization_windows
+    assert psd.float_button.text() == "↙"
+    psd.float_button.click()
+    assert psd not in viewer._detached_visualization_windows
+    assert psd.float_button.text() == "↗"
 
     with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
         viewer.show_current_window_spectrogram()
@@ -335,19 +374,49 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
     car = viewer.visualization_windows[-1]
     assert car.channel_names == ["EEG A", "EEG B"]
     assert np.allclose(sum(car.values_by_channel.values()), 0)
-    assert viewer.visualization_workspace_panels == [psd]
+    assert viewer.visualization_workspace_panels == [psd, rms, car]
     assert viewer.panel_layout.indexOf(psd) >= 0
+    assert viewer.panel_layout.indexOf(rms) >= 0
+    assert viewer.panel_layout.indexOf(car) >= 0
     assert psd.parent() is viewer.panel_container
-    assert len(viewer.visualization_docks) == 3
-    assert all(
-        dock.windowTitle().startswith("Virtual Stream —")
-        for dock in viewer.visualization_docks
-    )
+    assert rms.parent() is viewer.panel_container
+    assert car.parent() is viewer.panel_container
+    assert len(viewer.visualization_docks) == 1
+    assert viewer.visualization_docks[0].windowTitle().startswith("Virtual Stream —")
+    for panel in (rms, car):
+        controls = panel.layout().itemAt(0).layout()
+        assert controls.indexOf(panel.float_button) == controls.count() - 2
+        assert controls.indexOf(panel.close_button) == controls.count() - 1
+        panel.float_button.click()
+        assert panel in viewer._detached_visualization_windows
+        assert panel.float_button.text() == "↙"
+        panel.float_button.click()
+        assert panel not in viewer._detached_visualization_windows
+        assert panel.float_button.text() == "↗"
 
     viewer.set_start_time(2.0)
 
     assert psd.channel_data["EEG A"] is not initial_power
     assert viewer.visualization_streams[0]["window"] is psd
+
+
+def test_psd_stream_close_button_handles_attached_and_floating_windows(qtbot, viewer):
+    """The retained Close control removes either PSD window presentation."""
+    viewer.panels[0].selected.setChecked(True)
+    viewer.show_current_window_psd()
+    attached = viewer.visualization_windows[-1]
+
+    attached.close_button.click()
+    qtbot.waitUntil(lambda: attached not in viewer.visualization_windows)
+
+    viewer.show_current_window_psd()
+    floating = viewer.visualization_windows[-1]
+    floating.float_button.click()
+    assert floating in viewer._detached_visualization_windows
+
+    floating.close_button.click()
+    qtbot.waitUntil(lambda: floating not in viewer.visualization_windows)
+    assert floating not in viewer._detached_visualization_windows
 
 
 def test_window_psd_does_not_bridge_nonfinite_gaps():
@@ -356,6 +425,41 @@ def test_window_psd_does_not_bridge_nonfinite_gaps():
 
     assert len(frequencies) == len(power)
     assert np.isfinite(power).all()
+
+
+def test_window_psd_uses_configured_fft_bin_density():
+    """Plot Traces PSD uses the configured FFT grid for every finite run."""
+    frequencies, power = window_psd(np.arange(100, dtype=float), 100.0)
+
+    assert TRACE_PSD_N_FFT == 16384
+    assert len(frequencies) == TRACE_PSD_N_FFT // 2 + 1
+    assert power.shape == frequencies.shape
+
+
+def test_window_psd_accepts_an_explicit_bin_count():
+    """The PSD frequency grid can be selected by its one-sided bin count."""
+    frequencies, power = window_psd(
+        np.arange(100, dtype=float), 100.0, frequency_bins=513
+    )
+
+    assert len(frequencies) == 513
+    assert power.shape == frequencies.shape
+
+
+def test_current_window_psd_bin_control_recomputes_in_place(viewer):
+    """Changing the PSD window control updates every selected-stream channel."""
+    viewer.panels[0].selected.setChecked(True)
+    viewer.show_current_window_psd()
+    psd = viewer.visualization_windows[-1]
+
+    assert psd.frequency_bins_spin.value() == 8193
+    psd.frequency_bins_spin.setValue(257)
+
+    assert psd.frequency_bins == 257
+    assert all(
+        len(frequencies) == 257 for frequencies in psd.channel_frequencies.values()
+    )
+    assert all(len(power) == 257 for power in psd.channel_data.values())
 
 
 def test_view_menu_stream_toggles_and_unified_layout_stay_interactive(viewer):
@@ -2332,7 +2436,7 @@ def test_activation_map_button_reuses_and_releases_child_window(qtbot, viewer):
         activation_window = viewer.activation_map_window
 
         assert activation_window is not None
-        assert activation_window.parent() is viewer
+        assert activation_window.parent() is None
         assert activation_window.isVisible()
         assert activation_window.stream_names == ["BrainAmp", "Audio"]
         assert activation_window.image_item is None

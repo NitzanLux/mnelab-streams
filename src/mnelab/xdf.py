@@ -157,7 +157,9 @@ def _xdf_channel_metadata(stream):
     return names, types, scale
 
 
-def _repair_nonfinite_raw_psd(raw, spectrum, fmin, fmax):
+def _repair_nonfinite_raw_psd(
+    raw, spectrum, fmin, fmax, *, n_fft=None, n_per_seg=None
+):
     """Recompute non-finite PSD rows without bridging missing-data gaps."""
     psds = spectrum.get_data(picks="all", exclude=())
     nonfinite = ~np.isfinite(psds).all(axis=1)
@@ -166,7 +168,9 @@ def _repair_nonfinite_raw_psd(raw, spectrum, fmin, fmax):
 
     samples = raw.get_data(picks=spectrum.ch_names, reject_by_annotation="NaN").copy()
     samples[~np.isfinite(samples)] = np.nan
-    n_fft = min(raw.n_times, 2048)
+    n_fft = min(raw.n_times, 2048) if n_fft is None else int(n_fft)
+    n_per_seg = n_fft if n_per_seg is None else int(n_per_seg)
+    n_per_seg = min(n_per_seg, raw.n_times)
     for index in np.flatnonzero(nonfinite):
         if not np.isfinite(samples[index]).any():
             continue
@@ -180,6 +184,7 @@ def _repair_nonfinite_raw_psd(raw, spectrum, fmin, fmax):
                 fmin=fmin,
                 fmax=fmax,
                 n_fft=n_fft,
+                n_per_seg=n_per_seg,
                 verbose=False,
             )
         if np.array_equal(freqs, spectrum.freqs):
@@ -315,6 +320,13 @@ class NativeXDFRecording:
             stream_kwargs = kwargs.copy()
             requested_fmax = stream_kwargs.get("fmax", np.inf)
             stream_kwargs["fmax"] = min(requested_fmax, raw.info["sfreq"] / 2)
+            if "n_fft" in stream_kwargs:
+                requested_segment = stream_kwargs.get(
+                    "n_per_seg", stream_kwargs["n_fft"]
+                )
+                stream_kwargs["n_per_seg"] = min(
+                    int(requested_segment), raw.n_times
+                )
             if stream_kwargs.get("fmin", 0) > stream_kwargs["fmax"]:
                 continue
             with warnings.catch_warnings():
@@ -334,6 +346,8 @@ class NativeXDFRecording:
                 spectrum,
                 stream_kwargs.get("fmin", 0),
                 stream_kwargs["fmax"],
+                n_fft=stream_kwargs.get("n_fft"),
+                n_per_seg=stream_kwargs.get("n_per_seg"),
             )
             if spectrum is not None:
                 spectra.append(spectrum)

@@ -1,0 +1,49 @@
+# User-tunable defaults for scientific plots and the Plot Traces viewer.
+#
+# Values are validated by mnelab.viewer_config when the application starts. Keep
+# protocol identifiers, physical-unit conversions, and Qt implementation limits in
+# Python; those are invariants rather than presentation or analysis preferences.
+
+psd:
+  # Welch FFT sizes. A real-valued signal produces n_fft / 2 + 1 bins.
+  main_window_n_fft: 16384
+  trace_window_n_fft: 16384
+  # Limits for the live Frequency bins control in Plot Traces PSD windows.
+  trace_window_minimum_bins: 2
+  trace_window_maximum_bins: 32769
+  # Geometry used when PSD channels are displayed in fitted lanes.
+  lane_step: 2.0
+  lane_half_height: 0.82
+
+trace_layout:
+  channel_list_width: 96
+  channel_label_width: 64
+  panel_body_spacing: 2
+  channel_lane_height: 32
+  minimum_plot_height: 64
+  maximum_plot_height: 2000
+  # Half of the lane spacing occupied by a fitted trace (0.495 = 99% total).
+  fit_half_lane_fraction: 0.495
+
+trace_amplitude:
+  step_factor: 1.25
+  minimum: 0.000001
+  maximum: 1000.0
+
+trace_palette:
+  default_color: "#4c78a8"
+  automatic_hue_start: 0.5833333333333334
+  automatic_hue_step: 0.3819660112501051
+  automatic_saturation: 0.85
+  automatic_value: 0.95
+
+annotations:
+  marker_row_limit: 8
+  minimum_font_size: 6
+  maximum_font_size: 24
+
+activation_map:
+  maximum_intermediate_elements: 2000000
+  missing_data_color: "#9aa0a6"
+  minimum_axis_width: 150
+  maximum_axis_width: 360

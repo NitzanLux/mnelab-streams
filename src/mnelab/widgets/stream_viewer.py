@@ -53,7 +53,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMainWindow,
     QMenu,
     QMessageBox,
     QPushButton,
@@ -72,6 +71,7 @@ from PySide6.QtWidgets import (
 from scipy import signal
 
 from mnelab.annotation_hierarchy import hierarchical_annotation_intervals
+from mnelab.viewer_config import VIEWER_CONFIG
 from mnelab.widgets.channel_display import ChannelDisplayDialog
 from mnelab.widgets.stream_display import StreamDisplayPropertiesDialog
 from mnelab.widgets.viewer_controls import AnnotationSidebar
@@ -80,6 +80,7 @@ from mnelab.widgets.viewer_layout import (
     load_viewer_layout,
     save_viewer_layout,
 )
+from mnelab.widgets.windowing import IndependentMainWindow
 from mnelab.xdf import NativeXDFRecording
 
 UNIT_FACTORS = {
@@ -137,34 +138,43 @@ UNIT_CHOICES = {
 # The channel unit combo is editable so hardware-specific units remain possible.
 SENSOR_UNIT_CHOICES = ["g", "m/s²", "rad/s", "°/s", "N", "Pa", "%"]
 
-MAX_ACTIVATION_ELEMENTS = 2_000_000
+_PSD_CONFIG = VIEWER_CONFIG["psd"]
+_LAYOUT_CONFIG = VIEWER_CONFIG["trace_layout"]
+_AMPLITUDE_CONFIG = VIEWER_CONFIG["trace_amplitude"]
+_PALETTE_CONFIG = VIEWER_CONFIG["trace_palette"]
+_ANNOTATION_CONFIG = VIEWER_CONFIG["annotations"]
+_ACTIVATION_CONFIG = VIEWER_CONFIG["activation_map"]
+
+TRACE_PSD_N_FFT = _PSD_CONFIG["trace_window_n_fft"]
+TRACE_PSD_MIN_BINS = _PSD_CONFIG["trace_window_minimum_bins"]
+TRACE_PSD_MAX_BINS = _PSD_CONFIG["trace_window_maximum_bins"]
+MAX_ACTIVATION_ELEMENTS = _ACTIVATION_CONFIG["maximum_intermediate_elements"]
 STREAM_PANEL_MIME = "application/x-mnelab-stream-panel"
-AMPLITUDE_STEP = 1.25
-MIN_AMPLITUDE = 0.000001
-MAX_AMPLITUDE = 1000.0
+AMPLITUDE_STEP = _AMPLITUDE_CONFIG["step_factor"]
+MIN_AMPLITUDE = _AMPLITUDE_CONFIG["minimum"]
+MAX_AMPLITUDE = _AMPLITUDE_CONFIG["maximum"]
 # Keep the interactive channel list roomy enough for short sensor names, while the
 # duplicate plot-axis labels only need a compact lane marker. Long names remain
 # available from the list-item tooltip.
-CHANNEL_LIST_WIDTH = 96
-CHANNEL_LABEL_WIDTH = 64
-PANEL_BODY_SPACING = 2
-CHANNEL_LANE_HEIGHT = 32
-MIN_STREAM_PLOT_HEIGHT = 64
-MAX_STREAM_PLOT_HEIGHT = 2000
+CHANNEL_LIST_WIDTH = _LAYOUT_CONFIG["channel_list_width"]
+CHANNEL_LABEL_WIDTH = _LAYOUT_CONFIG["channel_label_width"]
+PANEL_BODY_SPACING = _LAYOUT_CONFIG["panel_body_spacing"]
+CHANNEL_LANE_HEIGHT = _LAYOUT_CONFIG["channel_lane_height"]
+MIN_STREAM_PLOT_HEIGHT = _LAYOUT_CONFIG["minimum_plot_height"]
+MAX_STREAM_PLOT_HEIGHT = _LAYOUT_CONFIG["maximum_plot_height"]
 QT_WIDGET_SIZE_MAX = (1 << 24) - 1
-# Fill 99% of the center-to-center lane spacing while retaining a visible gap.
-FIT_HALF_LANE_FRACTION = 0.495
-DEFAULT_TRACE_COLOR = "#4c78a8"
-AUTOMATIC_TRACE_HUE_START = 210.0 / 360.0
-AUTOMATIC_TRACE_HUE_STEP = (3.0 - np.sqrt(5.0)) / 2.0
-AUTOMATIC_TRACE_SATURATION = 0.85
-AUTOMATIC_TRACE_VALUE = 0.95
-ACTIVATION_NAN_COLOR = "#9aa0a6"
-ACTIVATION_AXIS_MIN_WIDTH = 150
-ACTIVATION_AXIS_MAX_WIDTH = 360
-MARKER_ROW_LIMIT = 8
-MIN_ANNOTATION_FONT_SIZE = 6
-MAX_ANNOTATION_FONT_SIZE = 24
+FIT_HALF_LANE_FRACTION = _LAYOUT_CONFIG["fit_half_lane_fraction"]
+DEFAULT_TRACE_COLOR = _PALETTE_CONFIG["default_color"]
+AUTOMATIC_TRACE_HUE_START = _PALETTE_CONFIG["automatic_hue_start"]
+AUTOMATIC_TRACE_HUE_STEP = _PALETTE_CONFIG["automatic_hue_step"]
+AUTOMATIC_TRACE_SATURATION = _PALETTE_CONFIG["automatic_saturation"]
+AUTOMATIC_TRACE_VALUE = _PALETTE_CONFIG["automatic_value"]
+ACTIVATION_NAN_COLOR = _ACTIVATION_CONFIG["missing_data_color"]
+ACTIVATION_AXIS_MIN_WIDTH = _ACTIVATION_CONFIG["minimum_axis_width"]
+ACTIVATION_AXIS_MAX_WIDTH = _ACTIVATION_CONFIG["maximum_axis_width"]
+MARKER_ROW_LIMIT = _ANNOTATION_CONFIG["marker_row_limit"]
+MIN_ANNOTATION_FONT_SIZE = _ANNOTATION_CONFIG["minimum_font_size"]
+MAX_ANNOTATION_FONT_SIZE = _ANNOTATION_CONFIG["maximum_font_size"]
 
 
 def _finite_runs(values):
@@ -174,15 +184,25 @@ def _finite_runs(values):
     return [values[start:stop] for start, stop in edges.reshape(-1, 2)]
 
 
-def window_psd(values, sfreq):
+def window_psd(values, sfreq, frequency_bins=None):
     """Estimate PSD over finite runs, weighted by each run's length."""
+    frequency_bins = (
+        TRACE_PSD_N_FFT // 2 + 1 if frequency_bins is None else int(frequency_bins)
+    )
+    if frequency_bins < 2:
+        raise ValueError("PSD frequency bin count must be at least 2")
+    n_fft = 2 * (frequency_bins - 1)
     runs = [run for run in _finite_runs(values) if len(run) >= 2]
     if not runs:
         return np.empty(0), np.empty(0)
-    nperseg = min(256, *(len(run) for run in runs))
     spectra = []
     for run in runs:
-        frequencies, power = signal.welch(run, fs=sfreq, nperseg=nperseg)
+        frequencies, power = signal.welch(
+            run,
+            fs=sfreq,
+            nperseg=min(n_fft, len(run)),
+            nfft=n_fft,
+        )
         spectra.append((frequencies, power, len(run)))
     frequencies = spectra[0][0]
     power = sum(item[1] * item[2] for item in spectra) / sum(
@@ -194,16 +214,52 @@ def window_psd(values, sfreq):
 class TraceVisualizationPanel(QWidget):
     """Display a virtual stream calculated from the active trace time window."""
 
-    def __init__(self, title, parent=None):
+    float_requested = Signal()
+    close_requested = Signal()
+
+    def __init__(self, title, *, workspace_controls=False, parent=None):
         super().__init__(parent)
         self.setWindowTitle(title)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
+        if workspace_controls:
+            controls = QHBoxLayout()
+            title_label = QLabel(f"Virtual Stream — {title}")
+            title_font = title_label.font()
+            title_font.setBold(True)
+            title_label.setFont(title_font)
+            controls.addWidget(title_label)
+            controls.addStretch()
+            self.float_button = QPushButton("↗")
+            self.float_button.setFixedWidth(30)
+            self.float_button.setToolTip(
+                "Float this virtual stream in a separate window"
+            )
+            self.float_button.clicked.connect(self.float_requested.emit)
+            controls.addWidget(self.float_button)
+            self.close_button = QPushButton("Close")
+            self.close_button.clicked.connect(self.close_requested.emit)
+            controls.addWidget(self.close_button)
+            layout.addLayout(controls)
         self.plot = pg.PlotWidget()
         self.plot.showGrid(x=True, y=True, alpha=0.2)
         layout.addWidget(self.plot)
         self.channel_names = []
         self.values_by_channel = {}
+
+    @property
+    def title(self):
+        """Return the title used by the detached stream window."""
+        return self.windowTitle()
+
+    def set_floating(self, floating):
+        """Update the pop-out button for detached or attached presentation."""
+        self.float_button.setText("↙" if floating else "↗")
+        self.float_button.setToolTip(
+            "Return this virtual stream to the main window"
+            if floating
+            else "Float this virtual stream in a separate window"
+        )
 
     def show_psd(self, channel, values, sfreq):
         """Plot one channel's finite-aware Welch power spectral density."""
@@ -298,12 +354,17 @@ class TraceVisualizationPanel(QWidget):
 class TracePSDVisualizationPanel(QWidget):
     """Show current-window PSDs with one familiar panel per source stream."""
 
+    float_requested = Signal()
+    close_requested = Signal()
+    frequency_bins_changed = Signal(int)
+
     def __init__(
         self,
         raw,
         streams,
         channel_data,
         channel_frequencies,
+        frequency_bins=TRACE_PSD_N_FFT // 2 + 1,
         max_channels=20,
         parent=None,
     ):
@@ -319,6 +380,7 @@ class TracePSDVisualizationPanel(QWidget):
         )
         self.spectrum = SimpleNamespace(info=raw.info, freqs=frequencies)
         self.source_streams = list(streams)
+        self.frequency_bins = int(frequency_bins)
         self.panels = []
         self._columns = 1
         self.setMinimumHeight(320)
@@ -341,6 +403,16 @@ class TracePSDVisualizationPanel(QWidget):
         self.display_combo.addItems(["Stacked lanes", "Overlay"])
         self.display_combo.currentTextChanged.connect(self._display_changed)
         controls.addWidget(self.display_combo)
+        controls.addWidget(QLabel("Frequency bins:"))
+        self.frequency_bins_spin = QSpinBox()
+        self.frequency_bins_spin.setRange(TRACE_PSD_MIN_BINS, TRACE_PSD_MAX_BINS)
+        self.frequency_bins_spin.setValue(self.frequency_bins)
+        self.frequency_bins_spin.setToolTip(
+            "Number of one-sided PSD frequency bins; changing this recomputes "
+            "the current window"
+        )
+        self.frequency_bins_spin.valueChanged.connect(self._frequency_bins_changed)
+        controls.addWidget(self.frequency_bins_spin)
         controls.addWidget(QLabel("Columns:"))
         self.column_spin = QSpinBox()
         self.column_spin.setRange(1, max(1, len(self.source_streams)))
@@ -349,10 +421,15 @@ class TracePSDVisualizationPanel(QWidget):
         self.reset_button = QPushButton("Reset All Views")
         self.reset_button.clicked.connect(self.reset_views)
         controls.addWidget(self.reset_button)
-        self.close_button = QPushButton("Close")
-        self.close_button.clicked.connect(self.deleteLater)
-        controls.addWidget(self.close_button)
         controls.addStretch()
+        self.float_button = QPushButton("↗")
+        self.float_button.setFixedWidth(30)
+        self.float_button.setToolTip("Float this PSD stream in a separate window")
+        self.float_button.clicked.connect(self.float_requested.emit)
+        controls.addWidget(self.float_button)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.close_requested.emit)
+        controls.addWidget(self.close_button)
         outer.addLayout(controls)
 
         self.scroll = QScrollArea()
@@ -378,6 +455,11 @@ class TracePSDVisualizationPanel(QWidget):
             )
         self._layout_panels()
 
+    @property
+    def title(self):
+        """Return the title used by the detached stream window."""
+        return self.windowTitle()
+
     def _layout_panels(self):
         while self.panel_layout.count():
             self.panel_layout.takeAt(0)
@@ -399,10 +481,23 @@ class TracePSDVisualizationPanel(QWidget):
         for panel in self.panels:
             panel.set_overlay(display == "Overlay")
 
+    def _frequency_bins_changed(self, frequency_bins):
+        self.frequency_bins = int(frequency_bins)
+        self.frequency_bins_changed.emit(self.frequency_bins)
+
     def reset_views(self):
         """Restore the complete frequency range in every source panel."""
         for panel in self.panels:
             panel.reset_view()
+
+    def set_floating(self, floating):
+        """Update the float button for detached or attached presentation."""
+        self.float_button.setText("↙" if floating else "↗")
+        self.float_button.setToolTip(
+            "Return this PSD stream to the main window"
+            if floating
+            else "Float this PSD stream in a separate window"
+        )
 
     def update_data(self, channel_data, channel_frequencies):
         """Replace PSD values while preserving paging and display controls."""
@@ -949,13 +1044,13 @@ class StreamResizeHandle(QFrame):
         super().mouseReleaseEvent(event)
 
 
-class DetachedStreamWindow(QMainWindow):
+class DetachedStreamWindow(IndependentMainWindow):
     """Top-level owner for a stream panel detached from the viewer grid."""
 
     return_requested = Signal(object, object)
 
     def __init__(self, panel, parent=None):
-        super().__init__(parent, Qt.WindowType.Window)
+        super().__init__(parent)
         self._discarding = False
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowTitle(panel.title)
@@ -1048,6 +1143,7 @@ class StreamPlotWidget(pg.PlotWidget):
     click_requested = Signal(float)
     context_requested = Signal(object)
     measurement_changed = Signal(float, float, float, float, bool)
+    pointer_left = Signal()
 
     def __init__(self, parent=None, **kwargs):
         super().__init__(parent, **kwargs)
@@ -1215,8 +1311,8 @@ class StreamPlotWidget(pg.PlotWidget):
 
     def leaveEvent(self, event):
         QToolTip.hideText()
-        self._crosshair_v.hide()
-        self._crosshair_h.hide()
+        self.hide_crosshair()
+        self.pointer_left.emit()
         super().leaveEvent(event)
 
     def set_crosshair_enabled(self, enabled):
@@ -1242,10 +1338,24 @@ class StreamPlotWidget(pg.PlotWidget):
             self._crosshair_h.hide()
             return
         point = self.getPlotItem().vb.mapSceneToView(scene_position)
-        self._crosshair_v.setPos(point.x())
-        self._crosshair_h.setPos(point.y())
+        self.set_crosshair_position(point.x(), point.y())
+
+    def set_crosshair_position(self, time, value=None):
+        """Show the time guide and an optional horizontal value guide."""
+        if not self._crosshair_enabled:
+            return
+        self._crosshair_v.setPos(time)
         self._crosshair_v.show()
-        self._crosshair_h.show()
+        if value is None:
+            self._crosshair_h.hide()
+        else:
+            self._crosshair_h.setPos(value)
+            self._crosshair_h.show()
+
+    def hide_crosshair(self):
+        """Hide both crosshair guides without changing the enabled state."""
+        self._crosshair_v.hide()
+        self._crosshair_h.hide()
 
     def set_measurement_text(self, text):
         """Show the formatted measurement beside the selection rectangle."""
@@ -1341,6 +1451,8 @@ class StreamPanel(QFrame):
     settings_changed = Signal(object)
     bad_channels_changed = Signal()
     cursor_changed = Signal(str)
+    crosshair_moved = Signal(float, object)
+    crosshair_left = Signal()
     page_changed = Signal()
     float_requested = Signal()
     swap_requested = Signal(object)
@@ -1621,6 +1733,7 @@ class StreamPanel(QFrame):
         self.plot.getPlotItem().setClipToView(True)
         self.plot.getPlotItem().setDownsampling(auto=True, mode="peak")
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
+        self.plot.pointer_left.connect(self.crosshair_left.emit)
         self.plot.zoom_requested.connect(self.time_zoom_requested.emit)
         self.plot.pan_requested.connect(self.time_pan_requested.emit)
         self.plot.click_requested.connect(self._annotation_at_time_clicked)
@@ -2888,6 +3001,9 @@ class StreamPanel(QFrame):
 
     def _mouse_moved(self, scene_pos):
         self.plot.update_crosshair(scene_pos)
+        inside_data = self.plot.getPlotItem().vb.sceneBoundingRect().contains(scene_pos)
+        if not inside_data:
+            self.crosshair_left.emit()
         if (
             not self.plot.sceneBoundingRect().contains(scene_pos)
             or not len(self._times)
@@ -2896,6 +3012,8 @@ class StreamPanel(QFrame):
             QToolTip.hideText()
             return
         point = self.plot.getPlotItem().vb.mapSceneToView(scene_pos)
+        if inside_data:
+            self.crosshair_moved.emit(float(point.x()), self)
         sample = int(
             np.clip(np.searchsorted(self._times, point.x()), 0, len(self._times) - 1)
         )
@@ -3914,7 +4032,7 @@ class AnnotationStream(QFrame):
             self.refresh(*self._last_window)
 
 
-class ActivationMapWindow(QMainWindow):
+class ActivationMapWindow(IndependentMainWindow):
     """Gantt-style heatmap of normalized activation for each source stream."""
 
     time_selected = Signal(float)
@@ -4157,7 +4275,7 @@ class ActivationMapWindow(QMainWindow):
             self.time_selected.emit(float(point.x()))
 
 
-class AnnotationHierarchyMapWindow(QMainWindow):
+class AnnotationHierarchyMapWindow(IndependentMainWindow):
     """Annotation-only lifecycle overview arranged by hierarchical event path."""
 
     time_selected = Signal(float)
@@ -4374,7 +4492,7 @@ class AnnotationHierarchyMapWindow(QMainWindow):
         self.uuid_visibility_changed.emit(bool(visible))
 
 
-class StreamViewerWindow(QMainWindow):
+class StreamViewerWindow(IndependentMainWindow):
     """Responsive, stream-oriented viewer for continuous MNE Raw data."""
 
     bad_channels_changed = Signal()
@@ -4461,6 +4579,7 @@ class StreamViewerWindow(QMainWindow):
         self.visualization_streams = []
         self.visualization_docks = []
         self.visualization_workspace_panels = []
+        self._detached_visualization_windows = {}
         self._event_overlays_visible = True
         self._annotation_overlays_visible = True
         self._selected_annotation_index = None
@@ -4869,7 +4988,10 @@ class StreamViewerWindow(QMainWindow):
     def _create_visualizations_menu(self):
         """Add display-only analyses for the current trace time window."""
         menu = self.menuBar().addMenu("&Visualizations")
-        menu.addAction("Power Spectral &Density", self.show_current_window_psd)
+        menu.addAction(
+            "Power Spectral &Density for Selected Stream",
+            self.show_current_window_psd,
+        )
         menu.addAction("&Spectrogram…", self.show_current_window_spectrogram)
         menu.addSeparator()
         menu.addAction("&RMS for Selected Stream", self.show_current_window_rms)
@@ -4906,14 +5028,14 @@ class StreamViewerWindow(QMainWindow):
             names,
         )
 
-    def _window_psd_data(self):
-        """Return current-window PSD arrays for every channel and source rate."""
+    def _window_psd_data(self, source, frequency_bins=None):
+        """Return current-window PSD arrays for one source stream."""
         channel_data = {}
         channel_frequencies = {}
-        for name in self.raw.ch_names:
+        for name in source["channel_names"]:
             times, values = self._window_channel_data(name)
             sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
-            frequencies, power = window_psd(values, sfreq)
+            frequencies, power = window_psd(values, sfreq, frequency_bins)
             channel_data[name] = power
             channel_frequencies[name] = frequencies
         return channel_data, channel_frequencies
@@ -4944,8 +5066,8 @@ class StreamViewerWindow(QMainWindow):
     def _register_visualization_stream(
         self, window, kind, *, channel=None, source=None
     ):
-        """Add a context-updated visualization as a dockable virtual stream."""
-        if kind == "PSD":
+        """Add a context-updated visualization to the workspace or a dock."""
+        if kind in {"PSD", "RMS", "CAR"}:
             window.setParent(self.panel_container)
             self.visualization_windows.append(window)
             self.visualization_workspace_panels.append(window)
@@ -4963,6 +5085,16 @@ class StreamViewerWindow(QMainWindow):
                     window
                 )
             )
+            window.float_requested.connect(
+                lambda window=window: self._toggle_visualization_floating(window)
+            )
+            window.close_requested.connect(
+                lambda window=window: self._close_visualization_panel(window)
+            )
+            if kind == "PSD":
+                window.frequency_bins_changed.connect(
+                    lambda _bins, window=window: self._refresh_psd_stream(window)
+                )
             self._reflow_panels()
             window.show()
             return
@@ -5012,17 +5144,72 @@ class StreamViewerWindow(QMainWindow):
                 self.visualization_windows.remove(item["window"])
             if item["window"] in self.visualization_workspace_panels:
                 self.visualization_workspace_panels.remove(item["window"])
+            self._detached_visualization_windows.pop(item["window"], None)
         if target in self.visualization_docks:
             self.visualization_docks.remove(target)
         if not self._closing:
             self._reflow_panels()
+
+    def _toggle_visualization_floating(self, panel):
+        """Move a virtual stream between the grid and its own window."""
+        if panel in self._detached_visualization_windows:
+            self._dock_visualization_panel(panel)
+        else:
+            self._detach_visualization_panel(panel)
+
+    def _detach_visualization_panel(self, panel):
+        if panel not in self.visualization_workspace_panels:
+            return
+        self.panel_layout.removeWidget(panel)
+        window = DetachedStreamWindow(panel, parent=self)
+        window.return_requested.connect(self._detached_visualization_closed)
+        self._detached_visualization_windows[panel] = window
+        panel.set_floating(True)
+        self._reflow_panels()
+        window.show()
+
+    def _dock_visualization_panel(self, panel):
+        window = self._detached_visualization_windows.pop(panel, None)
+        if window is None:
+            return
+        released = window.discard_panel()
+        window.close()
+        panel = released if released is not None else panel
+        panel.setParent(self.panel_container)
+        panel.set_floating(False)
+        self._reflow_panels()
+        panel.show()
+
+    def _detached_visualization_closed(self, panel, window):
+        if self._detached_visualization_windows.get(panel) is not window:
+            return
+        self._detached_visualization_windows.pop(panel, None)
+        if self._closing:
+            panel.setParent(self)
+            panel.hide()
+            return
+        panel.setParent(self.panel_container)
+        panel.set_floating(False)
+        self._reflow_panels()
+        panel.show()
+
+    def _close_visualization_panel(self, panel):
+        """Close an attached or floating virtual stream."""
+        window = self._detached_visualization_windows.pop(panel, None)
+        if window is not None:
+            window.discard_panel()
+            window.close()
+            panel.setParent(self)
+        panel.deleteLater()
 
     def _refresh_visualization_streams(self):
         """Recompute every virtual stream from the current visible context."""
         for item in tuple(self.visualization_streams):
             window = item["window"]
             if item["kind"] == "PSD":
-                window.update_data(*self._window_psd_data())
+                window.update_data(
+                    *self._window_psd_data(item["source"], window.frequency_bins)
+                )
                 continue
             if item["channel"] is not None:
                 times, values = self._window_channel_data(item["channel"])
@@ -5037,16 +5224,35 @@ class StreamViewerWindow(QMainWindow):
                 window.show_common_average_reference(times, values_by_channel)
 
     def show_current_window_psd(self):
-        """Add an all-channel, source-oriented current-window PSD stream."""
-        channel_data, channel_frequencies = self._window_psd_data()
+        """Add a current-window PSD stream for the selected source."""
+        source = self._selected_visualization_source()
+        if source is None:
+            return
+        channel_data, channel_frequencies = self._window_psd_data(source)
         window = TracePSDVisualizationPanel(
             self.raw,
-            self.source_streams,
+            [source],
             channel_data,
             channel_frequencies,
             max_channels=self.max_channels,
         )
-        self._register_visualization_stream(window, "PSD")
+        self._register_visualization_stream(window, "PSD", source=source)
+
+    def _refresh_psd_stream(self, window):
+        """Recompute one PSD virtual stream after its bin count changes."""
+        item = next(
+            (
+                item
+                for item in self.visualization_streams
+                if item["kind"] == "PSD" and item["window"] is window
+            ),
+            None,
+        )
+        if item is None:
+            return
+        window.update_data(
+            *self._window_psd_data(item["source"], window.frequency_bins)
+        )
 
     def show_current_window_spectrogram(self):
         """Open a current-window spectrogram after the user chooses a channel."""
@@ -5076,7 +5282,9 @@ class StreamViewerWindow(QMainWindow):
         if source is None:
             return
         _times, values, names = self._window_stream_data(source)
-        window = TraceVisualizationPanel(f"RMS: {source['name']}")
+        window = TraceVisualizationPanel(
+            f"RMS: {source['name']}", workspace_controls=True
+        )
         window.show_rms(dict(zip(names, values, strict=True)))
         self._register_visualization_stream(window, "RMS", source=source)
 
@@ -5086,7 +5294,9 @@ class StreamViewerWindow(QMainWindow):
         if source is None:
             return
         times, values, names = self._window_stream_data(source)
-        window = TraceVisualizationPanel(f"Common Average Reference: {source['name']}")
+        window = TraceVisualizationPanel(
+            f"Common Average Reference: {source['name']}", workspace_controls=True
+        )
         window.show_common_average_reference(
             times, dict(zip(names, values, strict=True))
         )
@@ -5306,6 +5516,18 @@ class StreamViewerWindow(QMainWindow):
         """Apply the crosshair option to attached and floating signal panels."""
         for panel in self.panels:
             panel.plot.set_crosshair_enabled(visible)
+
+    def _sync_crosshair(self, time, source_panel):
+        """Show one time guide across all plots and a value guide on its source."""
+        for panel in self.panels:
+            if panel is source_panel:
+                continue
+            panel.plot.set_crosshair_position(time)
+
+    def _hide_crosshairs(self):
+        """Hide synchronized crosshair guides in every signal panel."""
+        for panel in self.panels:
+            panel.plot.hide_crosshair()
 
     def _clear_measurements(self):
         """Clear persistent Shift-drag measurements from every signal panel."""
@@ -5925,7 +6147,11 @@ class StreamViewerWindow(QMainWindow):
                     for source_id in panel.source_ids
                 )
             )
-        workspace_panels = attached + self.visualization_workspace_panels
+        workspace_panels = attached + [
+            panel
+            for panel in self.visualization_workspace_panels
+            if panel not in self._detached_visualization_windows
+        ]
         for index, panel in enumerate(workspace_panels):
             row, column = divmod(index, self._columns)
             self.panel_layout.addWidget(
@@ -5996,6 +6222,8 @@ class StreamViewerWindow(QMainWindow):
             panel.bad_channels_changed.connect(self._bad_channels_updated)
             panel.page_changed.connect(self.refresh)
             panel.cursor_changed.connect(self.statusBar().showMessage)
+            panel.crosshair_moved.connect(self._sync_crosshair)
+            panel.crosshair_left.connect(self._hide_crosshairs)
             panel.time_zoom_requested.connect(self.set_time_window)
             panel.time_pan_requested.connect(self.pan_time_window)
             panel.annotation_clicked.connect(self._select_annotation_from_stream)
@@ -6632,6 +6860,7 @@ class StreamViewerWindow(QMainWindow):
         """Close floating stream windows without redocking them during teardown."""
         if (
             not getattr(self, "_closing_stale_data", False)
+            and not getattr(self, "_closing_application", False)
             and self.isVisible()
             and self.display_montage_changed
         ):
@@ -6657,6 +6886,10 @@ class StreamViewerWindow(QMainWindow):
         self._navigation_timer.stop()
         self._viewport_timer.stop()
         self._discard_detached_windows()
+        if self.activation_map_window is not None:
+            self.activation_map_window.close()
+        if self.annotation_map_window is not None:
+            self.annotation_map_window.close()
         super().closeEvent(event)
 
     def showEvent(self, event):

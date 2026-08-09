@@ -931,6 +931,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pyqtgraph" },
     { name = "pyside6" },
+    { name = "pyyaml" },
     { name = "scipy" },
 ]
 
@@ -969,6 +970,7 @@ requires-dist = [
     { name = "pyqtgraph", specifier = ">=0.13.7" },
     { name = "pyside6", specifier = ">=6.11.0" },
     { name = "python-picard", marker = "extra == 'full'", specifier = ">=0.8.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "scikit-learn", marker = "extra == 'full'", specifier = ">=1.8.0" },
     { name = "scipy", specifier = ">=1.17.1" },
 ]

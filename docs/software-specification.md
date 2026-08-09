@@ -227,6 +227,13 @@ window size, and position persist between runs. On Windows and Linux, users may 
 the menubar and use the toolbar's hamburger menu instead. Icons and palette follow the
 active Qt/system color scheme.
 
+Non-modal viewer and scientific-plot windows, including raw, epoch-trace, PSD,
+Matplotlib, ICA, ERDS, evoked, detached-stream, activation-map, and annotation-map
+windows, shall be independent top-level windows. Desktop taskbars, window switchers,
+and macOS window navigation shall therefore expose them separately for direct
+navigation and arrangement. Closing an owning viewer or the application shall still
+close its related independent windows.
+
 Files may be opened from **File > Open**, the recent-files list, command-line arguments,
 operating-system file-open events, or drag and drop. The last used directory shall be
 remembered.
@@ -597,7 +604,9 @@ model used for raw data. It shall offer fitted stacked channel lanes and a per-s
 channel overlay; overlay mode shall use a numeric PSD-amplitude y-axis in the selected
 dB or linear power scale. Unless spatial colors are enabled, PSD traces shall use the
 same automatic high-contrast palette as raw traces. Hiding a PSD channel shall not
-change the colors assigned to the remaining channels on its page.
+change the colors assigned to the remaining channels on its page. Main-window PSDs
+shall use a 16,384-point FFT, zero-padding shorter segments to provide a denser
+frequency-bin grid without bridging missing-data spans.
 
 Epoch browsing uses MNE's configured Matplotlib or optional Qt browser backend. The
 settings determine the default number of displayed epochs and channels and whether
@@ -690,6 +699,10 @@ Panel amplitude is a display-only multiplier from 0.001x through 1000x. Step but
 and keyboard changes use a factor of 1.25. The scale readout shall report the signal
 magnitude represented by one vertical division, and the cursor shall report time,
 channel name, and signal value in the selected display unit.
+
+When the optional crosshair is enabled, its vertical time guide shall be synchronized
+across every stream plot. The horizontal value guide shall remain in the hovered plot,
+where its vertical coordinate has meaning.
 
 **Fit to Pane** shall clear the selected panel's cached source scales and fit the
 loudest finite displayed channel in each source to 49.5% of the lane spacing on each
@@ -801,18 +814,30 @@ normal matching.
 The raw trace viewer shall provide a **Visualizations** menu for display-only analyses
 of its current shared time window. Each visualization shall be added as a virtual
 stream inside the trace viewer and shall recompute whenever the visible start time or
-duration changes. **Power Spectral Density** shall appear directly in the main stream
-workspace alongside the recorded stream panels. It shall show every channel, grouped
-into the same source-oriented panels, channel lanes, paging controls, and colors as the
-ordinary PSD viewer. Other virtual-stream visualizations shall be dockable, with
-multiple docks organized as tabs.
+duration changes. **Power Spectral Density for Selected Stream** shall require exactly
+one stream panel to be selected and shall appear directly in the main stream workspace
+alongside the recorded stream panels. It shall show every channel in the selected
+stream, with the same channel lanes, paging controls, colors, power scale, display
+mode, and reset controls as the ordinary PSD viewer. The complete PSD virtual stream
+shall support the same pop-out and return workflow as a recorded stream panel. RMS and
+common-average-reference virtual streams shall use the same main-workspace and pop-out
+workflow, with the pop-out control at the right end of their header. Other
+virtual-stream visualizations shall be dockable, with multiple docks organized as
+tabs.
 **Spectrogram** shall ask the user to choose a channel and use that channel's
 unmodified samples in the visible range. **RMS for Selected Stream** shall show one RMS
 value per channel, and **Common Average Reference for Selected Stream** shall show
-per-channel traces after subtracting the samplewise stream average. The latter two
-commands require exactly one stream panel to be selected with its **Select** control.
+per-channel traces after subtracting the samplewise stream average. PSD, RMS, and CAR
+require exactly one stream panel to be selected with its **Select** control.
 None of these visualizations shall modify the recording, its display montage, or its
 analysis history. Missing sample spans shall not be treated as continuous data.
+Current-window PSDs shall use the FFT size configured by
+`viewer_config.yaml` (16,384 by default), producing 8,193 one-sided frequency bins.
+Each contiguous finite run shall retain its own Welch segment length and be zero-padded
+to that common FFT grid so acquisition gaps are never bridged. Each PSD virtual stream
+shall expose a **Frequency bins** control that immediately recomputes the visible-window
+PSD in place. The configured FFT size determines its default, while the YAML minimum
+and maximum bin values determine its selectable range.
 
 ### 12.8 Activation map
 
@@ -958,6 +983,13 @@ the display montage dirty.
 Preferences shall be stored through `QSettings` in `mnelab-streams.ini` beneath Qt's
 per-user
 application configuration location.
+
+Static scientific-plot and Plot Traces defaults that are safe to tune in a source or
+packaged installation shall be organized in `src/mnelab/viewer_config.yaml`. This file
+shall cover PSD FFT density, PSD lane geometry, trace layout and amplitude limits,
+trace colors, annotation sizing, and activation-map limits. It shall be validated at
+application startup. Protocol identifiers, unit conversions, and toolkit hard limits
+shall remain code-level invariants rather than configurable preferences.
 
 | Setting | Default | User-facing range or behavior |
 | --- | --- | --- |

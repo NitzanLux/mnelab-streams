@@ -2,11 +2,44 @@
 #
 # License: BSD (3-clause)
 
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
 import mne
 import numpy as np
+from PySide6.QtWidgets import QMainWindow
 
 from mnelab.mainwindow import MainWindow
 from mnelab.model import Model
+
+
+def test_matplotlib_plot_window_is_registered_independently(qtbot, tmp_path):
+    """Scientific Matplotlib plots receive their own desktop window entry."""
+    raw = mne.io.RawArray(
+        np.zeros((1, 100)),
+        mne.create_info(["EEG"], 100, ["eeg"]),
+        verbose=False,
+    )
+    model = Model()
+    window = MainWindow(model)
+    model.view = window
+    qtbot.addWidget(window)
+    path = tmp_path / "plot.edf"
+    path.write_bytes(b"x")
+    model.load_data(raw, path)
+    plot_window = QMainWindow(window)
+    qtbot.addWidget(plot_window)
+    figure = SimpleNamespace(
+        canvas=SimpleNamespace(manager=SimpleNamespace(window=plot_window)),
+        show=Mock(),
+    )
+
+    with patch.object(raw, "plot_sensors", return_value=figure):
+        window.plot_locations()
+
+    assert plot_window.parent() is None
+    assert plot_window in window._plot_windows
+    figure.show.assert_called_once_with()
 
 
 def test_plot_data_opens_stream_viewer_for_raw(qtbot, tmp_path):
@@ -30,7 +63,10 @@ def test_plot_data_opens_stream_viewer_for_raw(qtbot, tmp_path):
     viewer = window._stream_viewers[0]
     assert viewer.display_groups == (("type:eeg",), ("type:misc",))
     assert viewer.raw is raw
-    viewer.close()
+    assert viewer.parent() is None
+
+    window.close()
+    qtbot.waitUntil(lambda: not viewer.isVisible())
 
 
 def test_channel_topology_change_closes_stale_viewer(qtbot, tmp_path):
