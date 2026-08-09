@@ -690,6 +690,9 @@ panel amplitude setting.
 
 ### 12.5 Per-channel display customization
 
+Double-clicking a channel row shall leave that channel visible and hide all other
+currently visible channels in its stream panel.
+
 Right-clicking a channel row shall expose:
 
 - view channel information, including its type, source, sampling rate, status, and

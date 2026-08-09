@@ -66,6 +66,8 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Double-clicking a stream-viewer channel now isolates that channel by hiding its
+  visible peers (by [NitzanLux](https://github.com/NitzanLux))
 - Rename the independent distribution and application to MNELAB Streams, retain the
   upstream BSD license and import namespace, and separate fork metadata and release
   identity from upstream (by [NitzanLux](https://github.com/NitzanLux))

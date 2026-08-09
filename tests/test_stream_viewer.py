@@ -1641,6 +1641,24 @@ def test_hidden_channel_statistics_read_only_the_visible_time_window(viewer, raw
     }
 
 
+def test_double_clicking_channel_list_item_isolates_that_channel(qtbot, viewer):
+    """A double-click leaves only the chosen trace visible in its stream panel."""
+    panel = viewer.panels[0]
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+
+    item = panel.channel_list.item(1)
+    qtbot.mouseDClick(
+        panel.channel_list.viewport(),
+        Qt.MouseButton.LeftButton,
+        pos=panel.channel_list.visualItemRect(item).center(),
+    )
+
+    assert panel.visible_channel_names == ["EEG B"]
+    viewer._display_montage_baseline = viewer.display_montage_state()
+    viewer.hide()
+
+
 def test_plot_context_menu_targets_trace_and_hides_it(qtbot, viewer):
     """Right-click actions resolve the trace lane under the pointer."""
     panel = viewer.panels[0]

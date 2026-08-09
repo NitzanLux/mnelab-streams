@@ -1179,6 +1179,20 @@ class StreamPlotWidget(pg.PlotWidget):
         self.viewport().unsetCursor()
 
 
+class ChannelListWidget(QListWidget):
+    """Channel list that uses double-clicking to isolate a trace."""
+
+    isolate_requested = Signal(object)
+
+    def mouseDoubleClickEvent(self, event):
+        item = self.itemAt(event.position().toPoint())
+        if item is not None:
+            self.isolate_requested.emit(item)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
 class StreamPanel(QFrame):
     """A single display group containing one or more source streams."""
 
@@ -1397,7 +1411,7 @@ class StreamPanel(QFrame):
         body = QHBoxLayout()
         body.setContentsMargins(0, 0, 0, 0)
         body.setSpacing(PANEL_BODY_SPACING)
-        self.channel_list = QListWidget()
+        self.channel_list = ChannelListWidget()
         self.channel_list.setFixedWidth(CHANNEL_LIST_WIDTH)
         self.channel_list.setHorizontalScrollBarPolicy(
             Qt.ScrollBarPolicy.ScrollBarAlwaysOff
@@ -1412,6 +1426,7 @@ class StreamPanel(QFrame):
         self.channel_list.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.channel_list.setDropIndicatorShown(True)
         self.channel_list.itemClicked.connect(self._toggle_channel_visibility)
+        self.channel_list.isolate_requested.connect(self._show_only_channel)
         self.channel_list.model().rowsMoved.connect(self._channel_rows_moved)
         self.channel_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.channel_list.customContextMenuRequested.connect(
@@ -2683,6 +2698,10 @@ class StreamPanel(QFrame):
     def _toggle_bad_channel(self, item):
         name = item.data(Qt.ItemDataRole.UserRole)
         self._toggle_bad_channel_name(name)
+
+    def _show_only_channel(self, item):
+        """Keep the double-clicked channel visible and hide its visible peers."""
+        self.show_only_channel(item.data(Qt.ItemDataRole.UserRole))
 
     def _toggle_bad_channel_name(self, name):
         """Toggle bad-channel status by channel name."""
