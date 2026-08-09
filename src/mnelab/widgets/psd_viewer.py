@@ -209,18 +209,17 @@ class PSDPanel(QFrame):
             return QColor("#d62728")
         if name in self.colors:
             return self.colors[name]
-        visible_names = self.visible_channel_names
-        try:
-            visible_index = visible_names.index(name)
-        except ValueError:
-            visible_index = self.page_channel_names.index(name)
-        return QColor(_automatic_color(visible_index))
+        page_index = self.page_channel_names.index(name)
+        return QColor(_automatic_color(page_index))
 
     def _display_values(self, name):
         values = self.channel_data[name]
         if not self._db:
             return values
-        peak = float(np.max(values))
+        finite = values[np.isfinite(values)]
+        if not finite.size:
+            return values
+        peak = float(np.max(finite))
         if peak <= 0:
             return np.zeros_like(values)
         floor = peak * 1e-12
@@ -299,6 +298,8 @@ class PSDPanel(QFrame):
         frequencies = self.frequencies
         if not frequencies.size:
             frequencies = self.spectrum.freqs
+        if not frequencies.size:
+            return
         self.plot.setXRange(float(frequencies[0]), float(frequencies[-1]), padding=0)
 
     def refresh(self):

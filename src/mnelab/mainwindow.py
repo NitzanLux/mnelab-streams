@@ -86,6 +86,7 @@ from mnelab.xdf import (
     NativeXDFRecording,
     combine_native_xdf_streams,
     concatenate_native_xdf_recordings,
+    native_xdf_from_raw,
 )
 
 SIDEBAR_MIN_WIDTH = 150
@@ -2454,6 +2455,12 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             idx_list = dialog.selected_idx
             force = dialog.force
+            if any(
+                isinstance(self.model.data[index]["data"], NativeXDFRecording)
+                for index in [self.model.index] + idx_list
+            ):
+                self._append_xdf_data(idx_list, allow_union=force)
+                return
             if self.auto_duplicate():  # adjust for index change if duplicated
                 idx_list = [
                     idx + 1 if idx >= self.model.index else idx for idx in idx_list
@@ -2469,10 +2476,24 @@ class MainWindow(QMainWindow):
         channels in place and the original data sets must survive untouched.
         """
         datasets = [self.model.data[index] for index in [self.model.index] + idx_list]
-        raws = [deepcopy(dataset["data"]) for dataset in datasets]
-        stream_sets = [
-            deepcopy(dataset["source_streams"]) or [] for dataset in datasets
-        ]
+        stream_sets = []
+        for dataset in datasets:
+            streams = _effective_streams(
+                dataset["data"], dataset["source_streams"]
+            )[0]
+            if not isinstance(dataset["data"], NativeXDFRecording):
+                for stream in streams:
+                    if not stream.get("removed"):
+                        stream["nominal_srate"] = float(
+                            dataset["data"].info["sfreq"]
+                        )
+            stream_sets.append(streams)
+        raws = []
+        for dataset, streams in zip(datasets, stream_sets, strict=True):
+            raw = deepcopy(dataset["data"])
+            if not isinstance(raw, NativeXDFRecording):
+                raw = native_xdf_from_raw(raw, streams)
+            raws.append(raw)
         marker_sets = [
             deepcopy(dataset["marker_streams"]) or [] for dataset in datasets
         ]

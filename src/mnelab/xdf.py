@@ -1038,6 +1038,46 @@ def combine_native_xdf_streams(recordings):
     )
 
 
+def native_xdf_from_raw(raw, streams):
+    """Adapt a regular XDF-backed Raw into native stream entities."""
+    if not isinstance(raw, mne.io.BaseRaw):
+        raise TypeError("Only MNE Raw objects can be adapted to native XDF streams.")
+
+    entries = []
+    for descriptor in streams:
+        if descriptor.get("removed"):
+            continue
+        channel_names = list(descriptor.get("channel_names") or [])
+        if not channel_names:
+            continue
+        missing = [name for name in channel_names if name not in raw.ch_names]
+        if missing:
+            raise ValueError(
+                f'XDF stream "{descriptor.get("name", "Unnamed")}" refers to '
+                "unavailable channels: " + ", ".join(missing)
+            )
+        stream_raw = raw.copy().pick(channel_names)
+        sfreq = float(stream_raw.info["sfreq"])
+        timestamps = np.arange(stream_raw.n_times, dtype=float) / sfreq
+        entry = deepcopy(descriptor)
+        entry.update(
+            id=f"adapted:{len(entries) + 1}",
+            raw=stream_raw,
+            timestamps=timestamps,
+            source_timestamps=timestamps.copy(),
+            timestamp_segments=((0, stream_raw.n_times - 1),),
+            nominal_srate=sfreq,
+        )
+        entries.append(entry)
+    if not entries:
+        raise ValueError("The XDF Raw object has no active numeric streams.")
+    return NativeXDFRecording(
+        entries,
+        annotations=raw.annotations,
+        meas_date=raw.info.get("meas_date"),
+    )
+
+
 def _xdf_synchronization_metadata(stream):
     """Return scalar synchronization metadata from an XDF stream description."""
     try:

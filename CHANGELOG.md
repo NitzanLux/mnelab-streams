@@ -1,7 +1,9 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
 - Add context-updated PSD, spectrogram, RMS, and common-average-reference virtual
-  streams to the trace viewer (by [NitzanLux](https://github.com/NitzanLux))
+  streams to the trace viewer, with PSD showing all channels in source-oriented panels
+  directly alongside the recorded streams (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Allow native XDF recordings appended from the main window to be ordered automatically
   by their recording times (by [NitzanLux](https://github.com/NitzanLux))
 - Calculate PSD independently on every native-rate XDF stream without resampling (by
@@ -45,8 +47,12 @@
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
-- Combine appended XDF recordings with distinct streams into one concurrent entity
-  without extending equal-duration recordings (by
+- Enable **Join Selected** for native multi-rate XDF trace panels (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Expand a detached stream panel's trace body when its window is maximized instead of
+  leaving a large blank gap (by [NitzanLux](https://github.com/NitzanLux))
+- Combine appended regular or native XDF recordings with distinct streams into one
+  concurrent entity without extending equal-duration recordings (by
   [NitzanLux](https://github.com/NitzanLux))
 - Resize the complete stream-panel body when dragging its lower boundary, preventing
   gray space beside a shrinking plot (by [NitzanLux](https://github.com/NitzanLux))
@@ -69,8 +75,8 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
-- Match the main-window PSD trace palette to the raw stream viewer palette (by
-  [NitzanLux](https://github.com/NitzanLux))
+- Match the main-window PSD palette to raw traces without recoloring remaining channels
+  when one is hidden (by [NitzanLux](https://github.com/NitzanLux))
 - Double-clicking a stream-viewer channel now toggles its isolation, hiding or
   restoring its visible peers (by [NitzanLux](https://github.com/NitzanLux))
 - Rename the independent distribution and application to MNELAB Streams, retain the

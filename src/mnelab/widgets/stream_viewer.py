@@ -5,6 +5,7 @@
 from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pyqtgraph as pg
@@ -150,6 +151,7 @@ PANEL_BODY_SPACING = 2
 CHANNEL_LANE_HEIGHT = 32
 MIN_STREAM_PLOT_HEIGHT = 64
 MAX_STREAM_PLOT_HEIGHT = 2000
+QT_WIDGET_SIZE_MAX = (1 << 24) - 1
 # Fill 99% of the center-to-center lane spacing while retaining a visible gap.
 FIT_HALF_LANE_FRACTION = 0.495
 DEFAULT_TRACE_COLOR = "#4c78a8"
@@ -291,6 +293,130 @@ class TraceVisualizationPanel(QWidget):
         )
         self.plot.setLabel("bottom", "Time", units="s")
         self.plot.setLabel("left", "CAR traces")
+
+
+class TracePSDVisualizationPanel(QWidget):
+    """Show current-window PSDs with one familiar panel per source stream."""
+
+    def __init__(
+        self,
+        raw,
+        streams,
+        channel_data,
+        channel_frequencies,
+        max_channels=20,
+        parent=None,
+    ):
+        super().__init__(parent)
+        from mnelab.widgets.psd_viewer import PSDPanel
+
+        self.setWindowTitle("Power Spectral Density")
+        self.channel_data = dict(channel_data)
+        self.channel_frequencies = dict(channel_frequencies)
+        frequencies = next(
+            (item for item in self.channel_frequencies.values() if len(item)),
+            np.empty(0),
+        )
+        self.spectrum = SimpleNamespace(info=raw.info, freqs=frequencies)
+        self.source_streams = list(streams)
+        self.panels = []
+        self._columns = 1
+        self.setMinimumHeight(320)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        controls = QHBoxLayout()
+        title = QLabel("Virtual Stream — Power Spectral Density")
+        title_font = title.font()
+        title_font.setBold(True)
+        title.setFont(title_font)
+        controls.addWidget(title)
+        controls.addWidget(QLabel("Power scale:"))
+        self.scale_combo = QComboBox()
+        self.scale_combo.addItems(["dB", "Linear"])
+        self.scale_combo.currentTextChanged.connect(self._scale_changed)
+        controls.addWidget(self.scale_combo)
+        controls.addWidget(QLabel("Display:"))
+        self.display_combo = QComboBox()
+        self.display_combo.addItems(["Stacked lanes", "Overlay"])
+        self.display_combo.currentTextChanged.connect(self._display_changed)
+        controls.addWidget(self.display_combo)
+        controls.addWidget(QLabel("Columns:"))
+        self.column_spin = QSpinBox()
+        self.column_spin.setRange(1, max(1, len(self.source_streams)))
+        self.column_spin.valueChanged.connect(self.set_columns)
+        controls.addWidget(self.column_spin)
+        self.reset_button = QPushButton("Reset All Views")
+        self.reset_button.clicked.connect(self.reset_views)
+        controls.addWidget(self.reset_button)
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.deleteLater)
+        controls.addWidget(self.close_button)
+        controls.addStretch()
+        outer.addLayout(controls)
+
+        self.scroll = QScrollArea()
+        self.scroll.setWidgetResizable(True)
+        self.panel_container = QWidget()
+        self.panel_layout = QGridLayout(self.panel_container)
+        self.panel_layout.setContentsMargins(0, 0, 0, 0)
+        self.panel_layout.setSpacing(6)
+        self.scroll.setWidget(self.panel_container)
+        outer.addWidget(self.scroll, 1)
+
+        for source in self.source_streams:
+            self.panels.append(
+                PSDPanel(
+                    self.spectrum,
+                    source,
+                    self.channel_data,
+                    self.channel_frequencies,
+                    {},
+                    channels_per_page=max_channels,
+                    parent=self.panel_container,
+                )
+            )
+        self._layout_panels()
+
+    def _layout_panels(self):
+        while self.panel_layout.count():
+            self.panel_layout.takeAt(0)
+        for index, panel in enumerate(self.panels):
+            self.panel_layout.addWidget(
+                panel, index // self._columns, index % self._columns
+            )
+
+    def set_columns(self, columns):
+        """Set the number of source-panel columns."""
+        self._columns = max(1, min(int(columns), max(1, len(self.panels))))
+        self._layout_panels()
+
+    def _scale_changed(self, scale):
+        for panel in self.panels:
+            panel.set_db(scale == "dB")
+
+    def _display_changed(self, display):
+        for panel in self.panels:
+            panel.set_overlay(display == "Overlay")
+
+    def reset_views(self):
+        """Restore the complete frequency range in every source panel."""
+        for panel in self.panels:
+            panel.reset_view()
+
+    def update_data(self, channel_data, channel_frequencies):
+        """Replace PSD values while preserving paging and display controls."""
+        self.channel_data.clear()
+        self.channel_data.update(channel_data)
+        self.channel_frequencies.clear()
+        self.channel_frequencies.update(channel_frequencies)
+        self.spectrum.freqs = next(
+            (item for item in self.channel_frequencies.values() if len(item)),
+            np.empty(0),
+        )
+        for panel in self.panels:
+            panel.frequencies = self.channel_frequencies[panel.channel_names[0]]
+            panel.refresh()
 
 
 def _full_signal_standard_deviation_fits(raw):
@@ -1301,6 +1427,7 @@ class StreamPanel(QFrame):
         self._automatic_group_scales = {}
         self._lane_step = 3.0
         self._axis_channels = None
+        self._floating = False
         self.setFrameShape(QFrame.Shape.StyledPanel)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -1634,6 +1761,22 @@ class StreamPanel(QFrame):
     def set_floating(self, floating):
         """Update controls for the panel's attached or floating state."""
         floating = bool(floating)
+        self._floating = floating
+        vertical_policy = (
+            QSizePolicy.Policy.Expanding if floating else QSizePolicy.Policy.Fixed
+        )
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, vertical_policy)
+        for widget in (self.channel_list, self.plot):
+            if floating:
+                widget.setMinimumHeight(MIN_STREAM_PLOT_HEIGHT)
+                widget.setMaximumHeight(QT_WIDGET_SIZE_MAX)
+                widget.setSizePolicy(
+                    widget.sizePolicy().horizontalPolicy(),
+                    QSizePolicy.Policy.Expanding,
+                )
+            else:
+                widget.setFixedHeight(self._plot_height)
+        self.resize_handle.setVisible(not floating)
         self.drag_handle.setEnabled(not floating)
         self.drag_handle.setToolTip(
             "This stream is already floating"
@@ -1947,8 +2090,9 @@ class StreamPanel(QFrame):
         if height == self._plot_height:
             return
         self._plot_height = height
-        self.channel_list.setFixedHeight(height)
-        self.plot.setFixedHeight(height)
+        if not self._floating:
+            self.channel_list.setFixedHeight(height)
+            self.plot.setFixedHeight(height)
         if self.layout() is not None:
             self.layout().invalidate()
         self.updateGeometry()
@@ -4316,6 +4460,7 @@ class StreamViewerWindow(QMainWindow):
         self.visualization_windows = []
         self.visualization_streams = []
         self.visualization_docks = []
+        self.visualization_workspace_panels = []
         self._event_overlays_visible = True
         self._annotation_overlays_visible = True
         self._selected_annotation_index = None
@@ -4724,7 +4869,7 @@ class StreamViewerWindow(QMainWindow):
     def _create_visualizations_menu(self):
         """Add display-only analyses for the current trace time window."""
         menu = self.menuBar().addMenu("&Visualizations")
-        menu.addAction("Power Spectral &Density…", self.show_current_window_psd)
+        menu.addAction("Power Spectral &Density", self.show_current_window_psd)
         menu.addAction("&Spectrogram…", self.show_current_window_spectrogram)
         menu.addSeparator()
         menu.addAction("&RMS for Selected Stream", self.show_current_window_rms)
@@ -4761,6 +4906,18 @@ class StreamViewerWindow(QMainWindow):
             names,
         )
 
+    def _window_psd_data(self):
+        """Return current-window PSD arrays for every channel and source rate."""
+        channel_data = {}
+        channel_frequencies = {}
+        for name in self.raw.ch_names:
+            times, values = self._window_channel_data(name)
+            sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
+            frequencies, power = window_psd(values, sfreq)
+            channel_data[name] = power
+            channel_frequencies[name] = frequencies
+        return channel_data, channel_frequencies
+
     @staticmethod
     def _sampling_frequency(times, fallback):
         """Return a measured frequency when timestamps provide one."""
@@ -4788,6 +4945,27 @@ class StreamViewerWindow(QMainWindow):
         self, window, kind, *, channel=None, source=None
     ):
         """Add a context-updated visualization as a dockable virtual stream."""
+        if kind == "PSD":
+            window.setParent(self.panel_container)
+            self.visualization_windows.append(window)
+            self.visualization_workspace_panels.append(window)
+            self.visualization_streams.append(
+                {
+                    "kind": kind,
+                    "channel": channel,
+                    "source": source,
+                    "window": window,
+                    "dock": None,
+                }
+            )
+            window.destroyed.connect(
+                lambda _object=None, window=window: self._remove_visualization_stream(
+                    window
+                )
+            )
+            self._reflow_panels()
+            window.show()
+            return
         title = window.windowTitle()
         dock = QDockWidget(f"Virtual Stream — {title}", self)
         dock.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
@@ -4821,27 +4999,35 @@ class StreamViewerWindow(QMainWindow):
         dock.show()
         dock.raise_()
 
-    def _remove_visualization_stream(self, dock):
+    def _remove_visualization_stream(self, target):
         """Forget a virtual stream after its dock is destroyed."""
-        matching = [item for item in self.visualization_streams if item["dock"] is dock]
+        matching = [
+            item
+            for item in self.visualization_streams
+            if item["dock"] is target or item["window"] is target
+        ]
         for item in matching:
             self.visualization_streams.remove(item)
             if item["window"] in self.visualization_windows:
                 self.visualization_windows.remove(item["window"])
-        if dock in self.visualization_docks:
-            self.visualization_docks.remove(dock)
+            if item["window"] in self.visualization_workspace_panels:
+                self.visualization_workspace_panels.remove(item["window"])
+        if target in self.visualization_docks:
+            self.visualization_docks.remove(target)
+        if not self._closing:
+            self._reflow_panels()
 
     def _refresh_visualization_streams(self):
         """Recompute every virtual stream from the current visible context."""
         for item in tuple(self.visualization_streams):
             window = item["window"]
+            if item["kind"] == "PSD":
+                window.update_data(*self._window_psd_data())
+                continue
             if item["channel"] is not None:
                 times, values = self._window_channel_data(item["channel"])
                 sfreq = self._sampling_frequency(times, self.raw.info["sfreq"])
-                if item["kind"] == "PSD":
-                    window.show_psd(item["channel"], values, sfreq)
-                else:
-                    window.show_spectrogram(item["channel"], times, values, sfreq)
+                window.show_spectrogram(item["channel"], times, values, sfreq)
                 continue
             times, values, names = self._window_stream_data(item["source"])
             values_by_channel = dict(zip(names, values, strict=True))
@@ -4851,8 +5037,16 @@ class StreamViewerWindow(QMainWindow):
                 window.show_common_average_reference(times, values_by_channel)
 
     def show_current_window_psd(self):
-        """Open a current-window PSD after the user chooses a channel."""
-        self._show_channel_visualization("PSD")
+        """Add an all-channel, source-oriented current-window PSD stream."""
+        channel_data, channel_frequencies = self._window_psd_data()
+        window = TracePSDVisualizationPanel(
+            self.raw,
+            self.source_streams,
+            channel_data,
+            channel_frequencies,
+            max_channels=self.max_channels,
+        )
+        self._register_visualization_stream(window, "PSD")
 
     def show_current_window_spectrogram(self):
         """Open a current-window spectrogram after the user chooses a channel."""
@@ -5710,7 +5904,7 @@ class StreamViewerWindow(QMainWindow):
 
     def _reflow_panels(self):
         """Place attached panels in source order without recreating them."""
-        for panel in self.panels:
+        for panel in self.panels + self.visualization_workspace_panels:
             self.panel_layout.removeWidget(panel)
         attached = [
             panel
@@ -5731,16 +5925,17 @@ class StreamViewerWindow(QMainWindow):
                     for source_id in panel.source_ids
                 )
             )
-        for index, panel in enumerate(attached):
+        workspace_panels = attached + self.visualization_workspace_panels
+        for index, panel in enumerate(workspace_panels):
             row, column = divmod(index, self._columns)
             self.panel_layout.addWidget(
                 panel, row, column, alignment=Qt.AlignmentFlag.AlignTop
             )
             panel.show()
-        for column in range(max(1, len(self.panels))):
+        for column in range(max(1, len(workspace_panels))):
             self.panel_layout.setColumnStretch(
                 column,
-                1 if column < min(self._columns, len(attached)) else 0,
+                1 if column < min(self._columns, len(workspace_panels)) else 0,
             )
         self.panel_layout.activate()
 
@@ -5884,9 +6079,7 @@ class StreamViewerWindow(QMainWindow):
 
     def _update_group_buttons(self):
         selected = self._selected_indices()
-        self.join_button.setEnabled(
-            len(selected) >= 2 and not isinstance(self.raw, NativeXDFRecording)
-        )
+        self.join_button.setEnabled(len(selected) >= 2)
         self.split_button.setEnabled(
             any(len(self._groups[index]) > 1 for index in selected)
         )

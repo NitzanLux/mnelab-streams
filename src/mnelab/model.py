@@ -137,6 +137,15 @@ def _native_streams_by_name(recording):
     return mapping, duplicate
 
 
+def _is_xdf_raw_dataset(dataset):
+    """Return whether `dataset` is raw data originating from an XDF container."""
+    return dataset["dtype"] == "raw" and dataset["ftype"] in {
+        "XDF",
+        "XDFZ",
+        "XDF.GZ",
+    }
+
+
 def _close(a, b):
     """Compare two optional floats, tolerating `None` on either side."""
     if a is None or b is None:
@@ -1567,6 +1576,8 @@ class Model:
         """
         data = self.current["data"]
         other = d["data"]
+        if not isinstance(other, NativeXDFRecording) and _is_xdf_raw_dataset(d):
+            return []
         if not isinstance(other, NativeXDFRecording):
             return [("not a native multi-rate XDF recording", False)]
 
@@ -1656,7 +1667,11 @@ class Model:
             if native:
                 conflicts = self._native_append_conflicts(d)
             elif isinstance(d["data"], NativeXDFRecording):
-                conflicts = [("a native multi-rate XDF recording", False)]
+                conflicts = (
+                    []
+                    if _is_xdf_raw_dataset(self.current) and _is_xdf_raw_dataset(d)
+                    else [("a native multi-rate XDF recording", False)]
+                )
             else:
                 conflicts = self._append_conflicts(d)
             candidates.append((idx, d["name"], conflicts))

@@ -643,6 +643,32 @@ def test_stream_viewer_constructs_with_native_annotations(qtbot):
     assert len(viewer.panels) == 2
 
 
+def test_join_selected_combines_different_native_rates(qtbot):
+    """Join Selected aligns native-rate traces in one display-only panel."""
+    recording = _native_recording()
+    streams = [
+        {"id": 1, "name": "Slow", "type": "misc", "channel_names": ["Slow"]},
+        {"id": 2, "name": "Fast", "type": "misc", "channel_names": ["Fast"]},
+    ]
+    originals = [entry["raw"].get_data().copy() for entry in recording.streams]
+    viewer = StreamViewerWindow(recording, streams=streams)
+    qtbot.addWidget(viewer)
+
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+
+    assert viewer.join_button.isEnabled()
+    viewer.join_button.click()
+
+    assert viewer.display_groups == ((1, 2),)
+    assert len(viewer.panels) == 1
+    assert viewer.panels[0].visible_channel_names == ["Slow", "Fast"]
+    assert viewer.panels[0]._values.shape[0] == 2
+    assert np.isfinite(viewer.panels[0]._values).any(axis=1).all()
+    for entry, original in zip(recording.streams, originals, strict=True):
+        np.testing.assert_array_equal(entry["raw"].get_data(), original)
+
+
 def test_tight_view_combines_different_native_rates_in_one_figure(qtbot):
     """Tight mode aligns native-rate traces for display without changing data."""
     recording = _native_recording()

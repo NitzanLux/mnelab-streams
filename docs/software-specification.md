@@ -517,6 +517,9 @@ annotations rather than silently replace them.
   its own native sampling rate, and the result shall be a new merged dataset. Recordings
   with entirely distinct stream names shall be combined as concurrent streams in one
   entity without extending the timeline, including when their durations are equal.
+  A regular or resampled XDF `Raw` and a native multi-rate XDF shall be combinable
+  from either current-dataset direction by adapting the regular `Raw` into its source
+  stream entities.
   Otherwise the recordings shall be concatenated in time, and streams or channels
   absent from one recording may be filled with NaN for that recording's interval when
   the user confirms the mismatch; duplicate stream names within one recording,
@@ -593,7 +596,8 @@ The power spectral density viewer shall preserve the ordered source-stream panel
 model used for raw data. It shall offer fitted stacked channel lanes and a per-stream
 channel overlay; overlay mode shall use a numeric PSD-amplitude y-axis in the selected
 dB or linear power scale. Unless spatial colors are enabled, PSD traces shall use the
-same automatic high-contrast palette and visible-channel ordering as raw traces.
+same automatic high-contrast palette as raw traces. Hiding a PSD channel shall not
+change the colors assigned to the remaining channels on its page.
 
 Epoch browsing uses MNE's configured Matplotlib or optional Qt browser backend. The
 settings determine the default number of displayed epochs and channels and whether
@@ -632,7 +636,9 @@ Users may select panels and:
 
 Detached panels remain synchronized with navigation, bad channels, events,
 annotations, and display settings. Closing a detached panel window shall redock it
-unless the parent viewer itself is closing.
+unless the parent viewer itself is closing. A detached panel's trace body shall expand
+vertically with its window, including when maximized, while redocking shall restore
+the panel's independently configured plot height.
 
 ### 12.3 Navigation and data access
 
@@ -793,17 +799,20 @@ normal matching.
 ### 12.7.1 Current-window visualizations
 
 The raw trace viewer shall provide a **Visualizations** menu for display-only analyses
-of its current shared time window. Each visualization shall be added as a dockable
-virtual stream inside the trace viewer, with multiple virtual streams organized as
-tabs, and shall recompute whenever the visible start time or duration changes. **Power
-Spectral Density** and **Spectrogram** shall ask the user to choose a channel and use
-that channel's unmodified samples in the visible range. **RMS for Selected Stream**
-shall show one RMS value per channel, and **Common Average Reference for Selected
-Stream** shall show per-channel traces after subtracting the samplewise stream average.
-The latter two commands require exactly one stream panel to be selected with its
-**Select** control. None of these visualizations shall modify the recording, its
-display montage, or its analysis history. Missing sample spans shall not be treated as
-continuous data.
+of its current shared time window. Each visualization shall be added as a virtual
+stream inside the trace viewer and shall recompute whenever the visible start time or
+duration changes. **Power Spectral Density** shall appear directly in the main stream
+workspace alongside the recorded stream panels. It shall show every channel, grouped
+into the same source-oriented panels, channel lanes, paging controls, and colors as the
+ordinary PSD viewer. Other virtual-stream visualizations shall be dockable, with
+multiple docks organized as tabs.
+**Spectrogram** shall ask the user to choose a channel and use that channel's
+unmodified samples in the visible range. **RMS for Selected Stream** shall show one RMS
+value per channel, and **Common Average Reference for Selected Stream** shall show
+per-channel traces after subtracting the samplewise stream average. The latter two
+commands require exactly one stream panel to be selected with its **Select** control.
+None of these visualizations shall modify the recording, its display montage, or its
+analysis history. Missing sample spans shall not be treated as continuous data.
 
 ### 12.8 Activation map
 

@@ -73,6 +73,18 @@ def _load(view, tmp_path, index, **kwargs):
     return recording
 
 
+def _load_regular_xdf(view, tmp_path, index):
+    raw = mne.io.RawArray(
+        20_000 + np.arange(EMG_COUNT, dtype=float)[np.newaxis],
+        mne.create_info(["Filtered"], 500.0, ["misc"]),
+        verbose=False,
+    )
+    path = tmp_path / f"regular_{index}.xdf"
+    path.write_bytes(b"x")
+    view.model.load_data(raw, path)
+    return raw
+
+
 def test_native_recordings_are_append_candidates(window, tmp_path):
     """Two native recordings with the same streams can be appended directly."""
     _load(window, tmp_path, 0)
@@ -269,6 +281,48 @@ def test_append_data_routes_native_recordings_to_the_xdf_merge(
     assert "fill unavailable" in captured["force_label"]
     assert len(captured["candidates"]) == 1
     assert window.model.current["is_xdf_merge"] is True
+
+
+@pytest.mark.parametrize(
+    ("current_index", "expected_names"),
+    [(0, ["MISC", "EMG"]), (1, ["EMG", "MISC"])],
+)
+def test_append_data_combines_regular_and_native_xdfs(
+    window, tmp_path, monkeypatch, current_index, expected_names
+):
+    """A mixed regular/native XDF pair combines from either current direction."""
+    regular = _load_regular_xdf(window, tmp_path, 0)
+    _load(window, tmp_path, 1, include_camera=False)
+    window.model.index = current_index
+    ((idx, _, conflicts),) = window.model.get_append_candidates()
+    assert idx == 1 - current_index
+    assert conflicts == []
+
+    class _Dialog:
+        def __init__(self, parent, candidates, **kwargs):
+            pass
+
+        def exec(self):
+            return True
+
+        selected_idx = [1 - current_index]
+        force = False
+        order_by_time = False
+
+    monkeypatch.setattr("mnelab.mainwindow.AppendDialog", _Dialog)
+    monkeypatch.setattr(
+        window.model,
+        "append_data",
+        lambda *args, **kwargs: pytest.fail("used the regular MNE append path"),
+    )
+
+    window.append_data()
+
+    merged = window.model.current["data"]
+    assert isinstance(merged, NativeXDFRecording)
+    assert [stream["name"] for stream in merged.streams] == expected_names
+    assert merged.duration == regular.times[-1]
+    assert merged.streams[0]["raw"].n_times == EMG_COUNT
 
 
 def test_append_xdf_data_reports_merge_failure(window, tmp_path, monkeypatch):

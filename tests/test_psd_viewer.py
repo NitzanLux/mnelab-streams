@@ -84,8 +84,8 @@ def test_psd_channel_list_controls_trace_visibility(qtbot):
     assert len(panel._curves) == 1
 
 
-def test_psd_uses_stream_trace_palette_in_visible_order(qtbot):
-    """PSD traces share the raw viewer palette and remap after one is hidden."""
+def test_psd_uses_stable_stream_trace_palette(qtbot):
+    """PSD traces share the raw palette without recoloring after one is hidden."""
     spectrum, streams = _spectrum_and_streams()
     spectrum.info["bads"] = []
     viewer = PSDViewerWindow(
@@ -104,7 +104,7 @@ def test_psd_uses_stream_trace_palette_in_visible_order(qtbot):
 
     panel.channel_list.itemClicked.emit(panel.channel_list.item(0))
 
-    assert panel._curves[0].opts["pen"].color().name() == _automatic_color(0)
+    assert panel._curves[0].opts["pen"].color().name() == _automatic_color(1)
 
 
 def test_psd_overlay_uses_numeric_amplitude_axis(qtbot):

@@ -304,12 +304,20 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
     viewer.set_start_time(1.0)
     viewer.panels[0].selected.setChecked(True)
 
-    with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
-        viewer.show_current_window_psd()
+    viewer.show_current_window_psd()
     psd = viewer.visualization_windows[-1]
-    assert psd.channel_names == ["EEG A"]
-    assert psd.frequencies[-1] <= raw.info["sfreq"] / 2
-    initial_power = psd.power
+    assert [panel.title for panel in psd.panels] == [
+        "BrainAmp (EEG)",
+        "Audio",
+    ]
+    assert psd.panels[0].channel_names == ["EEG A", "EEG B"]
+    assert psd.panels[1].channel_names == ["Audio L"]
+    assert set(psd.channel_data) == set(raw.ch_names)
+    assert all(
+        frequencies[-1] <= raw.info["sfreq"] / 2
+        for frequencies in psd.channel_frequencies.values()
+    )
+    initial_power = psd.channel_data["EEG A"]
 
     with patch.object(QInputDialog, "getItem", return_value=("EEG A", True)):
         viewer.show_current_window_spectrogram()
@@ -327,7 +335,10 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
     car = viewer.visualization_windows[-1]
     assert car.channel_names == ["EEG A", "EEG B"]
     assert np.allclose(sum(car.values_by_channel.values()), 0)
-    assert len(viewer.visualization_docks) == 4
+    assert viewer.visualization_workspace_panels == [psd]
+    assert viewer.panel_layout.indexOf(psd) >= 0
+    assert psd.parent() is viewer.panel_container
+    assert len(viewer.visualization_docks) == 3
     assert all(
         dock.windowTitle().startswith("Virtual Stream —")
         for dock in viewer.visualization_docks
@@ -335,7 +346,7 @@ def test_current_window_visualizations_use_selected_data(qtbot, viewer, raw):
 
     viewer.set_start_time(2.0)
 
-    assert psd.power is not initial_power
+    assert psd.channel_data["EEG A"] is not initial_power
     assert viewer.visualization_streams[0]["window"] is psd
 
 
@@ -784,6 +795,30 @@ def test_floating_panel_keeps_identity_refreshes_and_redocks(qtbot, viewer, raw)
         (1, 0),
     ]
     assert eeg.drag_handle.isEnabled()
+
+
+def test_floating_panel_expands_trace_body_with_window(qtbot, viewer):
+    """A detached panel uses maximized window height instead of leaving a gap."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    panel = viewer.panels[0]
+    docked_plot_height = panel.plot.height()
+
+    panel.float_button.click()
+    floating_window = viewer._detached_windows[panel]
+    qtbot.waitUntil(floating_window.isVisible)
+    floating_window.resize(1200, 900)
+    qtbot.waitUntil(lambda: panel.plot.height() > docked_plot_height)
+
+    assert panel.channel_list.height() == panel.plot.height()
+    assert panel.plot.geometry().top() - panel.header_widget.geometry().bottom() < 20
+    assert not panel.resize_handle.isVisible()
+
+    floating_window.close()
+    qtbot.waitUntil(lambda: not viewer.is_panel_floating(panel))
+
+    assert panel.plot.height() == docked_plot_height
+    assert panel.resize_handle.isVisible()
 
 
 def test_slider_navigation_coalesces_reads_and_uses_latest_value(viewer, raw):
