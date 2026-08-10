@@ -59,12 +59,14 @@ class AnnotationSidebar(QWidget):
     annotation_selected = Signal(float)
     annotation_highlighted = Signal(int)
     uuid_visibility_changed = Signal(bool)
+    hierarchy_collapsed_changed = Signal(bool)
 
     def __init__(self, raw, marker_streams=None, parent=None):
         super().__init__(parent)
         self.raw = raw
         self.marker_streams = list(marker_streams or [])
         self._suppressed_indices = set()
+        self._hierarchy_collapsed = False
         self._regex_pattern = None
         self._regex_error = None
         self._marker_cache_signature = None
@@ -230,6 +232,20 @@ class AnnotationSidebar(QWidget):
         self._ensure_marker_cache()
         return bool(self._hierarchical_markers)
 
+    @property
+    def hierarchy_collapsed(self):
+        """Return whether JSON markers are listed linearly instead of as a tree."""
+        return self._hierarchy_collapsed
+
+    def set_hierarchy_collapsed(self, collapsed):
+        """List JSON markers chronologically with every other annotation."""
+        collapsed = bool(collapsed)
+        if collapsed == self._hierarchy_collapsed:
+            return
+        self._hierarchy_collapsed = collapsed
+        self.refresh_list()
+        self.hierarchy_collapsed_changed.emit(collapsed)
+
     def _ensure_marker_cache(self):
         """Decode each JSON annotation once for the current Raw and stream metadata."""
         annotations = getattr(self.raw, "annotations", None)
@@ -271,6 +287,7 @@ class AnnotationSidebar(QWidget):
             "invert": self.invert_checkbox.isChecked(),
             "apply_to_plots": self.apply_to_plots.isChecked(),
             "show_uuids": self.show_uuids,
+            "collapse_hierarchy": self._hierarchy_collapsed,
         }
 
     def set_state(self, state):

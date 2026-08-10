@@ -18,6 +18,30 @@ from mnelab.lsl_annotation import (
 
 _UUID_FIELDS = {"event_uid", "parent_uid", "uid"}
 
+# Lifecycle bookkeeping words carry no information in a timeline bar: the bar itself
+# already shows when an event started and ended.
+_LIFECYCLE_WORDS = frozenset(
+    {
+        "begin",
+        "began",
+        "end",
+        "ended",
+        "ending",
+        "finish",
+        "finished",
+        "instant",
+        "phase",
+        "start",
+        "started",
+        "starting",
+        "stop",
+        "stopped",
+        "update",
+        "updated",
+    }
+)
+_MAX_BAR_DATA_FIELDS = 3
+
 
 @dataclass(frozen=True)
 class HierarchicalAnnotation:
