@@ -55,6 +55,10 @@
 - Validate guide-format annotations independently, render them with the guide's
   canonical formatter alongside ordinary markers, and collapse or hide hierarchy
   controls when appropriate (by [NitzanLux](https://github.com/NitzanLux))
+- Render hierarchical LSL JSON markers more compactly, folding marker data and
+  hierarchy metadata into wrapped `key=value` lines instead of indented JSON blocks,
+  and delegate that rendering entirely to the pinned annotation guide (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Apply one shared filter configuration to all selected streams and channels (by
   [NitzanLux](https://github.com/NitzanLux))
 
