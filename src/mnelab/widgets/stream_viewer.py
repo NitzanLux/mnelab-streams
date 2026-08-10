@@ -70,7 +70,11 @@ from PySide6.QtWidgets import (
 )
 from scipy import signal
 
-from mnelab.annotation_hierarchy import hierarchical_annotation_intervals
+from mnelab.annotation_hierarchy import (
+    annotation_bar_text,
+    hierarchical_annotation_intervals,
+    hierarchy_timeline_bars,
+)
 from mnelab.viewer_config import VIEWER_CONFIG
 from mnelab.widgets.channel_display import ChannelDisplayDialog
 from mnelab.widgets.stream_display import StreamDisplayPropertiesDialog
@@ -175,6 +179,17 @@ ACTIVATION_AXIS_MAX_WIDTH = _ACTIVATION_CONFIG["maximum_axis_width"]
 MARKER_ROW_LIMIT = _ANNOTATION_CONFIG["marker_row_limit"]
 MIN_ANNOTATION_FONT_SIZE = _ANNOTATION_CONFIG["minimum_font_size"]
 MAX_ANNOTATION_FONT_SIZE = _ANNOTATION_CONFIG["maximum_font_size"]
+# Geometry of the annotation hierarchy map. Bar labels are measured in pixels so
+# they stay readable at every zoom level instead of scaling with the time axis.
+HIERARCHY_BAR_HEIGHT = 0.62
+HIERARCHY_LABEL_PADDING = 5
+HIERARCHY_LABEL_MIN_WIDTH = 26
+HIERARCHY_LABEL_MAX_WIDTH = 320
+HIERARCHY_TICK_SIZE = 11
+HIERARCHY_ROW_HEIGHT = 26
+HIERARCHY_VISIBLE_ROWS = 24
+HIERARCHY_LEAF_ALPHA = 210
+HIERARCHY_CONTAINER_ALPHA = 70
 
 
 def _finite_runs(values):
@@ -4322,7 +4337,7 @@ class ActivationMapWindow(IndependentMainWindow):
 
 
 class AnnotationHierarchyMapWindow(IndependentMainWindow):
-    """Annotation-only lifecycle overview arranged by hierarchical event path."""
+    """Nested time bars showing when each hierarchy level was active."""
 
     time_selected = Signal(float)
     uuid_visibility_changed = Signal(bool)
@@ -4342,8 +4357,12 @@ class AnnotationHierarchyMapWindow(IndependentMainWindow):
         self.intervals = list(intervals)
         self.total_duration = raw.n_times / float(raw.info["sfreq"])
         self._event_items = []
+        self._label_items = []
+        self._bars = []
+        self._bands = []
+        self._rows = {}
         self.setWindowTitle(title or "Annotation Hierarchy Map")
-        self.resize(1200, max(360, min(900, 42 * len(self.intervals) + 180)))
+        self.resize(1200, 560)
 
         central = QWidget()
         layout = QVBoxLayout(central)

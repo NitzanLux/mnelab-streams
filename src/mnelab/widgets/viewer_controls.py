@@ -316,12 +316,16 @@ class AnnotationSidebar(QWidget):
         self.show_uuids_checkbox.setChecked(bool(state.get("show_uuids", False)))
         for widget in widgets:
             widget.blockSignals(False)
+        self._hierarchy_collapsed = bool(
+            state.get("collapse_hierarchy", self._hierarchy_collapsed)
+        )
         self.clear_type_button.setEnabled(type_index >= 0)
         self.clear_marker_button.setEnabled(marker_index >= 0)
         self._compile_regex()
         self.refresh_list()
         self.filter_changed.emit()
         self.uuid_visibility_changed.emit(self.show_uuids)
+        self.hierarchy_collapsed_changed.emit(self._hierarchy_collapsed)
 
     def accepts(self, description):
         """Return whether ``description`` matches the current list filter."""
@@ -365,6 +369,32 @@ class AnnotationSidebar(QWidget):
         if marker is None:
             return None
         return marker.formatted_text(show_uuids=self.show_uuids)
+
+    def linear_description(self, annotation_index, description):
+        """Return a one-line label placing a JSON marker in the linear list."""
+        self._ensure_marker_cache()
+        marker = self._markers_by_index.get(int(annotation_index))
+        if marker is None:
+            return str(description)
+        return self._linear_marker_label(marker)
+
+    def _linear_marker_label(self, marker):
+        """Return a JSON marker as a single line including its hierarchy path."""
+        segments = []
+        if marker.stream_name:
+            segments.append(f"[{marker.stream_name}]")
+        path = "/".join(
+            f"{node['level']}={node['id']}"
+            + (f" ({node['uid']})" if self.show_uuids and node.get("uid") else "")
+            for node in marker.hierarchy
+        )
+        if path:
+            segments.append(f"{path} ·")
+        segments.append(marker.display_label(show_uuids=self.show_uuids))
+        terminal = marker.payload.get("terminal_status")
+        if terminal:
+            segments.append(f"· {terminal}")
+        return " ".join(segments)
 
     def plot_accepts(self, annotation_index, description):
         """Return whether an annotation should be rendered on plots."""
