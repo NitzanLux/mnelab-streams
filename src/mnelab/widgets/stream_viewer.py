@@ -4349,6 +4349,15 @@ class AnnotationHierarchyMapWindow(IndependentMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
         header = QHBoxLayout()
+        self.map_toggle = QToolButton()
+        self.map_toggle.setText("Annotation Hierarchy Map")
+        self.map_toggle.setCheckable(True)
+        self.map_toggle.setChecked(False)
+        self.map_toggle.setArrowType(Qt.ArrowType.RightArrow)
+        self.map_toggle.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self.map_toggle.setToolTip("Expand or collapse the hierarchy lifecycle map")
+        self.map_toggle.toggled.connect(self._set_map_expanded)
+        header.addWidget(self.map_toggle)
         self.summary_label = QLabel()
         self.summary_label.setWordWrap(True)
         header.addWidget(self.summary_label, 1)
@@ -4383,6 +4392,7 @@ class AnnotationHierarchyMapWindow(IndependentMainWindow):
         self.plot.addItem(self.current_region)
         self.plot.scene().sigMouseMoved.connect(self._mouse_moved)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
+        self.plot.hide()
         layout.addWidget(self.plot, 1)
         self.setCentralWidget(central)
         self._redraw()
@@ -4390,6 +4400,13 @@ class AnnotationHierarchyMapWindow(IndependentMainWindow):
     @property
     def show_uuids(self):
         return self.show_uuids_checkbox.isChecked()
+
+    def _set_map_expanded(self, expanded):
+        """Expand or collapse the lifecycle plot without closing its window."""
+        self.map_toggle.setArrowType(
+            Qt.ArrowType.DownArrow if expanded else Qt.ArrowType.RightArrow
+        )
+        self.plot.setVisible(bool(expanded))
 
     def _axis_labels(self):
         return [
@@ -4724,6 +4741,9 @@ class StreamViewerWindow(IndependentMainWindow):
         self.annotation_map_button.setEnabled(
             self.annotation_sidebar.has_hierarchical_annotations
         )
+        self.annotation_map_button.setVisible(
+            self.annotation_sidebar.has_hierarchical_annotations
+        )
         self.annotation_map_button.clicked.connect(self.show_annotation_map)
         self.annotations_button = QPushButton("Annotations")
         self.annotations_button.setCheckable(True)
@@ -4973,6 +4993,9 @@ class StreamViewerWindow(IndependentMainWindow):
             self.show_annotation_map,
         )
         self.annotation_map_action.setEnabled(
+            self.annotation_sidebar.has_hierarchical_annotations
+        )
+        self.annotation_map_action.setVisible(
             self.annotation_sidebar.has_hierarchical_annotations
         )
 
@@ -6063,8 +6086,13 @@ class StreamViewerWindow(IndependentMainWindow):
             self._start_activation_computation()
         has_hierarchy = self.annotation_sidebar.has_hierarchical_annotations
         self.annotation_map_button.setEnabled(has_hierarchy)
+        self.annotation_map_button.setVisible(has_hierarchy)
         self.annotation_map_action.setEnabled(has_hierarchy)
-        self._refresh_annotation_map()
+        self.annotation_map_action.setVisible(has_hierarchy)
+        if not has_hierarchy and self.annotation_map_window is not None:
+            self.annotation_map_window.close()
+        else:
+            self._refresh_annotation_map()
         self.sync_bad_channels(raw.info["bads"], redraw=False)
         self.refresh()
         return True

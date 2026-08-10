@@ -776,14 +776,16 @@ retain suppressed entries with struck-through text so they can be restored
 individually or all at once, and the underlying MNE annotations shall remain
 unchanged.
 
-When every annotation payload in a recording complies with version 0.1.0 of the
+Each annotation payload shall be checked independently against version 0.1.0 of the
 [Hierarchical JSON Markers for Experimental Annotation in LSL
 guide](https://github.com/NitzanLux/lsl-json-annotation-guide), the annotation browser
-shall render the ordered container path, current event, lifecycle occurrence, and event
-data as an expandable indented tree. Compliance requires both structural field
-validation and semantic hierarchy validation. If any payload is ordinary text,
-malformed JSON, unsupported, or semantically invalid, the entire browser shall retain
-the flat chronological presentation and preserve all descriptions verbatim.
+shall render compliant markers as an expandable indented tree containing the ordered
+container path, current event, lifecycle occurrence, and event data. Compliance
+requires the guide's structural validation and semantic hierarchy validation.
+Ordinary text, malformed JSON, unsupported versions, and semantically invalid payloads
+shall not prevent compliant markers in the same recording from using this view; these
+ordinary annotations shall remain verbatim under **Other annotations**. If no
+compliant markers exist, the browser shall retain its flat chronological presentation.
 
 The right-side **Annotations** dock shall be closable/collapsible and movable between
 the left and right dock areas, but it shall not be floatable. It shall list all
@@ -793,7 +795,8 @@ its onset in the shared viewer; clicking an annotation in the dedicated lane sha
 highlight and reveal its list item.
 
 Descriptions containing a recognized hierarchical LSL JSON marker shall remain unchanged
-in the underlying MNE annotations but use a structured display. The browser shall
+in the underlying MNE annotations but use the guide's canonical `format_marker`
+representation in plot traces. The browser shall
 group them into collapsible ordered hierarchy nodes and one event node per
 `event_uid`, with lifecycle samples below that event. Its annotation-type filter shall
 use `event_name`, while text filtering shall search human-readable event, hierarchy,
@@ -872,6 +875,10 @@ source stream and no merging caused by the current panel layout.
 When supported hierarchical JSON markers are present, **Annotation Map** and **View >
 Annotation Hierarchy Map** shall open a whole-recording lifecycle overview.
 
+The hierarchy tree and lifecycle map shall be collapsible and initially collapsed.
+When no supported marker is present, UUID controls and both annotation-map entry points
+shall be hidden rather than shown disabled.
+
 - Markers sharing one `event_uid` shall form one row ordered by their hierarchy path.
 - `start` and `end` LSL timestamps shall define a horizontal interval with visible
   endpoints; `instant` markers shall be vertical ticks.
@@ -885,7 +892,8 @@ Annotation Hierarchy Map** shall open a whole-recording lifecycle overview.
 
 The referenced annotation format is pinned at
 `vendor/lsl-json-annotation-guide` as a Git submodule so schema and documentation
-updates can be reviewed independently.
+updates can be reviewed independently. Source checkouts shall use its validator and
+canonical formatter directly through the MNELAB annotation adapter.
 
 ### 12.10 Power spectral density viewer
 

@@ -52,6 +52,9 @@
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Validate guide-format annotations independently, render them with the guide's
+  canonical formatter alongside ordinary markers, and collapse or hide hierarchy
+  controls when appropriate (by [NitzanLux](https://github.com/NitzanLux))
 - Apply one shared filter configuration to all selected streams and channels (by
   [NitzanLux](https://github.com/NitzanLux))
 

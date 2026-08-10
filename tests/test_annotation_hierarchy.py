@@ -13,6 +13,7 @@ from mnelab.annotation_hierarchy import (
     hierarchical_annotation_intervals,
     without_uuid_fields,
 )
+from mnelab.lsl_annotation import format_marker
 from mnelab.widgets.stream_viewer import StreamViewerWindow
 from mnelab.widgets.viewer_controls import AnnotationSidebar
 
@@ -128,6 +129,13 @@ def test_lifecycle_intervals_pair_start_end_and_flag_open_events():
     assert not opened.complete and not opened.instant
 
 
+def test_semantically_invalid_json_marker_remains_an_ordinary_annotation():
+    payload = _payload()
+    payload["hierarchy"].reverse()
+
+    assert decode_hierarchical_annotation(json.dumps(payload)) is None
+
+
 def test_annotation_sidebar_uses_collapsible_hierarchy_and_uuid_toggle(qtbot):
     sidebar = AnnotationSidebar(_hierarchical_raw())
     qtbot.addWidget(sidebar)
@@ -136,7 +144,8 @@ def test_annotation_sidebar_uses_collapsible_hierarchy_and_uuid_toggle(qtbot):
     assert sidebar.list.isHidden()
     assert sidebar.tree.topLevelItemCount() == 1
     root = sidebar.tree.topLevelItem(0)
-    assert root.text(0) == "session: ses-003"
+    assert root.text(0) == "session=ses-003"
+    assert not root.isExpanded()
     hidden_text = " ".join(_tree_texts(root))
     assert SESSION_UID not in hidden_text
     assert ACTION_UID not in hidden_text
@@ -149,6 +158,31 @@ def test_annotation_sidebar_uses_collapsible_hierarchy_and_uuid_toggle(qtbot):
     assert ACTION_UID in shown_text
 
 
+def test_sidebar_embeds_plain_annotations_beside_formatted_markers(qtbot):
+    raw = _hierarchical_raw()
+    raw.set_annotations(
+        raw.annotations
+        + mne.Annotations(
+            [2.0, 2.5],
+            [0.0, 0.0],
+            ["ordinary annotation", '{"schema_version":"0.1.0"}'],
+        )
+    )
+    sidebar = AnnotationSidebar(raw)
+    qtbot.addWidget(sidebar)
+
+    roots = [
+        sidebar.tree.topLevelItem(index)
+        for index in range(sidebar.tree.topLevelItemCount())
+    ]
+    other = next(item for item in roots if item.text(0) == "Other annotations")
+
+    assert sidebar.list.isHidden()
+    assert other.childCount() == 2
+    assert "ordinary annotation" in other.child(0).text(0)
+    assert not other.isExpanded()
+
+
 def test_viewer_compacts_json_labels_and_opens_synchronized_annotation_map(qtbot):
     raw = _hierarchical_raw()
     streams = [{"id": "signal", "name": "Signal", "channel_names": ["Signal"]}]
@@ -157,14 +191,18 @@ def test_viewer_compacts_json_labels_and_opens_synchronized_annotation_map(qtbot
 
     labels = [label.textItem.toPlainText() for label in viewer.annotation_stream.labels]
     assert labels
-    assert any("finger_tapping" in label for label in labels)
+    assert format_marker(_payload()) in labels
     assert all("event_uid" not in label and ACTION_UID not in label for label in labels)
     assert viewer.annotation_map_button.isEnabled()
+    assert not viewer.annotation_map_button.isHidden()
 
     viewer.show_annotation_map()
     annotation_map = viewer.annotation_map_window
 
     assert annotation_map is not None
+    assert annotation_map.plot.isHidden()
+    annotation_map.map_toggle.setChecked(True)
+    assert not annotation_map.plot.isHidden()
     assert len(annotation_map.intervals) == 2
     action = next(
         interval

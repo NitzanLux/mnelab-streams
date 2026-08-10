@@ -61,7 +61,7 @@ class HierarchicalAnnotation:
 
     def display_label(self, *, show_uuids=False, include_phase=True):
         """Return a compact label without exposing identity fields by default."""
-        label = f"{self.event_level}: {self.event_id} — {self.event_name}"
+        label = f"{self.event_level}={self.event_id}  ({self.event_name})"
         if include_phase:
             label += f" [{self.phase}]"
         if show_uuids:

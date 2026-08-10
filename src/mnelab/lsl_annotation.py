@@ -91,6 +91,7 @@ def _load_guide_implementation():
 
 
 _GUIDE = _load_guide_implementation()
+GUIDE_IMPLEMENTATION_AVAILABLE = _GUIDE is not None
 
 
 class AnnotationFormatError(ValueError):

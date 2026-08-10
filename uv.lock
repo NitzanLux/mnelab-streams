@@ -925,6 +925,7 @@ source = { editable = "." }
 dependencies = [
     { name = "black" },
     { name = "isort" },
+    { name = "jsonschema" },
     { name = "matplotlib" },
     { name = "mne" },
     { name = "mnextend" },
@@ -962,6 +963,7 @@ requires-dist = [
     { name = "autoreject", marker = "extra == 'full'", specifier = ">=0.4.3" },
     { name = "black", specifier = ">=25.3.1" },
     { name = "isort", specifier = ">=8.0.1" },
+    { name = "jsonschema", specifier = ">=4.21,<5" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mne", specifier = ">=1.12.1" },
     { name = "mne-qt-browser", marker = "extra == 'full'", specifier = ">=0.7.4" },

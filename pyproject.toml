@@ -27,6 +27,7 @@ keywords = ["EEG", "MEG", "MNE", "GUI", "electrophysiology"]
 dependencies = [
     "black >= 25.3.1",
     "isort >= 8.0.1",
+    "jsonschema >= 4.21, < 5",
     "matplotlib >= 3.10.8",
     "mne >= 1.12.1",
     "mnextend >= 0.2.2",

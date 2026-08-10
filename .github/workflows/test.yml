@@ -14,6 +14,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: astral-sh/ruff-action@v4.1.0
       - uses: astral-sh/ruff-action@v4.1.0
         with:
@@ -47,6 +49,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          submodules: recursive
       - uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.python-version }}

@@ -40,9 +40,9 @@ and application command are `mnelab-streams`; the internal Python import package
   time, split at discontinuities, skip unreadable files, merge heterogeneous channel
   sets with NaN padding, preserve source identities, and export a merged dataset back
   to XDF.
-- **Hierarchical JSON annotations:** browse supported LSL markers as a collapsible
-  hierarchy, hide or reveal UUIDs, and inspect reconstructed start/end lifecycles in
-  an annotation-only overview.
+- **Hierarchical JSON annotations:** validate and pretty-format supported LSL markers
+  with the nested guide while retaining ordinary markers beside them, hide or reveal
+  UUIDs, and inspect reconstructed start/end lifecycles in a collapsible overview.
 
 The complete implementation audit, including the exact fork comparison range and
 behavioral details, is in [FORK_CHANGES.md](FORK_CHANGES.md). The current full product
@@ -56,8 +56,9 @@ changes are recorded in [CHANGELOG.md](CHANGELOG.md).
 - Python 3.12 or newer
 - [uv](https://docs.astral.sh/uv/)
 
-The main runtime uses PySide6/Qt, MNE-Python, MNExtend, NumPy, SciPy, Matplotlib, and
-PyQtGraph. Exact minimum versions are declared in [pyproject.toml](pyproject.toml).
+The main runtime uses PySide6/Qt, MNE-Python, MNExtend, NumPy, SciPy, Matplotlib,
+PyQtGraph, and JSON Schema. Exact minimum versions are declared in
+[pyproject.toml](pyproject.toml).
 
 ## Install and run this fork
 
@@ -71,7 +72,8 @@ uv run mnelab-streams
 ```
 
 For an existing checkout, initialize or update the nested annotation specification
-with `git submodule update --init --remote vendor/lsl-json-annotation-guide`.
+at the repository-pinned commit with
+`git submodule update --init vendor/lsl-json-annotation-guide`.
 
 For development, install all dependency groups and run the warning-strict test suite:
 

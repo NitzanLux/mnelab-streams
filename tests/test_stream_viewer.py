@@ -1454,7 +1454,7 @@ def test_guide_json_annotations_use_hierarchical_browser(qtbot, raw, streams):
     )
 
 
-def test_mixed_or_invalid_annotations_keep_flat_browser(qtbot, raw, streams):
+def test_invalid_annotations_keep_flat_browser_and_hide_hierarchy(qtbot, raw, streams):
     raw.set_annotations(
         mne.Annotations(
             [1.0, 2.0],
@@ -1469,6 +1469,9 @@ def test_mixed_or_invalid_annotations_keep_flat_browser(qtbot, raw, streams):
     assert sidebar.tree.isHidden()
     assert not sidebar.list.isHidden()
     assert sidebar.list.count() == 2
+    assert sidebar.show_uuids_checkbox.isHidden()
+    assert window.annotation_map_button.isHidden()
+    assert not window.annotation_map_action.isVisible()
 
 
 def test_annotation_type_filter_has_clear_action_and_grouped_sections(viewer):

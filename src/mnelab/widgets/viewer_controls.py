@@ -27,6 +27,7 @@ from mnelab.annotation_hierarchy import (
     decode_hierarchical_annotation,
     hierarchical_annotations,
 )
+from mnelab.lsl_annotation import AnnotationFormatError, parse_marker
 
 ANNOTATION_INDEX_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 
@@ -143,15 +144,6 @@ class AnnotationSidebar(QWidget):
         results_layout = QVBoxLayout(self.results_group)
         results_layout.setContentsMargins(6, 6, 6, 6)
         results_layout.setSpacing(4)
-        self.tree = QTreeWidget()
-        self.tree.setHeaderHidden(True)
-        self.tree.setAlternatingRowColors(True)
-        self.tree.setWordWrap(True)
-        self.tree.setToolTip(
-            "Expand hierarchy levels and click a lifecycle marker to center it"
-        )
-        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        results_layout.addWidget(self.tree, 1)
         self.list = QListWidget()
         self.list.setAlternatingRowColors(True)
         self.list.setWordWrap(True)
@@ -355,7 +347,7 @@ class AnnotationSidebar(QWidget):
             )
         if marker is None:
             return None
-        return marker.display_label(show_uuids=self.show_uuids)
+        return marker.formatted_text(show_uuids=self.show_uuids)
 
     def plot_accepts(self, annotation_index, description):
         """Return whether an annotation should be rendered on plots."""
@@ -510,7 +502,7 @@ class AnnotationSidebar(QWidget):
                     path += ((node["level"], identity),)
                     child = hierarchy_nodes.get(path)
                     if child is None:
-                        label = f"{node['level']}: {node['id']}"
+                        label = f"{node['level']}={node['id']}"
                         if self.show_uuids and node.get("uid"):
                             label += f" · uid={node['uid']}"
                         child = QTreeWidgetItem([label])
@@ -563,10 +555,11 @@ class AnnotationSidebar(QWidget):
                 item.setFont(font)
             visible_count += 1
         use_tree = bool(markers)
+        self.show_uuids_checkbox.setVisible(use_tree)
         self.tree.setVisible(use_tree)
         self.list.setVisible(not use_tree)
         if use_tree:
-            self.tree.expandToDepth(0)
+            self.tree.collapseAll()
         if self._regex_error is None:
             suppressed_count = sum(
                 record[0] in self._suppressed_indices for record in records
