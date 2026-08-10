@@ -16,7 +16,6 @@ import importlib.util
 import json
 import math
 import re
-import textwrap
 import uuid
 import warnings
 from collections.abc import Mapping, Sequence
@@ -66,11 +65,6 @@ REQUIRED_FIELDS = {
     "data",
 }
 OPTIONAL_FIELDS = {"parent_uid", "container_level", "terminal_status"}
-
-# presentation only: payload objects are wrapped `key=value` runs, so a marker
-# stays a few lines wide however many keys it carries (guide `DISPLAY_WIDTH`)
-DISPLAY_WIDTH = 80
-UNQUOTED_VALUE = re.compile(r"[^\s,=]+")
 
 GUIDE_IMPLEMENTATION_PATH = (
     Path(__file__).resolve().parents[2]
@@ -266,85 +260,19 @@ def validate_marker(marker, *, strict=False):
     return marker
 
 
-def _format_value(value):
-    """Render one payload value on a single line, quoting only when needed."""
-    if isinstance(value, str):
-        if UNQUOTED_VALUE.fullmatch(value):
-            return value
-        return json.dumps(value, ensure_ascii=False)
-    if isinstance(value, Mapping) or (
-        isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
-    ):
-        return json.dumps(
-            value,
-            ensure_ascii=False,
-            sort_keys=True,
-            allow_nan=False,
-            separators=(",", ":"),
-        )
-    return json.dumps(value, ensure_ascii=False, allow_nan=False)
-
-
-def _field_lines(label, fields):
-    """Render a mapping as one wrapped `label: key=value, key=value` run."""
-    body = ", ".join(
-        f"{key}={_format_value(value)}" for key, value in sorted(fields.items())
-    )
-    text = f"{label}: {body}"
-    return textwrap.wrap(
-        text,
-        width=DISPLAY_WIDTH,
-        initial_indent="  ",
-        subsequent_indent="    ",
-        break_long_words=False,
-        break_on_hyphens=False,
-    ) or [f"  {text}"]
-
-
-def _fallback_format_marker(marker, *, include_uids=False):
-    """Return the guide's compact display when its checkout is unavailable."""
-    path = "/".join(
-        f"{node['level']}={node['id']}" for node in marker.get("hierarchy", ())
-    )
-    event_axis = marker.get("container_level") or marker.get("event_type", "event")
-    event_segment = (
-        f"{event_axis}={marker['event_id']}"
-        if marker.get("event_id") is not None
-        else ""
-    )
-    location = "/".join(part for part in (path, event_segment) if part)
-    sequence = marker.get("sequence_number", "?")
-    source = marker.get("source", "unknown source")
-    phase = marker.get("phase", "unknown phase")
-    event_type = marker.get("event_type", "unknown type")
-    outcome = marker.get("terminal_status")
-    lifecycle = f"{event_type}/{phase}" + (f" -> {outcome}" if outcome else "")
-    lines = [
-        f"#{sequence} {location or '(stream root)'}",
-        f"  {marker.get('event_name', '(unnamed)')} [{lifecycle}] · {source}",
-    ]
-    if include_uids:
-        uids = {"event": marker.get("event_uid", "(missing)")}
-        if marker.get("parent_uid") is not None:
-            uids["parent"] = marker["parent_uid"]
-        lines.extend(_field_lines("uids", uids))
-    for node in marker.get("hierarchy", ()):
-        metadata = node.get("metadata")
-        if metadata:
-            lines.extend(_field_lines(f"{node['level']} metadata", metadata))
-    data = marker.get("data")
-    if data:
-        lines.extend(_field_lines("data", data))
-    return "\n".join(lines)
-
-
 def format_marker(marker, *, include_uids=False):
-    """Return the guide-defined human-readable marker representation."""
+    """Return the guide-defined human-readable marker representation.
+
+    The pinned guide checkout owns this presentation: a second implementation
+    here would be a second thing to keep in step with the specification. Without
+    that checkout there is no canonical rendering to reproduce, so the marker is
+    shown verbatim rather than in an approximation of it.
+    """
     if _GUIDE is not None:
         return _GUIDE.format_marker(marker, include_uids=include_uids)
     if isinstance(marker, str):
         marker = json.loads(marker)
-    return _fallback_format_marker(marker, include_uids=include_uids)
+    return json.dumps(marker, indent=2, ensure_ascii=False)
 
 
 def parse_marker(description, prefixes=(), *, strict=True):
