@@ -16,6 +16,7 @@ import importlib.util
 import json
 import math
 import re
+import textwrap
 import uuid
 import warnings
 from collections.abc import Mapping, Sequence
@@ -65,6 +66,11 @@ REQUIRED_FIELDS = {
     "data",
 }
 OPTIONAL_FIELDS = {"parent_uid", "container_level", "terminal_status"}
+
+# presentation only: payload objects are wrapped `key=value` runs, so a marker
+# stays a few lines wide however many keys it carries (guide `DISPLAY_WIDTH`)
+DISPLAY_WIDTH = 80
+UNQUOTED_VALUE = re.compile(r"[^\s,=]+")
 
 GUIDE_IMPLEMENTATION_PATH = (
     Path(__file__).resolve().parents[2]
@@ -260,6 +266,41 @@ def validate_marker(marker, *, strict=False):
     return marker
 
 
+def _format_value(value):
+    """Render one payload value on a single line, quoting only when needed."""
+    if isinstance(value, str):
+        if UNQUOTED_VALUE.fullmatch(value):
+            return value
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, Mapping) or (
+        isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
+    ):
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+    return json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+def _field_lines(label, fields):
+    """Render a mapping as one wrapped `label: key=value, key=value` run."""
+    body = ", ".join(
+        f"{key}={_format_value(value)}" for key, value in sorted(fields.items())
+    )
+    text = f"{label}: {body}"
+    return textwrap.wrap(
+        text,
+        width=DISPLAY_WIDTH,
+        initial_indent="  ",
+        subsequent_indent="    ",
+        break_long_words=False,
+        break_on_hyphens=False,
+    ) or [f"  {text}"]
+
+
 def _fallback_format_marker(marker, *, include_uids=False):
     """Return the guide's compact display when its checkout is unavailable."""
     path = "/".join(
@@ -283,32 +324,17 @@ def _fallback_format_marker(marker, *, include_uids=False):
         f"  {marker.get('event_name', '(unnamed)')} [{lifecycle}] · {source}",
     ]
     if include_uids:
-        lines.append(f"  event_uid: {marker.get('event_uid', '(missing)')}")
+        uids = {"event": marker.get("event_uid", "(missing)")}
         if marker.get("parent_uid") is not None:
-            lines.append(f"  parent_uid: {marker['parent_uid']}")
+            uids["parent"] = marker["parent_uid"]
+        lines.extend(_field_lines("uids", uids))
     for node in marker.get("hierarchy", ()):
         metadata = node.get("metadata")
         if metadata:
-            lines.append(f"  {node['level']}={node['id']} metadata:")
-            rendered = json.dumps(
-                metadata,
-                indent=2,
-                ensure_ascii=False,
-                sort_keys=True,
-                allow_nan=False,
-            ).splitlines()
-            lines.extend(f"    {line}" for line in rendered)
+            lines.extend(_field_lines(f"{node['level']} metadata", metadata))
     data = marker.get("data")
     if data:
-        lines.append("  data:")
-        rendered = json.dumps(
-            data,
-            indent=2,
-            ensure_ascii=False,
-            sort_keys=True,
-            allow_nan=False,
-        ).splitlines()
-        lines.extend(f"    {line}" for line in rendered)
+        lines.extend(_field_lines("data", data))
     return "\n".join(lines)
 
 
