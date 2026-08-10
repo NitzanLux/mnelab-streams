@@ -166,6 +166,276 @@ class HierarchicalAnnotationInterval:
         return "/".join(segments)
 
 
+@dataclass(frozen=True)
+class HierarchyBar:
+    """One drawable timeline bar for a hierarchy container or an event lifecycle."""
+
+    level: str
+    node_id: str
+    stream_name: str | None
+    depth: int
+    row: int
+    lane: int
+    start: float
+    stop: float
+    instant: bool
+    complete: bool
+    is_leaf: bool
+    label: str
+    path: str
+    interval: HierarchicalAnnotationInterval | None
+
+    @property
+    def duration(self):
+        return max(0.0, self.stop - self.start)
+
+    @property
+    def derived(self):
+        """Return whether this bar was spanned from descendants only."""
+        return self.interval is None
+
+
+@dataclass(frozen=True)
+class HierarchyBand:
+    """One left-axis lane group holding every bar of one hierarchy level."""
+
+    level: str
+    depth: int
+    first_row: int
+    row_count: int
+    bar_count: int
+
+    @property
+    def center_row(self):
+        return self.first_row + (self.row_count - 1) / 2
+
+    def label(self):
+        """Return the indented axis label naming this hierarchy level."""
+        return f"{'  ' * self.depth}{self.level} ({self.bar_count})"
+
+
+def annotation_bar_text(marker, *, show_uuids=False):
+    """Return an annotation's own content, without its lifecycle phase wording."""
+    name = str(marker.event_name).strip()
+    identifier = str(marker.event_id).strip()
+    primary = name if name and name.lower() not in _LIFECYCLE_WORDS else ""
+    if not primary and identifier and identifier.lower() not in _LIFECYCLE_WORDS:
+        primary = identifier
+    details = []
+    data = marker.payload.get("data")
+    if isinstance(data, dict):
+        for key, value in without_uuid_fields(data).items():
+            if isinstance(value, dict | list) or str(key).lower() in _LIFECYCLE_WORDS:
+                continue
+            details.append(f"{key}={value}")
+            if len(details) == _MAX_BAR_DATA_FIELDS:
+                break
+    text = primary
+    if details:
+        joined = ", ".join(details)
+        text = f"{text} ({joined})" if text else joined
+    if show_uuids and text:
+        text += f" · {marker.event_uid}"
+    return text
+
+
+def _hierarchy_nodes(intervals):
+    """Return hierarchy nodes keyed by their full container path."""
+    nodes = {}
+
+    def touch(key, *, level, node_id, uid, depth, stream_name, parent):
+        node = nodes.get(key)
+        if node is None:
+            node = nodes[key] = {
+                "level": str(level),
+                "node_id": str(node_id),
+                "uid": str(uid or ""),
+                "depth": int(depth),
+                "stream_name": stream_name,
+                "parent": parent,
+                "children": [],
+                "interval": None,
+                "start": None,
+                "stop": None,
+            }
+            if parent is not None:
+                nodes[parent]["children"].append(key)
+        return node
+
+    for interval in intervals:
+        marker = interval.marker
+        key = (marker.stream_name,)
+        parent = None
+        for depth, ancestor in enumerate(marker.hierarchy):
+            level = str(ancestor.get("level", "level"))
+            node_id = str(ancestor.get("id", ""))
+            uid = str(ancestor.get("uid") or node_id)
+            key = key + ((level, uid),)
+            touch(
+                key,
+                level=level,
+                node_id=node_id,
+                uid=ancestor.get("uid"),
+                depth=depth,
+                stream_name=marker.stream_name,
+                parent=parent,
+            )
+            parent = key
+        key = key + ((marker.event_level, marker.event_uid),)
+        node = touch(
+            key,
+            level=marker.event_level,
+            node_id=marker.event_id,
+            uid=marker.event_uid,
+            depth=len(marker.hierarchy),
+            stream_name=marker.stream_name,
+            parent=parent,
+        )
+        node["interval"] = interval
+        node["start"] = interval.start
+        node["stop"] = interval.stop
+
+    # Containers span every descendant, so a nested event never sticks out of the
+    # container that owns it. Deepest nodes are folded into their parents first.
+    for key in sorted(nodes, key=lambda key: -nodes[key]["depth"]):
+        node = nodes[key]
+        parent = nodes.get(node["parent"]) if node["parent"] is not None else None
+        if parent is None or node["start"] is None:
+            continue
+        parent["start"] = (
+            node["start"]
+            if parent["start"] is None
+            else min(parent["start"], node["start"])
+        )
+        parent["stop"] = (
+            node["stop"] if parent["stop"] is None else max(parent["stop"], node["stop"])
+        )
+    return nodes
+
+
+def _node_path(nodes, key, *, show_uuids=False):
+    """Return the readable container path leading to and including `key`."""
+    segments = []
+    while key is not None and key in nodes:
+        node = nodes[key]
+        segment = f"{node['level']}={node['node_id']}"
+        if show_uuids and node["uid"]:
+            segment += f" ({node['uid']})"
+        segments.append(segment)
+        key = node["parent"]
+    return "/".join(reversed(segments))
+
+
+def _pack_lanes(spans):
+    """Return a lane index per span so no two bars in one lane overlap in time."""
+    lane_ends = []
+    lanes = []
+    for start, stop in spans:
+        lane = None
+        for index, end in enumerate(lane_ends):
+            if start > end or (start == end and stop > start):
+                lane = index
+                break
+        if lane is None:
+            lane = len(lane_ends)
+            lane_ends.append(stop)
+        else:
+            lane_ends[lane] = max(lane_ends[lane], stop)
+        lanes.append(lane)
+    return lanes
+
+
+def hierarchy_timeline_bars(intervals, *, show_uuids=False):
+    """Arrange lifecycle intervals as nested time bars grouped by hierarchy level.
+
+    Every hierarchy container becomes one bar spanning its descendants, and every
+    event lifecycle becomes one bar at its own level. Bars that overlap in time
+    within a level are packed into separate lanes of that level.
+
+    Parameters
+    ----------
+    intervals : list of HierarchicalAnnotationInterval
+        Lifecycle rows as returned by `hierarchical_annotation_intervals`.
+    show_uuids : bool
+        Whether identity fields appear in bar labels and paths.
+
+    Returns
+    -------
+    bars : list of HierarchyBar
+        Drawable bars in row order.
+    bands : list of HierarchyBand
+        Level groups in row order, each covering a contiguous block of rows.
+    """
+    nodes = _hierarchy_nodes(list(intervals))
+    grouped = {}
+    for key, node in nodes.items():
+        if node["start"] is None:
+            continue
+        grouped.setdefault((node["depth"], node["level"]), []).append(key)
+
+    ordered_bands = sorted(
+        grouped,
+        key=lambda band: (
+            band[0],
+            min(nodes[key]["start"] for key in grouped[band]),
+            band[1],
+        ),
+    )
+
+    bars = []
+    bands = []
+    next_row = 0
+    for depth, level in ordered_bands:
+        keys = sorted(
+            grouped[(depth, level)],
+            key=lambda key: (
+                nodes[key]["start"],
+                -nodes[key]["stop"],
+                nodes[key]["node_id"],
+            ),
+        )
+        lanes = _pack_lanes([(nodes[key]["start"], nodes[key]["stop"]) for key in keys])
+        for key, lane in zip(keys, lanes, strict=True):
+            node = nodes[key]
+            interval = node["interval"]
+            is_leaf = not node["children"]
+            bars.append(
+                HierarchyBar(
+                    level=node["level"],
+                    node_id=node["node_id"],
+                    stream_name=node["stream_name"],
+                    depth=depth,
+                    row=next_row + lane,
+                    lane=lane,
+                    start=max(0.0, float(node["start"])),
+                    stop=max(float(node["start"]), float(node["stop"])),
+                    instant=bool(interval is not None and interval.instant),
+                    complete=bool(interval is None or interval.complete),
+                    is_leaf=is_leaf,
+                    label=(
+                        annotation_bar_text(interval.marker, show_uuids=show_uuids)
+                        if is_leaf and interval is not None
+                        else ""
+                    ),
+                    path=_node_path(nodes, key, show_uuids=show_uuids),
+                    interval=interval,
+                )
+            )
+        row_count = max(lanes, default=-1) + 1
+        bands.append(
+            HierarchyBand(
+                level=level,
+                depth=depth,
+                first_row=next_row,
+                row_count=row_count,
+                bar_count=len(keys),
+            )
+        )
+        next_row += row_count
+    bars.sort(key=lambda bar: (bar.row, bar.start))
+    return bars, bands
+
+
 def without_uuid_fields(value):
     """Return a recursive copy of JSON-compatible ``value`` without UUID keys."""
     if isinstance(value, dict):
