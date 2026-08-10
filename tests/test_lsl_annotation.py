@@ -9,6 +9,7 @@ from copy import deepcopy
 
 import pytest
 
+import mnelab.lsl_annotation as lsl_annotation
 from mnelab.lsl_annotation import (
     GUIDE_IMPLEMENTATION_AVAILABLE,
     AnnotationFormatError,
@@ -64,6 +65,14 @@ def test_guide_marker_uses_canonical_pretty_format(marker):
     assert "visual_go_cue [cue/instant] · task_software" in rendered
     assert "event_uid" not in rendered
     assert '"cue_value": "go"' in rendered
+
+
+def test_packaged_fallback_matches_pinned_guide_format(marker, monkeypatch):
+    expected = format_marker(marker)
+    monkeypatch.setattr(lsl_annotation, "_GUIDE", None)
+
+    assert lsl_annotation.validate_marker(marker) is marker
+    assert lsl_annotation.format_marker(marker) == expected
 
 
 def test_viewer_prefix_is_removed_before_json_validation(marker):

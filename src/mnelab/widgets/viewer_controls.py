@@ -2,6 +2,7 @@
 #
 # License: BSD (3-clause)
 
+import json
 import re
 
 from PySide6.QtCore import Qt, Signal
@@ -218,6 +219,21 @@ class AnnotationSidebar(QWidget):
         button.setEnabled(False)
         button.setFixedWidth(button.fontMetrics().height() + 10)
         return button
+
+    @classmethod
+    def _append_json_tree(cls, parent, label, value):
+        """Append one deterministic expandable JSON value below ``parent``."""
+        item = QTreeWidgetItem([str(label)])
+        parent.addChild(item)
+        if isinstance(value, dict):
+            for key in sorted(value):
+                cls._append_json_tree(item, key, value[key])
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                cls._append_json_tree(item, f"[{index}]", child)
+        else:
+            item.setText(0, f"{label}: {json.dumps(value, ensure_ascii=False)}")
+        return item
 
     @property
     def show_uuids(self):
@@ -461,7 +477,6 @@ class AnnotationSidebar(QWidget):
         hierarchy_nodes = {}
         other_root = None
         visible_count = 0
-        visible_records = []
         for annotation_index, onset, duration, description in records:
             description = str(description)
             if not self.accepts(description):
@@ -532,11 +547,13 @@ class AnnotationSidebar(QWidget):
                 phase = marker.phase
                 if terminal:
                     phase += f" · {terminal}"
-                item = QTreeWidgetItem([f"{start:10.3f} s  {phase}"])
+                item = QTreeWidgetItem([f"{phase} @ {start:.3f} s"])
                 item.setData(0, Qt.ItemDataRole.UserRole, start)
                 item.setData(0, ANNOTATION_INDEX_ROLE, annotation_index)
                 item.setToolTip(0, marker.tooltip(show_uuids=self.show_uuids))
                 event_item.addChild(item)
+                if marker.payload.get("data"):
+                    self._append_json_tree(item, "data", marker.payload["data"])
             else:
                 item = QListWidgetItem(f"{start:10.3f} s  {description}{duration_text}")
                 item.setData(Qt.ItemDataRole.UserRole, start)
