@@ -895,6 +895,14 @@ The referenced annotation format is pinned at
 updates can be reviewed independently. Source checkouts shall use its validator and
 canonical formatter directly through the MNELAB annotation adapter.
 
+The canonical formatter shall be concise: marker `data` and hierarchy `metadata`
+shall be rendered as wrapped `key=value` lines rather than as indented JSON blocks,
+so a marker's displayed height reflects how much it carries rather than how many
+keys it names. Only the pinned guide shall define this rendering; where the
+submodule is absent, markers shall be shown as their own JSON rather than in a
+second approximation of the guide's format. Marker validation shall remain
+available in either case.
+
 ### 12.10 Power spectral density viewer
 
 Power spectral density shall open in an MNELAB-native PyQtGraph window rather than a
