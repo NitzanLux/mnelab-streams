@@ -92,7 +92,7 @@ class FilterTargetsPage(QWidget):
                     channel_item.flags() | Qt.ItemFlag.ItemIsUserCheckable
                 )
                 channel_item.setCheckState(0, Qt.CheckState.Checked)
-            stream_item.setExpanded(True)
+            stream_item.setExpanded(False)
         self.tree.resizeColumnToContents(0)
         self.tree.itemChanged.connect(self._item_changed)
         layout.addWidget(self.tree, 1)
@@ -326,6 +326,16 @@ class StreamFilterPanel(QGroupBox):
         control.setAlignment(Qt.AlignmentFlag.AlignRight)
         control.setSuffix(" Hz")
         return control
+
+    def set_frequency_limit(self, fmax, response_sfreq):
+        """Update the shared target's lowest applicable Nyquist limit."""
+        self._fmax = fmax
+        self._response_sfreq = response_sfreq
+        for control in (self.lower_edit, self.upper_edit, self.notch_edit):
+            control.setMaximum(fmax)
+            if control.value() >= fmax:
+                control.setValue(fmax / 2)
+        self._update_response_plot()
 
     @property
     def selected_filter_type(self):
@@ -846,11 +856,12 @@ class StreamFilterPanel(QGroupBox):
 
 
 class FilterDialog(QDialog):
-    """Configure independent filters for source-oriented channel groups."""
+    """Configure shared filters for selected source-stream channel groups."""
 
     def __init__(self, parent=None, fmax=None, streams=None):
         super().__init__(parent)
         self.setWindowTitle("Filter Data")
+        self._fmax = fmax
         self._columns = 1
         if not streams:
             streams = [
@@ -861,6 +872,7 @@ class FilterDialog(QDialog):
                     "channel_names": [],
                 }
             ]
+        self.streams = streams
 
         root_layout = QVBoxLayout(self)
         self.pages = QStackedWidget()
@@ -942,8 +954,21 @@ class FilterDialog(QDialog):
                     parent=self.panel_container,
                 )
             )
-        for panel in self.panels:
-            panel.settings_changed.connect(self.validate_inputs)
+        self._preset_panels = self.panels
+        selected_channels = [
+            channel for stream in streams for channel in stream["channel_names"]
+        ]
+        shared_fmax = self._target_fmax(
+            {index: stream["channel_names"] for index, stream in enumerate(streams)}
+        )
+        self.shared_panel = StreamFilterPanel(
+            {"name": "Selected streams", "channel_names": selected_channels},
+            fmax=shared_fmax,
+            response_sfreq=2 * shared_fmax,
+            parent=self.panel_container,
+        )
+        self.panels = [self.shared_panel]
+        self.shared_panel.settings_changed.connect(self.validate_inputs)
         self._layout_panels()
 
         # Preserve the original single-filter control API for callers and tests.
@@ -952,11 +977,8 @@ class FilterDialog(QDialog):
         self.upper_edit = first.upper_edit
         self.notch_edit = first.notch_edit
 
-        multiple = len(self.panels) > 1
-        self.columns_label.setVisible(multiple)
-        self.column_spin.setVisible(multiple)
-        if multiple:
-            self.resize(900, 600)
+        self.columns_label.hide()
+        self.column_spin.hide()
 
         self.buttonbox = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -1003,12 +1025,16 @@ class FilterDialog(QDialog):
 
     def _show_filter_options(self):
         targets = self.targets_page.selected_targets
-        for index, panel in enumerate(self.panels):
-            panel.set_selected_channels(targets.get(index, ()))
-            panel.apply_edit.setChecked(index in targets)
-            panel.apply_edit.setVisible(False)
-            panel.channels_group.setVisible(False)
-            panel.setVisible(index in targets)
+        selected_channels = [
+            channel for channels in targets.values() for channel in channels
+        ]
+        fmax = self._target_fmax(targets)
+        self.shared_panel.set_frequency_limit(fmax, 2 * fmax)
+        self.shared_panel.set_selected_channels(selected_channels)
+        self.shared_panel.apply_edit.setChecked(bool(selected_channels))
+        self.shared_panel.apply_edit.setVisible(False)
+        self.shared_panel.channels_group.setVisible(False)
+        self.shared_panel.show()
         self._layout_panels()
         self.pages.setCurrentWidget(self.filter_page)
         self.validate_inputs()
@@ -1038,8 +1064,7 @@ class FilterDialog(QDialog):
         self._layout_panels()
 
     def validate_inputs(self):
-        enabled = [panel for panel in self.panels if panel.apply_edit.isChecked()]
-        valid = bool(enabled) and all(panel.is_valid for panel in enabled)
+        valid = self.shared_panel.apply_edit.isChecked() and self.shared_panel.is_valid
         self.ok_button.setEnabled(valid)
         self.add_filter_button.setEnabled(valid)
         self.save_preset_button.setEnabled(valid)
@@ -1068,9 +1093,26 @@ class FilterDialog(QDialog):
             frozenset(str(channel) for channel in channels),
         )
 
+    def _target_fmax(self, targets):
+        """Return the lowest Nyquist frequency among selected source streams."""
+        limits = []
+        for index in targets:
+            stream = self.streams[index]
+            try:
+                sfreq = float(stream.get("filter_sfreq", stream.get("nominal_srate")))
+            except (TypeError, ValueError):
+                continue
+            if sfreq > 0 and math.isfinite(sfreq):
+                limits.append(sfreq / 2)
+        if self._fmax is not None:
+            limits.append(float(self._fmax))
+        return min(limits) if limits else 1e6
+
     @property
     def preset_state(self):
         """Return the current controls in the reusable filter-preset schema."""
+        targets = self.targets_page.selected_targets
+        shared_filter = self.shared_panel.preset_filter
         return {
             "format": FILTER_PRESET_FORMAT,
             "version": FILTER_PRESET_VERSION,
@@ -1079,9 +1121,16 @@ class FilterDialog(QDialog):
                     "name": self._stream_identity(panel.stream)[0],
                     "type": self._stream_identity(panel.stream)[1],
                     "channel_names": list(panel.stream.get("channel_names", ())),
-                    "filter": panel.preset_filter,
+                    "filter": (
+                        {
+                            **deepcopy(shared_filter),
+                            "channels": list(targets[index]),
+                        }
+                        if index in targets and shared_filter is not None
+                        else None
+                    ),
                 }
-                for panel in self.panels
+                for index, panel in enumerate(self._preset_panels)
             ],
         }
 
@@ -1239,7 +1288,7 @@ class FilterDialog(QDialog):
             raise FilterPresetError("The filter preset stream list is invalid.")
 
         current = {}
-        for panel in self.panels:
+        for panel in self._preset_panels:
             identity = self._stream_identity(panel.stream)
             if identity in current:
                 raise FilterPresetError(
@@ -1293,14 +1342,29 @@ class FilterDialog(QDialog):
     def apply_filter_preset(self, state):
         """Transactionally validate and apply a filter preset to the dialog."""
         validated = self._validated_filter_preset(state)
-        for panel in self.panels:
-            panel.apply_preset_filter(validated[panel])
         targets = {
-            index: panel.selected_channels
-            for index, panel in enumerate(self.panels)
-            if panel.apply_edit.isChecked() and panel.selected_channels
+            index: filter_state["channels"]
+            for index, panel in enumerate(self._preset_panels)
+            if (filter_state := validated[panel]) is not None
         }
+        filters = [filter_state for filter_state in validated.values() if filter_state]
+        designs = [
+            {key: value for key, value in item.items() if key != "channels"}
+            for item in filters
+        ]
+        if any(design != designs[0] for design in designs[1:]):
+            raise FilterPresetError(
+                "This preset uses different filters for different streams. "
+                "The current dialog applies one shared filter to all targets."
+            )
         self.targets_page.set_targets(targets)
+        shared_filter = deepcopy(filters[0])
+        shared_filter["channels"] = [
+            channel for channels in targets.values() for channel in channels
+        ]
+        fmax = self._target_fmax(targets)
+        self.shared_panel.set_frequency_limit(fmax, 2 * fmax)
+        self.shared_panel.apply_preset_filter(shared_filter)
         if self.pages.currentWidget() is self.filter_page:
             self._show_filter_options()
         self.validate_inputs()
@@ -1349,9 +1413,8 @@ class FilterDialog(QDialog):
 
     @property
     def _current_filters(self):
-        return [
-            spec for panel in self.panels if (spec := panel.filter_spec) is not None
-        ]
+        spec = self.shared_panel.filter_spec
+        return [] if spec is None else [spec]
 
     @property
     def filters(self):
@@ -1360,16 +1423,16 @@ class FilterDialog(QDialog):
 
     @property
     def selected_filter_type(self):
-        return self.panels[0].selected_filter_type
+        return self.shared_panel.selected_filter_type
 
     @property
     def lower(self):
-        return self.panels[0].lower
+        return self.shared_panel.lower
 
     @property
     def upper(self):
-        return self.panels[0].upper
+        return self.shared_panel.upper
 
     @property
     def notch(self):
-        return self.panels[0].notch
+        return self.shared_panel.notch

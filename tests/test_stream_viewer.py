@@ -26,8 +26,10 @@ from mnelab.widgets.stream_viewer import (
     ACTIVATION_AXIS_MIN_WIDTH,
     ACTIVATION_NAN_COLOR,
     CHANNEL_LABEL_WIDTH,
+    CHANNEL_LANE_HEIGHT,
     CHANNEL_LIST_WIDTH,
     FIT_HALF_LANE_FRACTION,
+    MIN_STREAM_PLOT_HEIGHT,
     TRACE_PSD_N_FFT,
     ActivationMapWindow,
     StreamViewerWindow,
@@ -587,6 +589,51 @@ def test_stream_toggle_filters_a_joined_panel_by_source(viewer):
     assert viewer.panels[0].visible_channel_names == ["Audio L"]
 
 
+def test_joined_panel_compacts_all_channels_onto_one_page(qtbot):
+    """A joined group shows every channel without growing beyond one full page."""
+    channel_names = [f"Channel {index:02d}" for index in range(24)]
+    raw = mne.io.RawArray(
+        np.zeros((len(channel_names), 100)),
+        mne.create_info(channel_names, 100.0, ["misc"] * len(channel_names)),
+        verbose=False,
+    )
+    streams = [
+        {"id": 1, "name": "First", "channel_names": channel_names[:12]},
+        {"id": 2, "name": "Second", "channel_names": channel_names[12:]},
+    ]
+    window = StreamViewerWindow(raw, streams=streams, max_channels=20)
+    qtbot.addWidget(window)
+
+    for panel in window.panels:
+        panel.selected.setChecked(True)
+    window.join_selected()
+
+    panel = window.panels[0]
+    assert panel.page_count == 1
+    assert panel.page_channel_names == channel_names
+    assert panel.visible_channel_names == channel_names
+    assert panel._plot_height == MIN_STREAM_PLOT_HEIGHT + 20 * CHANNEL_LANE_HEIGHT
+
+    panel.set_channel_visible(channel_names[0], False)
+
+    assert panel._plot_height == MIN_STREAM_PLOT_HEIGHT + 20 * CHANNEL_LANE_HEIGHT
+
+
+def test_joined_panel_is_one_virtual_psd_target(viewer):
+    """Selecting a joined panel creates one PSD containing all joined channels."""
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+    viewer.panels[0].selected.setChecked(True)
+
+    viewer.show_current_window_psd()
+
+    psd = viewer.visualization_windows[-1]
+    assert [panel.title for panel in psd.panels] == ["BrainAmp + Audio (Joined)"]
+    assert psd.panels[0].channel_names == ["EEG A", "EEG B", "Audio L"]
+    assert set(psd.channel_data) == {"EEG A", "EEG B", "Audio L"}
+
+
 def test_grid_defaults_to_one_column_and_reflows_in_place(viewer):
     """Column changes rearrange existing stream panels in source order."""
     panels = tuple(viewer.panels)
@@ -695,6 +742,28 @@ def test_panels_have_independent_units_and_gain(viewer):
     assert [
         audio.unit_combo.itemText(index) for index in range(audio.unit_combo.count())
     ] == ["Auto", "Raw"]
+
+
+def test_scale_button_opens_the_physical_scale_editor(viewer):
+    """The header exposes exact physical scale separately from relative gain."""
+    panel = viewer.panels[0]
+
+    menu = panel.create_scale_menu()
+
+    assert panel.scale_button.text() == "Scale…"
+    assert [action.text() for action in menu.actions()] == ["Set Scale…"]
+
+
+def test_scale_button_lists_each_joined_stream(viewer):
+    """Joined panels retain an independent physical-scale choice per stream."""
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+    panel = viewer.panels[0]
+
+    menu = panel.create_scale_menu()
+
+    assert [action.text() for action in menu.actions()] == ["BrainAmp", "Audio"]
 
 
 def test_channels_can_override_units_for_mixed_imu_and_emg_stream(qtbot):

@@ -42,6 +42,7 @@ _ICON_MAP = {
     "Annotations": "annotations",
     "Montage": "plot-locations",
     "Reference": "change-reference",
+    "Filters": "filter-data",
 }
 
 dev_label = (
@@ -149,7 +150,7 @@ class InfoWidget(QWidget):
                 self.grid.addWidget(icon_label, row, 0)
                 left = QLabel(str(key) + ":")
                 right = QLabel(str(value))
-                if key == "Streams":
+                if key in {"Streams", "Filters"}:
                     right.setWordWrap(True)
                     right.setToolTip(str(value))
                 right.setSizePolicy(

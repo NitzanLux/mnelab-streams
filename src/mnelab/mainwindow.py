@@ -3055,7 +3055,7 @@ class MainWindow(QMainWindow):
             msgbox.show()
 
     def filter_data(self):
-        """Configure and apply independent filters for each source stream."""
+        """Configure and apply one filter across selected source stream channels."""
         from mnelab.widgets.stream_viewer import normalize_streams
 
         data = self.model.current["data"]

@@ -94,6 +94,49 @@ def test_filter_falls_back_to_all_auxiliary_channels(tmp_path):
     ]
 
 
+def test_info_lists_all_applied_filters(tmp_path):
+    """The information panel metadata retains every applied filter stage."""
+    raw = mne.io.RawArray(
+        np.zeros((1, 1000)),
+        mne.create_info(["EEG"], 100, "eeg"),
+        verbose=False,
+    )
+    path = tmp_path / "filtered.edf"
+    path.write_bytes(b"x")
+    model = Model()
+    model.load_data(raw, path)
+
+    model.filter(
+        stream_filters=[
+            {
+                "stream_name": "EEG",
+                "picks": ["EEG"],
+                "kind": "highpass",
+                "model": "butterworth",
+                "order": 4,
+                "lower": 1.0,
+                "upper": None,
+                "notch": None,
+            },
+            {
+                "stream_name": "EEG",
+                "picks": ["EEG"],
+                "kind": "notch",
+                "model": "resonator",
+                "order": 20,
+                "q_factor": 20,
+                "lower": None,
+                "upper": None,
+                "notch": [50.0],
+            },
+        ]
+    )
+
+    assert model.get_info()["Filters"] == (
+        "EEG: highpass 1.0\u2009Hz; EEG: notch 50\u2009Hz (Q 20)"
+    )
+
+
 def test_memory_size_does_not_copy_data(model_with_data):
     """Memory reporting reads the preloaded array without calling `get_data()`."""
     raw = model_with_data.current["data"]

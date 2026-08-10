@@ -480,8 +480,9 @@ annotations rather than silently replace them.
 - High-pass, low-pass, notch, band-pass, and band-stop filters shall be available.
 - Filtering shall use the same ordered source-stream groups as the raw-data viewer.
   A target-selection page shall first choose relevant streams and then their exact
-  channels. A following options page shall configure each selected stream
-  independently. A current-target summary shall make the exact filter scope visible
+  channels. Channel rows shall initially be collapsed. A following options page shall
+  configure one shared filter for every selected channel. A current-target summary
+  shall make the exact filter scope visible
   before processing. Cutoff controls shall not exceed half of that stream's nominal
   sampling rate.
 - Filter options shall follow EDFbrowser's applicable controls: Butterworth,
@@ -505,6 +506,8 @@ annotations rather than silently replace them.
 - Causal IIR and resonator-notch filters shall process every contiguous finite span
   independently. Non-finite source samples shall remain in place without contaminating
   later finite samples, and each post-gap span shall begin with a reset filter state.
+- The main-window information panel shall list every filter stage applied to the
+  current dataset, including its target stream and settings.
 - Resampling shall accept 0.1-1,000,000 Hz and rely on MNE's anti-alias filtering.
 - Raw cropping shall allow either endpoint to be omitted and shall clamp selected
   endpoints to the recording bounds.
@@ -628,8 +631,10 @@ Every raw dataset shall open in a `StreamViewerWindow`.
 - Each source occurs in exactly one display panel. A panel may contain one source or a
   joined group of sources.
 - All panels share the same start time and visible duration.
-- A panel shall page through no more than the configured maximum displayed channels.
-  Hidden channels remain on their stable page and can be restored.
+- A single-source panel shall page through no more than the configured maximum
+  displayed channels. Hidden channels remain on their stable page and can be restored.
+- A joined panel shall show all of its channels on one page and compact their lanes to
+  the height normally occupied by the configured maximum displayed channels.
 
 ### 12.2 Panel layout
 
@@ -696,9 +701,11 @@ unknown conversion. Per-channel units shall be used in cursor values, statistics
 scale readouts, and saved display montages.
 
 Panel amplitude is a display-only multiplier from 0.001x through 1000x. Step buttons
-and keyboard changes use a factor of 1.25. The scale readout shall report the signal
-magnitude represented by one vertical division, and the cursor shall report time,
-channel name, and signal value in the selected display unit.
+and keyboard changes use a factor of 1.25. **Scale…** beside Gain shall open an
+exact per-stream physical scale editor; joined panels shall offer a stream choice.
+The scale readout shall report the signal magnitude represented by one vertical
+division, and the cursor shall report time, channel name, and signal value in the
+selected display unit.
 
 When the optional crosshair is enabled, its vertical time guide shall be synchronized
 across every stream plot. The horizontal value guide shall remain in the hovered plot,
@@ -815,10 +822,11 @@ The raw trace viewer shall provide a **Visualizations** menu for display-only an
 of its current shared time window. Each visualization shall be added as a virtual
 stream inside the trace viewer and shall recompute whenever the visible start time or
 duration changes. **Power Spectral Density for Selected Stream** shall require exactly
-one stream panel to be selected and shall appear directly in the main stream workspace
-alongside the recorded stream panels. It shall show every channel in the selected
-stream, with the same channel lanes, paging controls, colors, power scale, display
-mode, and reset controls as the ordinary PSD viewer. The complete PSD virtual stream
+one stream panel to be selected, including a joined group of source streams, and shall
+appear directly in the main stream workspace alongside the recorded stream panels. It
+shall show every channel in the selected panel, with the same channel lanes, paging
+controls, colors, power scale, display mode, and reset controls as the ordinary PSD
+viewer. The complete PSD virtual stream
 shall support the same pop-out and return workflow as a recorded stream panel. RMS and
 common-average-reference virtual streams shall use the same main-workspace and pop-out
 workflow, with the pop-out control at the right end of their header. Other
@@ -828,7 +836,9 @@ tabs.
 unmodified samples in the visible range. **RMS for Selected Stream** shall show one RMS
 value per channel, and **Common Average Reference for Selected Stream** shall show
 per-channel traces after subtracting the samplewise stream average. PSD, RMS, and CAR
-require exactly one stream panel to be selected with its **Select** control.
+require exactly one stream panel to be selected with its **Select** control; a joined
+panel is treated as one visualization target containing all channels from its source
+streams.
 None of these visualizations shall modify the recording, its display montage, or its
 analysis history. Missing sample spans shall not be treated as continuous data.
 Current-window PSDs shall use the FFT size configured by

@@ -929,6 +929,7 @@ class Model:
                 annots = "–"
         else:
             annots = "–"
+        filters = self.current["applied_filters"] or []
         return {
             "File Name": fname if fname else "–",
             "File Type": ftype.removesuffix(".GZ") if ftype else "–",
@@ -951,6 +952,7 @@ class Model:
             "Length": length,
             "Events": events,
             "Annotations": annots,
+            "Filters": "; ".join(filters) if filters else "–",
             "Reference": reference if reference else "–",
             "Montage": montage_text,
             "ICA": ica,
@@ -1090,6 +1092,12 @@ class Model:
     def filter(self, lower=None, upper=None, notch=None, stream_filters=None):
         """Apply filters to the current data based on provided parameters."""
         data = self.current["data"]
+
+        def record_filters(descriptions):
+            """Keep an ordered, per-dataset summary of applied filter stages."""
+            if descriptions:
+                existing = self.current["applied_filters"] or []
+                self.current["applied_filters"] = [*existing, *descriptions]
 
         def filter_native_streams(filters):
             """Plan and apply filters on each source stream's own sample grid."""
@@ -1279,6 +1287,7 @@ class Model:
             self.history.extend(planned_history)
             if applied:
                 self.current["name"] += " (filtered per stream)"
+                record_filters(applied)
 
         if isinstance(data, NativeXDFRecording):
             filter_native_streams(stream_filters)
@@ -1425,6 +1434,7 @@ class Model:
             description = filter_one(lower, upper, notch)
             if description is not None:
                 self.current["name"] += f" ({description})"
+                record_filters([f"Data: {description}"])
             return
 
         applied = []
@@ -1444,6 +1454,7 @@ class Model:
                 )
         if applied:
             self.current["name"] += " (filtered per stream)"
+            record_filters(applied)
 
     @data_changed
     def resample(self, sfreq, stream_ids=None):

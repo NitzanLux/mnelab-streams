@@ -669,6 +669,28 @@ def test_join_selected_combines_different_native_rates(qtbot):
         np.testing.assert_array_equal(entry["raw"].get_data(), original)
 
 
+def test_joined_native_panel_creates_one_virtual_psd(qtbot):
+    """A selected native-rate joined panel contributes every channel to its PSD."""
+    recording = _native_recording()
+    streams = [
+        {"id": 1, "name": "Slow", "type": "misc", "channel_names": ["Slow"]},
+        {"id": 2, "name": "Fast", "type": "misc", "channel_names": ["Fast"]},
+    ]
+    viewer = StreamViewerWindow(recording, streams=streams)
+    qtbot.addWidget(viewer)
+    for panel in viewer.panels:
+        panel.selected.setChecked(True)
+    viewer.join_selected()
+    viewer.panels[0].selected.setChecked(True)
+
+    viewer.show_current_window_psd()
+
+    psd = viewer.visualization_windows[-1]
+    assert psd.panels[0].channel_names == ["Slow", "Fast"]
+    assert set(psd.channel_data) == {"Slow", "Fast"}
+    assert all(np.isfinite(power).all() for power in psd.channel_data.values())
+
+
 def test_tight_view_combines_different_native_rates_in_one_figure(qtbot):
     """Tight mode aligns native-rate traces for display without changing data."""
     recording = _native_recording()

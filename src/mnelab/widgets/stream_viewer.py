@@ -1478,6 +1478,7 @@ class StreamPanel(QFrame):
         gain=1.0,
         channel_order=None,
         channels_per_page=20,
+        compact_channel_capacity=None,
         event_overlays_visible=True,
         annotation_overlays_visible=True,
         discrete_threshold=16,
@@ -1516,6 +1517,11 @@ class StreamPanel(QFrame):
             name for name in source_channel_names if name not in self.channel_names
         )
         self.channels_per_page = max(1, int(channels_per_page))
+        self.compact_channel_capacity = (
+            None
+            if compact_channel_capacity is None
+            else max(1, int(compact_channel_capacity))
+        )
         self._page = 0
         self._channel_types = dict(
             zip(raw.ch_names, raw.get_channel_types(), strict=True)
@@ -1630,6 +1636,12 @@ class StreamPanel(QFrame):
             lambda: self.change_amplitude(AMPLITUDE_STEP)
         )
         header.addWidget(self.amplitude_up_button)
+        self.scale_button = QPushButton("Scale…")
+        self.scale_button.setToolTip(
+            "Set an exact physical scale per division, independently of gain"
+        )
+        self.scale_button.clicked.connect(self._show_scale_menu)
+        header.addWidget(self.scale_button)
         self.raw_scale_button = QPushButton("Raw")
         self.raw_scale_button.setCheckable(True)
         self.raw_scale_button.setToolTip(
@@ -1704,6 +1716,7 @@ class StreamPanel(QFrame):
             self.amplitude_down_button,
             self.amplitude,
             self.amplitude_up_button,
+            self.scale_button,
             self.raw_scale_button,
             self.autoscale_button,
             self.scale_mode_label,
@@ -1717,9 +1730,14 @@ class StreamPanel(QFrame):
             axisItems={"left": TraceLabelAxis(orientation="left")}
         )
         visible_count = len(self.visible_channel_names)
+        height_channel_count = (
+            visible_count
+            if self.compact_channel_capacity is None
+            else min(visible_count, self.compact_channel_capacity)
+        )
         self._plot_height = max(
             150,
-            MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * visible_count,
+            MIN_STREAM_PLOT_HEIGHT + CHANNEL_LANE_HEIGHT * height_channel_count,
         )
         self.channel_list.setFixedHeight(self._plot_height)
         self.plot.setFixedHeight(self._plot_height)
@@ -2187,7 +2205,12 @@ class StreamPanel(QFrame):
 
     def _adjust_height_for_channel_count(self, previous_visible_count):
         """Add or remove one plot lane for each visibility-count change."""
-        lane_delta = len(self.visible_channel_names) - int(previous_visible_count)
+        current_count = len(self.visible_channel_names)
+        previous_count = int(previous_visible_count)
+        if self.compact_channel_capacity is not None:
+            current_count = min(current_count, self.compact_channel_capacity)
+            previous_count = min(previous_count, self.compact_channel_capacity)
+        lane_delta = current_count - previous_count
         if lane_delta:
             self.resize_plot_by(CHANNEL_LANE_HEIGHT * lane_delta)
 
@@ -2611,6 +2634,29 @@ class StreamPanel(QFrame):
         menu.actions()[0].setToolTip(
             f"{source['name']}: {amplitude:.6g} {unit_label}/div"
         )
+
+    def create_scale_menu(self):
+        """Create the header scale menu for this panel's source streams."""
+        menu = QMenu(self)
+        if len(self.sources) == 1:
+            menu.addAction(
+                "Set Scale…",
+                lambda _checked=False: self.open_stream_display(0),
+            )
+            return menu
+        for index, source in enumerate(self.sources):
+            menu.addAction(
+                str(source["name"]),
+                lambda _checked=False, source_index=index: self.open_stream_display(
+                    source_index
+                ),
+            )
+        return menu
+
+    def _show_scale_menu(self):
+        """Show physical-scale choices anchored to the header control."""
+        menu = self.create_scale_menu()
+        menu.exec(self.scale_button.mapToGlobal(self.scale_button.rect().bottomLeft()))
 
     def create_stream_context_menu(self, source_index=None):
         """Create properties actions for one source or a joined panel."""
@@ -5017,6 +5063,52 @@ class StreamViewerWindow(IndependentMainWindow):
         names = list(source["channel_names"])
         stop = self._start_time + self._duration
         if isinstance(self.raw, NativeXDFRecording):
+            sources = source.get("sources")
+            if sources:
+                source_windows = {}
+                all_times = []
+                source_id_by_channel = {
+                    name: child["id"]
+                    for child in sources
+                    for name in child["channel_names"]
+                }
+                for child in sources:
+                    child_names = [
+                        name
+                        for name in names
+                        if source_id_by_channel[name] == child["id"]
+                    ]
+                    times, values = self.raw.window(
+                        child["id"], child_names, self._start_time, stop
+                    )
+                    source_windows[child["id"]] = (
+                        child_names,
+                        np.asarray(times, dtype=float),
+                        values,
+                        child,
+                    )
+                    if len(times):
+                        all_times.append(np.asarray(times, dtype=float))
+                if not all_times:
+                    return np.empty(0), np.empty((len(names), 0)), names
+                display_times = np.unique(np.concatenate(all_times))
+                rows = []
+                for name in names:
+                    child_id = source_id_by_channel[name]
+                    child_names, times, values, child = source_windows[child_id]
+                    entry = _native_entry_for_stream(self.raw, child)
+                    sfreq = (
+                        float(entry["raw"].info["sfreq"]) if entry is not None else 1.0
+                    )
+                    rows.append(
+                        self._interpolate_native_display_row(
+                            times,
+                            values[child_names.index(name)],
+                            display_times,
+                            sfreq,
+                        )
+                    )
+                return display_times, np.vstack(rows), names
             times, values = self.raw.window(source["id"], names, self._start_time, stop)
             return times, values, names
         sfreq = float(self.raw.info["sfreq"])
@@ -5259,16 +5351,19 @@ class StreamViewerWindow(IndependentMainWindow):
         self._show_channel_visualization("Spectrogram")
 
     def _selected_visualization_source(self):
-        """Return the one source selected via a trace panel's Select control."""
-        sources = [
-            source
-            for panel in self.panels
-            if panel.selected.isChecked()
-            for source in panel.sources
-        ]
-        unique = list({source["id"]: source for source in sources}.values())
-        if len(unique) == 1:
-            return unique[0]
+        """Return the source group from the one selected trace panel."""
+        selected = [panel for panel in self.panels if panel.selected.isChecked()]
+        if len(selected) == 1:
+            panel = selected[0]
+            if len(panel.sources) == 1:
+                return panel.sources[0]
+            return {
+                "id": panel.source_ids,
+                "name": panel.title,
+                "type": "Joined",
+                "channel_names": list(panel.channel_names),
+                "sources": list(panel.sources),
+            }
         QMessageBox.information(
             self,
             "Select One Stream",
@@ -6191,6 +6286,8 @@ class StreamViewerWindow(IndependentMainWindow):
         self.panels = []
         for group in self._groups:
             key = tuple(stream["id"] for stream in group)
+            joined = len(group) > 1
+            group_channel_count = sum(len(stream["channel_names"]) for stream in group)
             settings = self._settings.setdefault(key, {"unit": "Auto", "gain": 1.0})
             panel = StreamPanel(
                 self.raw,
@@ -6206,10 +6303,11 @@ class StreamViewerWindow(IndependentMainWindow):
                 gain=settings["gain"],
                 channel_order=settings.get("channel_order"),
                 channels_per_page=(
-                    sum(len(stream["channel_names"]) for stream in group)
-                    if self._view_mode in {"Tight", "Unified"}
+                    group_channel_count
+                    if joined or self._view_mode in {"Tight", "Unified"}
                     else self.max_channels
                 ),
+                compact_channel_capacity=self.max_channels if joined else None,
                 event_overlays_visible=self._event_overlays_visible,
                 annotation_overlays_visible=self._annotation_overlays_visible,
                 discrete_threshold=self.discrete_threshold,

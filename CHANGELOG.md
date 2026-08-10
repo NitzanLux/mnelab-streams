@@ -1,5 +1,9 @@
 ## [UNRELEASED] · YYYY-MM-DD
 ### ✨ Added
+- Expose exact per-stream display scale selection beside the raw-viewer gain control
+  (by [NitzanLux](https://github.com/NitzanLux))
+- List all filters applied to a dataset in the main-window information panel (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Add context-updated PSD, spectrogram, RMS, and common-average-reference virtual
   streams to the trace viewer, with PSD respecting the selected stream, retaining its
   complete controls, and joining RMS and CAR in supporting pop-out windows directly
@@ -47,7 +51,16 @@
   matching streams by name, keeping each at its own sampling rate, and optionally
   filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
 
+### 🌀 Changed
+- Apply one shared filter configuration to all selected streams and channels (by
+  [NitzanLux](https://github.com/NitzanLux))
+
 ### 🔧 Fixed
+- Show all channels in a compact joined stream panel and allow joined panels to create
+  current-window virtual visualizations (by
+  [NitzanLux](https://github.com/NitzanLux))
+- Initially collapse channels in the filter target selection (by
+  [NitzanLux](https://github.com/NitzanLux))
 - Expose non-modal viewer and scientific-plot windows independently in desktop
   taskbars and window navigation while retaining owner-based cleanup (by
   [NitzanLux](https://github.com/NitzanLux))

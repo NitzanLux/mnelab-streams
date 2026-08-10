@@ -44,55 +44,33 @@ def _raw_and_streams():
     return raw, streams
 
 
-def test_filter_dialog_has_independent_source_stream_panels(qtbot):
-    """Each source panel produces its own filter and channel picks."""
+def test_filter_dialog_applies_one_shared_filter_to_selected_targets(qtbot):
+    """One configuration produces one operation for all selected channels."""
     _raw, streams = _raw_and_streams()
     dialog = FilterDialog(fmax=50, streams=streams)
     qtbot.addWidget(dialog)
 
-    assert [panel.title() for panel in dialog.panels] == [
-        "Amplifier (EEG)",
-        "Accessory (Aux)",
-    ]
-
-    amplifier, accessory = dialog.panels
-    assert amplifier.upper_edit.maximum() == 50
-    assert accessory.upper_edit.maximum() == 40
-    amplifier.filter_type_edit.setCurrentText("Bandpass")
-    amplifier.lower_edit.setValue(2)
-    amplifier.upper_edit.setValue(25)
-    accessory.filter_type_edit.setCurrentText("Notch")
-    accessory.notch_edit.setValue(40)
+    dialog._show_filter_options()
+    panel = dialog.shared_panel
+    assert panel.title() == "Selected streams"
+    assert panel.upper_edit.maximum() == 40
+    panel.filter_type_edit.setCurrentText("Bandpass")
+    panel.lower_edit.setValue(2)
+    panel.upper_edit.setValue(25)
 
     assert dialog.filters == [
         {
-            "stream_name": "Amplifier",
-            "picks": ["EEG 1", "EEG 2"],
+            "stream_name": "Selected streams",
+            "picks": ["EEG 1", "EEG 2", "Aux"],
             "kind": "bandpass",
             "model": "butterworth",
             "order": 2,
             "lower": 2.0,
             "upper": 25.0,
             "notch": None,
-        },
-        {
-            "stream_name": "Accessory",
-            "picks": ["Aux"],
-            "kind": "notch",
-            "model": "resonator",
-            "order": 20,
-            "lower": None,
-            "upper": None,
-            "notch": 40.0,
-            "q_factor": 20,
-        },
+        }
     ]
-
-    accessory.apply_edit.setChecked(False)
-    assert dialog.filters == [dialog.panels[0].filter_spec]
-
-    dialog.column_spin.setValue(2)
-    assert dialog.panel_layout.getItemPosition(1)[:2] == (0, 1)
+    assert not dialog.columns_label.isVisible()
 
 
 def test_filter_target_page_selects_streams_then_channels(qtbot):
@@ -111,11 +89,22 @@ def test_filter_target_page_selects_streams_then_channels(qtbot):
     dialog._show_filter_options()
 
     assert dialog.pages.currentWidget() is dialog.filter_page
-    assert dialog.panels[0].selected_channels == ["EEG 1"]
-    assert dialog.panels[0].apply_edit.isChecked()
-    assert not dialog.panels[1].apply_edit.isChecked()
+    assert dialog.shared_panel.selected_channels == ["EEG 1"]
+    assert dialog.shared_panel.apply_edit.isChecked()
     assert dialog.filters[0]["picks"] == ["EEG 1"]
-    assert dialog.panels[1].isHidden()
+
+
+def test_filter_target_channels_are_collapsed_initially(qtbot):
+    """The target chooser initially shows stream rows without their channels."""
+    _raw, streams = _raw_and_streams()
+    dialog = FilterDialog(fmax=50, streams=streams)
+    qtbot.addWidget(dialog)
+
+    tree = dialog.targets_page.tree
+    assert all(
+        not tree.topLevelItem(index).isExpanded()
+        for index in range(tree.topLevelItemCount())
+    )
 
 
 def test_filter_options_match_edfbrowser_models_and_ranges(qtbot):
@@ -691,18 +680,14 @@ def test_filter_preset_serializes_each_supported_filter(
 
 
 def test_filter_preset_round_trip_matches_reordered_streams_and_channels(qtbot):
-    """Exact identities remain portable when stream and channel order changes."""
+    """Shared presets remain portable when stream and channel order changes."""
     _raw, streams = _raw_and_streams()
     source = FilterDialog(fmax=50, streams=streams)
     qtbot.addWidget(source)
-    amplifier, accessory = source.panels
-    amplifier.filter_type_edit.setCurrentText("Bandpass")
-    amplifier.lower_edit.setValue(2)
-    amplifier.upper_edit.setValue(25)
-    amplifier.channel_list.item(1).setCheckState(Qt.CheckState.Unchecked)
-    accessory.filter_type_edit.setCurrentText("Notch")
-    accessory.notch_edit.setValue(20)
-    accessory.harmonics_edit.setChecked(True)
+    source._show_filter_options()
+    source.shared_panel.filter_type_edit.setCurrentText("Bandpass")
+    source.shared_panel.lower_edit.setValue(2)
+    source.shared_panel.upper_edit.setValue(25)
     state = source.preset_state
 
     reordered_streams = [
@@ -717,28 +702,18 @@ def test_filter_preset_round_trip_matches_reordered_streams_and_channels(qtbot):
 
     restored.apply_filter_preset(state)
 
-    accessory_filter, amplifier_filter = restored.filters
-    assert accessory_filter == {
-        "stream_name": "Accessory",
-        "picks": ["Aux"],
-        "kind": "notch",
-        "model": "resonator",
-        "order": 20,
-        "lower": None,
-        "upper": None,
-        "notch": [20.0],
-        "q_factor": 20,
-    }
-    assert amplifier_filter == {
-        "stream_name": "Amplifier",
-        "picks": ["EEG 1"],
-        "kind": "bandpass",
-        "model": "butterworth",
-        "order": 2,
-        "lower": 2.0,
-        "upper": 25.0,
-        "notch": None,
-    }
+    assert restored.filters == [
+        {
+            "stream_name": "Selected streams",
+            "picks": ["Aux", "EEG 2", "EEG 1"],
+            "kind": "bandpass",
+            "model": "butterworth",
+            "order": 2,
+            "lower": 2.0,
+            "upper": 25.0,
+            "notch": None,
+        }
+    ]
     assert restored.ok_button.isEnabled()
     assert restored.save_preset_button.isEnabled()
 
@@ -748,10 +723,10 @@ def test_filter_preset_loads_legacy_version_one_design_defaults(qtbot):
     _raw, streams = _raw_and_streams()
     source = FilterDialog(fmax=50, streams=streams)
     qtbot.addWidget(source)
-    source.panels[0].filter_type_edit.setCurrentText("Bandpass")
-    source.panels[0].lower_edit.setValue(2)
-    source.panels[0].upper_edit.setValue(20)
-    source.panels[1].apply_edit.setChecked(False)
+    source._show_filter_options()
+    source.shared_panel.filter_type_edit.setCurrentText("Bandpass")
+    source.shared_panel.lower_edit.setValue(2)
+    source.shared_panel.upper_edit.setValue(20)
     state = source.preset_state
     legacy_filter = state["streams"][0]["filter"]
     legacy_filter.pop("model")
@@ -768,11 +743,12 @@ def test_filter_preset_loads_legacy_version_one_design_defaults(qtbot):
 
 
 def test_filter_preset_restores_disabled_streams(qtbot):
-    """A null filter disables its stream and does not preserve hidden controls."""
+    """A null filter leaves that stream outside the shared target selection."""
     _raw, streams = _raw_and_streams()
     source = FilterDialog(fmax=50, streams=streams)
     qtbot.addWidget(source)
-    source.panels[1].apply_edit.setChecked(False)
+    source.targets_page.tree.topLevelItem(1).setCheckState(0, Qt.CheckState.Unchecked)
+    source._show_filter_options()
     state = source.preset_state
     assert state["streams"][1]["filter"] is None
 
@@ -780,9 +756,8 @@ def test_filter_preset_restores_disabled_streams(qtbot):
     qtbot.addWidget(restored)
     restored.apply_filter_preset(state)
 
-    assert restored.panels[0].apply_edit.isChecked()
-    assert not restored.panels[1].apply_edit.isChecked()
-    assert restored.filters == [restored.panels[0].filter_spec]
+    assert restored.targets_page.selected_targets == {0: ["EEG 1", "EEG 2"]}
+    assert restored.filters == [restored.shared_panel.filter_spec]
 
 
 def test_filter_preset_validation_is_transactional(qtbot):
@@ -860,9 +835,10 @@ def test_filter_dialog_saves_suffix_and_loads_without_processing(qtbot, tmp_path
     _raw, streams = _raw_and_streams()
     source = FilterDialog(fmax=50, streams=streams)
     qtbot.addWidget(source)
-    source.panels[0].filter_type_edit.setCurrentText("Highpass")
-    source.panels[0].lower_edit.setValue(3)
-    source.panels[1].apply_edit.setChecked(False)
+    source.targets_page.tree.topLevelItem(1).setCheckState(0, Qt.CheckState.Unchecked)
+    source._show_filter_options()
+    source.shared_panel.filter_type_edit.setCurrentText("Highpass")
+    source.shared_panel.lower_edit.setValue(3)
     path = tmp_path / "reviewable-filter"
 
     assert source.save_filter_preset(path)
@@ -877,7 +853,7 @@ def test_filter_dialog_saves_suffix_and_loads_without_processing(qtbot, tmp_path
     apply_filter.assert_not_called()
     assert restored.filters == [
         {
-            "stream_name": "Amplifier",
+            "stream_name": "Selected streams",
             "picks": ["EEG 1", "EEG 2"],
             "kind": "highpass",
             "model": "butterworth",
@@ -1016,8 +992,12 @@ def test_native_filter_action_and_dialog_use_source_sampling_rates(qtbot, tmp_pa
 
     dialog = FilterDialog(fmax=500.0, streams=normalized)
     qtbot.addWidget(dialog)
-    assert [panel.upper_edit.maximum() for panel in dialog.panels] == [10.0, 50.0]
-    assert [panel._response_sfreq for panel in dialog.panels] == [20.0, 100.0]
+    assert dialog.shared_panel.upper_edit.maximum() == 10.0
+    assert dialog.shared_panel._response_sfreq == 20.0
+    dialog.targets_page.tree.topLevelItem(0).setCheckState(0, Qt.CheckState.Unchecked)
+    dialog._show_filter_options()
+    assert dialog.shared_panel.upper_edit.maximum() == 50.0
+    assert dialog.shared_panel._response_sfreq == 100.0
 
     path = tmp_path / "native.xdf"
     path.write_bytes(b"x")
