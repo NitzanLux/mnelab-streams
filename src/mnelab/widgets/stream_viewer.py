@@ -3749,16 +3749,25 @@ class AnnotationStream(QFrame):
             label = self._labels[index]
             metrics = QFontMetricsF(label.textItem.font())
             display_text = description
-            if not self.wrap_text:
+            multiline = "\n" in description
+            if not self.wrap_text and not multiline:
                 display_text = metrics.elidedText(
                     description,
                     Qt.TextElideMode.ElideRight,
                     max(1, int(plot_width - 16)),
                 )
             label.setText(display_text, color=color)
-            natural_width = metrics.horizontalAdvance(display_text)
+            natural_width = max(
+                (metrics.horizontalAdvance(line) for line in display_text.splitlines()),
+                default=0.0,
+            )
             if self.wrap_text:
                 text_width = min(plot_width, max(72.0, min(360.0, natural_width)))
+            elif multiline:
+                text_width = min(
+                    plot_width,
+                    max(72.0, min(520.0, natural_width + 16.0)),
+                )
             elif self.smart_label_layout:
                 text_width = min(
                     plot_width, max(72.0, min(360.0, natural_width + 16.0))
@@ -7062,6 +7071,7 @@ class StreamViewerWindow(IndependentMainWindow):
         left = max(0, viewport_origin.x())
         right = max(0, self.scroll.width() - left - viewport.width())
         self.annotation_layout.setContentsMargins(left, 0, right, 0)
+        self.annotation_stream.setFixedWidth(max(1, self.panel_container.width()))
 
     def _set_default_annotation_dock_width(self):
         """Give the annotation dock 10% of the initial viewer width once."""

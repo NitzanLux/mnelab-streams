@@ -59,6 +59,8 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Keep the annotation timeline width aligned with the signal-panel container when
+  scrollbars or panel minimum sizes change (by [NitzanLux](https://github.com/NitzanLux))
 - Show all channels in a compact joined stream panel and allow joined panels to create
   current-window virtual visualizations (by
   [NitzanLux](https://github.com/NitzanLux))
