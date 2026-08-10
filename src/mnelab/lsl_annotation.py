@@ -13,10 +13,13 @@ MUST-level structural and hierarchy rules.
 from __future__ import annotations
 
 import json
+import importlib.util
 import math
 import re
 import uuid
+import warnings
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 SCHEMA_VERSION = "0.1.0"
 LEVELS = ("experiment", "participant", "session", "run", "block", "trial", "action")
@@ -62,6 +65,32 @@ REQUIRED_FIELDS = {
     "data",
 }
 OPTIONAL_FIELDS = {"parent_uid", "container_level", "terminal_status"}
+
+GUIDE_IMPLEMENTATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "vendor"
+    / "lsl-json-annotation-guide"
+    / "examples"
+    / "marker.py"
+)
+
+
+def _load_guide_implementation():
+    """Load the pinned guide helpers when running from a source checkout."""
+    if not GUIDE_IMPLEMENTATION_PATH.is_file():
+        return None
+    spec = importlib.util.spec_from_file_location(
+        "_mnelab_lsl_json_annotation_guide",
+        GUIDE_IMPLEMENTATION_PATH,
+    )
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_GUIDE = _load_guide_implementation()
 
 
 class AnnotationFormatError(ValueError):
@@ -160,7 +189,7 @@ def _validate_hierarchy(marker, *, strict=False):
             )
 
 
-def validate_marker(marker, *, strict=False):
+def _fallback_validate_marker(marker, *, strict=False):
     """Validate and return one decoded v0.1.0 guide marker."""
     _object(marker, "marker")
     fields = set(marker)
@@ -215,6 +244,80 @@ def validate_marker(marker, *, strict=False):
     _validate_hierarchy(marker, strict=strict)
     _reject_non_finite(marker)
     return marker
+
+
+def validate_marker(marker, *, strict=False):
+    """Validate and return one marker using the pinned guide implementation."""
+    if _GUIDE is None:
+        return _fallback_validate_marker(marker, strict=strict)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", _GUIDE.MarkerWarning)
+            _GUIDE.validate_marker(marker, strict=strict)
+    except _GUIDE.MarkerValidationError as error:
+        raise AnnotationFormatError(str(error)) from error
+    return marker
+
+
+def _fallback_format_marker(marker, *, include_uids=False):
+    """Return the guide's compact display when its checkout is unavailable."""
+    path = "/".join(
+        f"{node['level']}={node['id']}" for node in marker.get("hierarchy", ())
+    )
+    event_axis = marker.get("container_level") or marker.get("event_type", "event")
+    event_segment = (
+        f"{event_axis}={marker['event_id']}"
+        if marker.get("event_id") is not None
+        else ""
+    )
+    location = "/".join(part for part in (path, event_segment) if part)
+    sequence = marker.get("sequence_number", "?")
+    source = marker.get("source", "unknown source")
+    phase = marker.get("phase", "unknown phase")
+    event_type = marker.get("event_type", "unknown type")
+    outcome = marker.get("terminal_status")
+    lifecycle = f"{event_type}/{phase}" + (f" -> {outcome}" if outcome else "")
+    lines = [
+        f"#{sequence} {location or '(stream root)'}",
+        f"  {marker.get('event_name', '(unnamed)')} [{lifecycle}] · {source}",
+    ]
+    if include_uids:
+        lines.append(f"  event_uid: {marker.get('event_uid', '(missing)')}")
+        if marker.get("parent_uid") is not None:
+            lines.append(f"  parent_uid: {marker['parent_uid']}")
+    for node in marker.get("hierarchy", ()):
+        metadata = node.get("metadata")
+        if metadata:
+            lines.append(f"  {node['level']}={node['id']} metadata:")
+            rendered = json.dumps(
+                metadata,
+                indent=2,
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            ).splitlines()
+            lines.extend(f"    {line}" for line in rendered)
+    data = marker.get("data")
+    if data:
+        lines.append("  data:")
+        rendered = json.dumps(
+            data,
+            indent=2,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        ).splitlines()
+        lines.extend(f"    {line}" for line in rendered)
+    return "\n".join(lines)
+
+
+def format_marker(marker, *, include_uids=False):
+    """Return the guide-defined human-readable marker representation."""
+    if _GUIDE is not None:
+        return _GUIDE.format_marker(marker, include_uids=include_uids)
+    if isinstance(marker, str):
+        marker = json.loads(marker)
+    return _fallback_format_marker(marker, include_uids=include_uids)
 
 
 def parse_marker(description, prefixes=(), *, strict=True):
