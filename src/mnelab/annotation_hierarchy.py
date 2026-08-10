@@ -10,18 +10,12 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-_REQUIRED_MARKER_FIELDS = {
-    "schema_version",
-    "event_uid",
-    "event_id",
-    "event_type",
-    "event_name",
-    "phase",
-    "source",
-    "sequence_number",
-    "hierarchy",
-    "data",
-}
+from mnelab.lsl_annotation import (
+    AnnotationFormatError,
+    format_marker,
+    parse_marker,
+)
+
 _UUID_FIELDS = {"event_uid", "parent_uid", "uid"}
 
 
@@ -73,6 +67,10 @@ class HierarchicalAnnotation:
         if show_uuids:
             label += f" · uid={self.event_uid}"
         return label
+
+    def formatted_text(self, *, show_uuids=False):
+        """Return the guide-defined representation used in annotation traces."""
+        return format_marker(self.payload, include_uids=show_uuids)
 
     def searchable_text(self):
         """Return stable human-readable marker text for sidebar filtering."""
@@ -194,23 +192,8 @@ def decode_hierarchical_annotation(
     """Decode one guide-compatible marker or return ``None`` for ordinary text."""
     candidate, stream_name = _json_candidate(description, marker_streams)
     try:
-        payload = json.loads(candidate)
-    except (json.JSONDecodeError, TypeError, ValueError):
-        return None
-    if not isinstance(payload, dict) or not _REQUIRED_MARKER_FIELDS <= payload.keys():
-        return None
-    if not isinstance(payload["hierarchy"], list) or not isinstance(
-        payload["data"], dict
-    ):
-        return None
-    if payload["phase"] not in {"start", "update", "end", "instant"}:
-        return None
-    if any(
-        not isinstance(node, dict)
-        or not isinstance(node.get("level"), str)
-        or not isinstance(node.get("id"), str)
-        for node in payload["hierarchy"]
-    ):
+        payload = parse_marker(candidate, strict=False)
+    except (AnnotationFormatError, TypeError, ValueError):
         return None
     return HierarchicalAnnotation(
         annotation_index=int(annotation_index),
