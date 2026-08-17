@@ -10,7 +10,7 @@ import mne
 import numpy as np
 import pyqtgraph as pg
 import pytest
-from PySide6.QtCore import QPoint, QPointF, Qt
+from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
 from PySide6.QtGui import QColor, QTextOption, QWheelEvent
 from PySide6.QtWidgets import (
     QApplication,
@@ -272,6 +272,7 @@ def test_imu_raw_scale_and_units_are_grouped_by_sensor_family(qtbot):
             "channel_names": ["ACC X", "Gyro X"],
         }
     ]
+
     window = StreamViewerWindow(raw, streams=streams, duration=1.0)
     qtbot.addWidget(window)
     panel = window.panels[0]
@@ -282,6 +283,19 @@ def test_imu_raw_scale_and_units_are_grouped_by_sensor_family(qtbot):
     )
     assert "g/div" in panel.scale_label.toolTip()
     assert "°/s/div" in panel.scale_label.toolTip()
+
+
+def test_docked_panels_do_not_leave_surplus_space_between_rows(qtbot, viewer):
+    """Extra viewport height is placed below the final stream panel row."""
+    viewer.resize(1600, 900)
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    qtbot.waitUntil(lambda: viewer.panels[1].geometry().top() > 0)
+
+    first, second = viewer.panels
+    gap = second.geometry().top() - first.geometry().bottom() - 1
+
+    assert gap <= viewer.panel_layout.verticalSpacing() + 1
 
 
 def test_annotation_dock_cannot_float(viewer):
@@ -1286,6 +1300,29 @@ def test_annotation_wrap_menu_and_ctrl_wheel_resize_text(qtbot, raw, streams):
     assert timeline.annotation_font_size == original_size + 1
     assert timeline.plot.height() > original_height
     assert label.textItem.font().pointSize() == original_size + 1
+
+
+def test_annotation_dock_divider_realigns_marker_timeline(qtbot, viewer):
+    """Changing the annotation-dock width keeps the marker lane aligned."""
+    viewer.show()
+    qtbot.waitUntil(viewer.isVisible)
+    with patch.object(viewer, "_align_annotation_stream") as align:
+        QApplication.sendEvent(
+            viewer.annotation_dock,
+            QEvent(QEvent.Type.Resize),
+        )
+        qtbot.waitUntil(lambda: align.called)
+
+    viewer.resizeDocks(
+        [viewer.annotation_dock],
+        [max(180, viewer.annotation_dock.width() + 80)],
+        Qt.Orientation.Horizontal,
+    )
+
+    qtbot.waitUntil(
+        lambda: viewer.annotation_stream.width() == viewer.panel_container.width()
+    )
+    assert viewer.annotation_layout.contentsMargins().left() >= 0
 
 
 def test_overlapping_marker_text_is_packed_into_chronological_rows(qtbot, raw, streams):
