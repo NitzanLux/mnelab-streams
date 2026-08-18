@@ -63,6 +63,12 @@
   [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Keep unused stream-viewer height below the final panel row instead of leaving blank
+  gaps between docked stream panels (by [NitzanLux](https://github.com/NitzanLux))
+- Keep guide-format JSON annotations compact in the timeline when the annotation
+  guide formatter is unavailable (by [NitzanLux](https://github.com/NitzanLux))
+- Keep the marker timeline aligned with the signal panels while dragging the
+  annotation-dock divider (by [NitzanLux](https://github.com/NitzanLux))
 - Keep the annotation timeline width aligned with the signal-panel container when
   scrollbars or panel minimum sizes change (by [NitzanLux](https://github.com/NitzanLux))
 - Show all channels in a compact joined stream panel and allow joined panels to create

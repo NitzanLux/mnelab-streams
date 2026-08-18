@@ -77,6 +77,7 @@ from mnelab.annotation_hierarchy import (
 )
 from mnelab.viewer_config import VIEWER_CONFIG
 from mnelab.widgets.channel_display import ChannelDisplayDialog
+from mnelab.widgets.flow_layout import FlowLayout
 from mnelab.widgets.stream_display import StreamDisplayPropertiesDialog
 from mnelab.widgets.viewer_controls import AnnotationSidebar
 from mnelab.widgets.viewer_layout import (
@@ -1569,7 +1570,9 @@ class StreamPanel(QFrame):
         outer.setSpacing(4)
 
         self.header_widget = QWidget()
-        header = QHBoxLayout(self.header_widget)
+        # the header wraps instead of pinning a panel to the combined width of
+        # its controls, so panels shrink when the viewer gets narrower
+        header = FlowLayout(self.header_widget)
         self.header_layout = header
         header.setContentsMargins(0, 0, 0, 0)
         self.drag_handle = StreamDragHandle(self)
@@ -1610,7 +1613,7 @@ class StreamPanel(QFrame):
         self.next_page_button.setToolTip("Next channel page")
         self.next_page_button.clicked.connect(self.next_page)
         header.addWidget(self.next_page_button)
-        header.addStretch()
+        header.add_stretch()
         self.unit_label = QLabel("Unit:")
         header.addWidget(self.unit_label)
         self.unit_combo = QComboBox()
@@ -1790,6 +1793,10 @@ class StreamPanel(QFrame):
         self._size_hint_chrome_height = max(
             0, super().sizeHint().height() - self._plot_height
         )
+        # the height the header needs while every control still fits on one row
+        self._header_row_height = self.header_layout.heightForWidth(QT_WIDGET_SIZE_MAX)
+        self._header_extra_height = 0
+        self._set_docked_height()
 
     def sizeHint(self):
         """Return a panel height that follows its independently resized plot."""
@@ -1797,7 +1804,40 @@ class StreamPanel(QFrame):
         chrome_height = getattr(self, "_size_hint_chrome_height", None)
         if chrome_height is None:
             return hint
-        return QSize(hint.width(), chrome_height + self._plot_height)
+        extra_height = getattr(self, "_header_extra_height", 0)
+        return QSize(hint.width(), chrome_height + extra_height + self._plot_height)
+
+    def _set_docked_height(self):
+        """Keep an attached panel's frame height in sync with its plot height."""
+        if not self._floating:
+            self.setFixedHeight(self.sizeHint().height())
+
+    def resizeEvent(self, event):
+        """Keep the panel tall enough for a header that wrapped onto more rows."""
+        super().resizeEvent(event)
+        self._sync_header_height()
+
+    def _sync_header_height(self):
+        """Track the height a wrapped header needs beyond its single row."""
+        row_height = getattr(self, "_header_row_height", None)
+        if row_height is None:
+            return
+        width = self.header_widget.width()
+        if width <= 0:
+            return
+        extra = max(0, self.header_layout.heightForWidth(width) - row_height)
+        if extra == self._header_extra_height:
+            return
+        self._header_extra_height = extra
+        if self.layout() is not None:
+            self.layout().invalidate()
+        self._set_docked_height()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            parent_layout = self.parentWidget().layout()
+            if parent_layout is not None:
+                parent_layout.invalidate()
+            self.parentWidget().updateGeometry()
 
     @property
     def title(self):
@@ -1903,6 +1943,7 @@ class StreamPanel(QFrame):
         self.tight_display_controls.setVisible(enabled)
         self.header_widget.updateGeometry()
         self.updateGeometry()
+        self._sync_header_height()
 
     def set_floating(self, floating):
         """Update controls for the panel's attached or floating state."""
@@ -1912,6 +1953,9 @@ class StreamPanel(QFrame):
             QSizePolicy.Policy.Expanding if floating else QSizePolicy.Policy.Fixed
         )
         self.setSizePolicy(QSizePolicy.Policy.Expanding, vertical_policy)
+        if floating:
+            self.setMinimumHeight(0)
+            self.setMaximumHeight(QT_WIDGET_SIZE_MAX)
         for widget in (self.channel_list, self.plot):
             if floating:
                 widget.setMinimumHeight(MIN_STREAM_PLOT_HEIGHT)
@@ -1922,6 +1966,7 @@ class StreamPanel(QFrame):
                 )
             else:
                 widget.setFixedHeight(self._plot_height)
+        self._set_docked_height()
         self.resize_handle.setVisible(not floating)
         self.drag_handle.setEnabled(not floating)
         self.drag_handle.setToolTip(
@@ -2244,6 +2289,7 @@ class StreamPanel(QFrame):
         if not self._floating:
             self.channel_list.setFixedHeight(height)
             self.plot.setFixedHeight(height)
+            self._set_docked_height()
         if self.layout() is not None:
             self.layout().invalidate()
         self.updateGeometry()
@@ -3578,6 +3624,7 @@ class AnnotationStream(QFrame):
 
         label_gutter = QWidget()
         label_gutter.setFixedWidth(CHANNEL_LIST_WIDTH)
+        self._label_gutter = label_gutter
         label_layout = QVBoxLayout(label_gutter)
         label_layout.setContentsMargins(0, 0, 0, 18)
         label_layout.setSpacing(2)
@@ -3615,6 +3662,9 @@ class AnnotationStream(QFrame):
         self.plot.getPlotItem().setClipToView(True)
         self.plot.scene().sigMouseClicked.connect(self._mouse_clicked)
         self.plot.viewport().installEventFilter(self)
+        self._label_gutter.installEventFilter(self)
+        self.plot.installEventFilter(self)
+        self.installEventFilter(self)
         self.plot.setToolTip(
             "Left-click a marker to select it, or an empty lane to choose its rows; "
             "Ctrl+wheel changes marker text size"
@@ -4076,7 +4126,7 @@ class AnnotationStream(QFrame):
     def eventFilter(self, watched, event):
         """Use Ctrl+wheel over the marker timeline to resize its labels."""
         if (
-            watched is self.plot.viewport()
+            watched in (self, self._label_gutter, self.plot, self.plot.viewport())
             and event.type() == QEvent.Type.Wheel
             and event.modifiers() & Qt.KeyboardModifier.ControlModifier
         ):
@@ -4725,6 +4775,10 @@ class StreamViewerWindow(IndependentMainWindow):
             | QDockWidget.DockWidgetFeature.DockWidgetMovable
         )
         self.annotation_dock.setWidget(self.annotation_sidebar)
+        self.annotation_dock.installEventFilter(self)
+        self.annotation_dock.dockLocationChanged.connect(
+            lambda _area: QTimer.singleShot(0, self._align_annotation_stream)
+        )
         self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.annotation_dock)
         self._annotation_dock_sized = False
 
@@ -4733,7 +4787,9 @@ class StreamViewerWindow(IndependentMainWindow):
         layout.setContentsMargins(6, 6, 6, 6)
 
         self.layout_controls = QWidget()
-        controls = QHBoxLayout(self.layout_controls)
+        # a wrapping row keeps every button reachable without forcing the whole
+        # window to stay as wide as the buttons laid out side by side
+        controls = FlowLayout(self.layout_controls)
         controls.setContentsMargins(0, 0, 0, 0)
         self.join_button = QPushButton("Join Selected")
         self.join_button.setToolTip("Put the selected source panels in one display")
@@ -4799,7 +4855,7 @@ class StreamViewerWindow(IndependentMainWindow):
         controls.addWidget(self.activation_map_button)
         controls.addWidget(self.annotation_map_button)
         controls.addWidget(self.annotations_button)
-        controls.addStretch()
+        controls.add_stretch()
         layout.addWidget(self.layout_controls)
 
         self.trace_workspace = QWidget()
@@ -4843,6 +4899,7 @@ class StreamViewerWindow(IndependentMainWindow):
         self.panel_layout = QGridLayout(self.panel_container)
         self.panel_layout.setContentsMargins(0, 0, 0, 0)
         self.panel_layout.setSpacing(6)
+        self.panel_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
         self.scroll.setWidget(self.panel_container)
         self.scroll.viewport().installEventFilter(self)
         self.scroll.verticalScrollBar().valueChanged.connect(
@@ -4850,6 +4907,9 @@ class StreamViewerWindow(IndependentMainWindow):
         )
         self.scroll.horizontalScrollBar().valueChanged.connect(
             self._schedule_viewport_refresh
+        )
+        self.scroll.horizontalScrollBar().valueChanged.connect(
+            lambda _value: QTimer.singleShot(0, self._align_annotation_stream)
         )
         self.scroll.verticalScrollBar().rangeChanged.connect(
             lambda _minimum, _maximum: QTimer.singleShot(
@@ -4860,6 +4920,12 @@ class StreamViewerWindow(IndependentMainWindow):
         layout.addWidget(self.trace_workspace, 1)
 
         self.annotation_container = QWidget()
+        # the marker lane is as wide as the panels it aligns with, which can exceed
+        # the visible area; an ignored horizontal policy keeps that width from
+        # becoming a minimum width for the viewer window and its docks
+        self.annotation_container.setSizePolicy(
+            QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred
+        )
         self.annotation_layout = QHBoxLayout(self.annotation_container)
         self.annotation_layout.setContentsMargins(0, 0, 0, 0)
         self.annotation_layout.setSpacing(0)
@@ -7062,6 +7128,13 @@ class StreamViewerWindow(IndependentMainWindow):
         """Realign when a scrollbar changes the signal viewport width."""
         if watched is self.scroll.viewport() and event.type() == QEvent.Type.Resize:
             QTimer.singleShot(0, self._align_annotation_stream)
+        elif watched is self.annotation_dock and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Move,
+        ):
+            # Dragging the dock divider changes the central area after the dock's
+            # geometry event. Defer until Qt has resized the scroll viewport.
+            QTimer.singleShot(0, self._align_annotation_stream)
         return super().eventFilter(watched, event)
 
     def _align_annotation_stream(self):
@@ -7070,7 +7143,10 @@ class StreamViewerWindow(IndependentMainWindow):
         viewport_origin = viewport.mapTo(self.scroll, QPoint(0, 0))
         left = max(0, viewport_origin.x())
         right = max(0, self.scroll.width() - left - viewport.width())
-        self.annotation_layout.setContentsMargins(left, 0, right, 0)
+        # follow the panels when they scroll horizontally: the lane spans the whole
+        # panel container, so a scrolled container needs the same negative offset
+        offset = self.scroll.horizontalScrollBar().value()
+        self.annotation_layout.setContentsMargins(left - offset, 0, right, 0)
         self.annotation_stream.setFixedWidth(max(1, self.panel_container.width()))
 
     def _set_default_annotation_dock_width(self):

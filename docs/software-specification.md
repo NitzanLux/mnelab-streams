@@ -648,6 +648,9 @@ Users may select panels and:
 - drag a panel's lower boundary to resize its plot and channel list together; and
 - float a panel into a separate window by button or outward drag, then redock it.
 
+When the viewer is taller than its docked panels, any unused vertical space shall
+follow the final panel row rather than separating panel rows.
+
 Detached panels remain synchronized with navigation, bad channels, events,
 annotations, and display settings. Closing a detached panel window shall redock it
 unless the parent viewer itself is closing. A detached panel's trace body shall expand
@@ -765,6 +768,9 @@ modifies, filters, or writes the underlying MNE data.
 - Annotation descriptions shall appear only in the dedicated annotation lane. They
   shall remain horizontal, wrap to the available region width, and be clipped within
   the plot rather than extending the window width.
+- Ctrl+wheel over any part of the marker lane shall change its label text size and
+  proportionally resize the lane. Resizing or moving the annotation-dock divider shall
+  keep that lane horizontally aligned with the signal-panel viewport.
 - Global annotation colors from application settings shall be honored; otherwise the
   viewer uses its default annotation color.
 

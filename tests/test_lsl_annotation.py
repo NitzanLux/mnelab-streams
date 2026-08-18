@@ -89,11 +89,14 @@ def test_pretty_format_shows_uids_on_one_line(marker):
     assert "parent=55555555-5555-4555-8555-555555555555" in rendered
 
 
-def test_format_marker_without_guide_falls_back_to_marker_json(marker, monkeypatch):
+def test_format_marker_without_guide_stays_compact(marker, monkeypatch):
     monkeypatch.setattr(lsl_annotation, "_GUIDE", None)
 
     assert lsl_annotation.validate_marker(marker) is marker
-    assert json.loads(lsl_annotation.format_marker(marker)) == marker
+    rendered = lsl_annotation.format_marker(marker)
+    assert rendered.startswith("#4 session=ses-003/trial=trial-007/cue=cue-001\n")
+    assert "data: cue_value=go" in rendered
+    assert "event_uid" not in rendered
 
 
 def test_viewer_prefix_is_removed_before_json_validation(marker):
