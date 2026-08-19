@@ -1,4 +1,4 @@
-## [UNRELEASED] · YYYY-MM-DD
+## [0.1.0] · 2026-08-19
 ### ✨ Added
 - Expose exact per-stream display scale selection beside the raw-viewer gain control
   (by [NitzanLux](https://github.com/NitzanLux))

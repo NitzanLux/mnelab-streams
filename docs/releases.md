@@ -8,11 +8,25 @@ standalone builds. The same information is published on the
 If you installed MNELAB Streams from source, the same history is available in the
 application under *Help – What's New*.
 
-## Unreleased
+## 0.1.0 · 2026-08-19
 
-Changes already merged into `main` that are not part of a released version yet.
+| Platform | Download |
+| --- | --- |
+| Windows 10/11 (x64) | [MNELAB-Streams-0.1.0.exe](https://github.com/NitzanLux/mnelab-streams/releases/download/v0.1.0/MNELAB-Streams-0.1.0.exe) (installer) |
+| macOS (Apple Silicon) | [MNELAB-Streams-0.1.0-arm64.dmg](https://github.com/NitzanLux/mnelab-streams/releases/download/v0.1.0/MNELAB-Streams-0.1.0-arm64.dmg) (disk image) |
+| macOS (Intel) | [MNELAB-Streams-0.1.0-x86_64.dmg](https://github.com/NitzanLux/mnelab-streams/releases/download/v0.1.0/MNELAB-Streams-0.1.0-x86_64.dmg) (disk image) |
+| Linux (x86_64) | [MNELAB-Streams-0.1.0-linux-x86_64.tar.gz](https://github.com/NitzanLux/mnelab-streams/releases/download/v0.1.0/MNELAB-Streams-0.1.0-linux-x86_64.tar.gz) (archive) |
+
+!!! note
+    The macOS and Windows builds are unsigned. macOS users may need to allow the app under *System Settings – Privacy & Security*, and Windows may show a SmartScreen warning on first launch.
 
 ### ✨ Added
+- Expose exact per-stream display scale selection beside the raw-viewer gain control (by [NitzanLux](https://github.com/NitzanLux))
+- List all filters applied to a dataset in the main-window information panel (by [NitzanLux](https://github.com/NitzanLux))
+- Add context-updated PSD, spectrogram, RMS, and common-average-reference virtual streams to the trace viewer, with PSD respecting the selected stream, retaining its complete controls, and joining RMS and CAR in supporting pop-out windows directly alongside the recorded streams (by [NitzanLux](https://github.com/NitzanLux))
+- Allow native XDF recordings appended from the main window to be ordered automatically by their recording times (by [NitzanLux](https://github.com/NitzanLux))
+- Calculate PSD independently on every native-rate XDF stream without resampling (by [NitzanLux](https://github.com/NitzanLux))
+- Add an XDF-only multi-file picker for selecting recordings to merge (by [NitzanLux](https://github.com/NitzanLux))
 - Add a Help – What's New dialog, a generated documentation releases page, and changelog-derived GitHub release notes, all sharing one changelog parser (by [NitzanLux](https://github.com/NitzanLux))
 - Build standalone packages for Linux and Intel macOS in addition to Windows and Apple Silicon macOS, and name each artifact after its architecture (by [NitzanLux](https://github.com/NitzanLux))
 - Add a last-run-only crash log for source and packaged application failures (by [NitzanLux](https://github.com/NitzanLux))
@@ -26,16 +40,42 @@ Changes already merged into `main` that are not part of a released version yet.
 - Add an optional stream-viewer crosshair, Shift-drag measurement statistics showing time and value differences, and keyboard navigation through time-window history (by [NitzanLux](https://github.com/NitzanLux))
 - Add marker-stream filtering and visibility controls, wrapped annotation labels, and Ctrl+wheel annotation text sizing in the stream viewer
 - Add support for the hierarchical LSL JSON annotation scheme with a collapsible browser, optional UUID display, and a synchronized annotation lifecycle map; keep the annotation guide updateable as a Git submodule
+- List data sets that cannot be appended together with the reason they mismatch, and allow appending anyway when only bad channels, filter settings, or calibration factors differ (by [NitzanLux](https://github.com/NitzanLux))
+- Append already-loaded native multi-rate XDF recordings from the Append Data dialog, matching streams by name, keeping each at its own sampling rate, and optionally filling unrecorded streams with NaN (by [NitzanLux](https://github.com/NitzanLux))
+
+### 🌀 Changed
+- Validate guide-format annotations independently, render them with the guide's canonical formatter alongside ordinary markers, and collapse or hide hierarchy controls when appropriate (by [NitzanLux](https://github.com/NitzanLux))
+- Render hierarchical LSL JSON markers more compactly, folding marker data and hierarchy metadata into wrapped `key=value` lines instead of indented JSON blocks, and delegate that rendering entirely to the pinned annotation guide (by [NitzanLux](https://github.com/NitzanLux))
+- Apply one shared filter configuration to all selected streams and channels (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🔧 Fixed
+- Keep unused stream-viewer height below the final panel row instead of leaving blank gaps between docked stream panels (by [NitzanLux](https://github.com/NitzanLux))
+- Keep guide-format JSON annotations compact in the timeline when the annotation guide formatter is unavailable (by [NitzanLux](https://github.com/NitzanLux))
+- Keep the marker timeline aligned with the signal panels while dragging the annotation-dock divider (by [NitzanLux](https://github.com/NitzanLux))
+- Keep the annotation timeline width aligned with the signal-panel container when scrollbars or panel minimum sizes change (by [NitzanLux](https://github.com/NitzanLux))
+- Show all channels in a compact joined stream panel and allow joined panels to create current-window virtual visualizations (by [NitzanLux](https://github.com/NitzanLux))
+- Initially collapse channels in the filter target selection (by [NitzanLux](https://github.com/NitzanLux))
+- Expose non-modal viewer and scientific-plot windows independently in desktop taskbars and window navigation while retaining owner-based cleanup (by [NitzanLux](https://github.com/NitzanLux))
+- Show the stream-viewer crosshair time guide over every trace plot (by [NitzanLux](https://github.com/NitzanLux))
+- Enable **Join Selected** for native multi-rate XDF trace panels (by [NitzanLux](https://github.com/NitzanLux))
+- Expand a detached stream panel's trace body when its window is maximized instead of leaving a large blank gap (by [NitzanLux](https://github.com/NitzanLux))
+- Combine appended regular or native XDF recordings with distinct streams into one concurrent entity without extending equal-duration recordings (by [NitzanLux](https://github.com/NitzanLux))
+- Resize the complete stream-panel body when dragging its lower boundary, preventing gray space beside a shrinking plot (by [NitzanLux](https://github.com/NitzanLux))
+- Scale XDF channels labeled in millivolts correctly during import (by [NitzanLux](https://github.com/NitzanLux))
+- Restore draggable stream boundaries for resizing individual trace panels (by [NitzanLux](https://github.com/NitzanLux))
 - Preserve native-rate EMG/IMU meaning by trusting versioned explicit timestamps and recovering legacy buffered timing from measured endpoints instead of nominal rates
 - Handle invalid files gracefully when importing bad channels ([#686](https://github.com/cbrnr/mnelab/pull/686) by [Clemens Brunner](https://github.com/cbrnr))
 - Support PSD plotting and filtering for auxiliary-only recordings, limit frequency controls to the Nyquist frequency, and clip each PSD stream to its original Nyquist limit (by [NitzanLux](https://github.com/NitzanLux))
 - Keep the annotation timeline aligned with the signal panels when the stream viewer's scrollbar appears or disappears (by [NitzanLux](https://github.com/NitzanLux))
 - Keep open source/sEMG plots and activation-map windows attached to the filtered dataset, and recompute activation from the filtered samples
 - Prevent missing XDF samples from contaminating the remainder of a channel during IIR and notch filtering by resetting filter state at every non-finite gap
+- Match channel order before appending data sets, which previously concatenated samples of differently ordered channels onto each other (by [NitzanLux](https://github.com/NitzanLux))
 
 ### 🌀 Changed
+- Increase Plot Traces PSDs to a 16,384-point FFT, add an in-window frequency-bin control, and centralize safe viewer and scientific-plot defaults in a validated YAML configuration (by [NitzanLux](https://github.com/NitzanLux))
+- Increase main-window PSD frequency-bin density with a 16,384-point FFT (by [NitzanLux](https://github.com/NitzanLux))
+- Match the main-window PSD palette to raw traces without recoloring remaining channels when one is hidden (by [NitzanLux](https://github.com/NitzanLux))
+- Double-clicking a stream-viewer channel now toggles its isolation, hiding or restoring its visible peers (by [NitzanLux](https://github.com/NitzanLux))
 - Rename the independent distribution and application to MNELAB Streams, retain the upstream BSD license and import namespace, and separate fork metadata and release identity from upstream (by [NitzanLux](https://github.com/NitzanLux))
 - Add main-window stream splitting and property editing, and show source-stream properties in the dataset information view (by [NitzanLux](https://github.com/NitzanLux))
 - Improve the stream viewer with independent lane fitting, per-channel information and current-window statistics, labeled trace annotations, drag-to-swap panels, and retained metadata for removed sources (by [NitzanLux](https://github.com/NitzanLux))
